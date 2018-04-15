@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Hue VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2013-05-10 11:59-0700\n"
+"POT-Creation-Date: 2018-03-07 10:04-0800\n"
 "PO-Revision-Date: 2013-10-28 10:31-0700\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: en <LL@li.org>\n"
@@ -17,25 +17,45 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 0.9.6\n"
 
-#: src/impala/conf.py:26
-msgid "Host of the Impala Server."
+#: src/libsolr/api.py:369 src/libsolr/api.py:381 src/libsolr/api.py:392
+#: src/libsolr/api.py:403 src/libsolr/api.py:414 src/libsolr/api.py:428
+#: src/libsolr/api.py:447 src/libsolr/api.py:459 src/libsolr/api.py:474
+#: src/libsolr/api.py:500 src/libsolr/api.py:512 src/libsolr/api.py:526
+#: src/libsolr/api.py:549 src/libsolr/api.py:567 src/libsolr/api.py:584
+#: src/libsolr/api.py:603 src/libsolr/api.py:623 src/libsolr/api.py:633
+#: src/libsolr/api.py:643 src/libsolr/api.py:654 src/libsolr/api.py:665
+#: src/libsolr/api.py:678 src/libsolr/api.py:688 src/libsolr/api.py:707
+#: src/libsolr/api.py:729 src/libsolr/api.py:745 src/libsolr/api.py:757
+#: src/libsolr/api.py:776 src/libsolr/api.py:788 src/libsolr/api.py:803
+#: src/libsolr/api.py:841 src/libsolr/api.py:863 src/libsolr/api.py:882
+#: src/libsolr/api.py:1064
+msgid "Error while accessing Solr"
 msgstr ""
 
-#: src/impala/conf.py:31
-msgid "Port of the Impala Server."
+#: src/libsolr/api.py:496
+#, python-format
+msgid "Collection could not be created: %(failure)s"
 msgstr ""
 
-#: src/impala/conf.py:37
+#: src/libsolr/api.py:563
+#, python-format
+msgid "Could not create or edit alias: %s"
+msgstr ""
+
+#: src/libsolr/api.py:580
+#, python-format
 msgid ""
-"Beeswax or Hive Server 2 Thrift API used. Choices are: 'beeswax' or "
-"'hiveserver2'."
+"Could not delete alias. Check response:\n"
+"%s"
 msgstr ""
 
-#: src/impala/conf.py:42
-msgid "Kerberos principal name for Impala. Typically 'impala/hostname.foo.com'."
+#: src/libsolr/conf.py:33
+msgid ""
+"In secure mode (HTTPS), if Solr SSL certificates have to be verified "
+"against certificate authority"
 msgstr ""
 
-#: src/impala/views.py:35
-msgid "A POST request is required."
+#: src/libsolr/conf.py:55
+msgid "Default path to Solr in ZooKeeper"
 msgstr ""
 

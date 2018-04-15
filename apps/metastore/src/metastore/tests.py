@@ -20,6 +20,7 @@ import json
 import logging
 import urllib
 
+from nose.plugins.skip import SkipTest
 from nose.tools import assert_true, assert_equal, assert_false
 
 from django.utils.encoding import smart_str
@@ -30,7 +31,7 @@ from desktop.lib.django_test_util import make_logged_in_client, assert_equal_mod
 from desktop.lib.test_utils import add_permission, grant_access
 from hadoop.pseudo_hdfs4 import is_live_cluster
 from metastore import parser
-from useradmin.models import HuePermission, GroupPermission, group_has_permission
+from useradmin.models import HuePermission, GroupPermission
 
 from beeswax.conf import LIST_PARTITIONS_LIMIT
 from beeswax.views import collapse_whitespace
@@ -168,9 +169,9 @@ class TestMetastoreWithHadoop(BeeswaxSampleProvider):
     data = json.loads(response.content)
     partition_columns = [col for cols in data['partition_values_json'] for col in cols['columns']]
     assert_true("baz_one" in partition_columns)
-    assert_true("boom_two" in partition_columns)
+    assert_true('12345' in partition_columns, partition_columns)
     assert_true("baz_foo" in partition_columns)
-    assert_true("boom_bar" in partition_columns)
+    assert_true('67890' in partition_columns)
 
     # Not partitioned
     response = self.client.get("/metastore/table/%s/test/partitions" % self.db_name, follow=True)
@@ -195,7 +196,10 @@ class TestMetastoreWithHadoop(BeeswaxSampleProvider):
       finish()
 
   def test_read_partitions(self):
-    partition_spec = "baz='baz_one',boom='boom_two'"
+    if not is_live_cluster():
+      raise SkipTest
+
+    partition_spec = "baz='baz_one',boom=12345"
     response = self.client.get("/metastore/table/%s/test_partitions/partitions/%s/read" % (self.db_name, partition_spec), follow=True)
     response = self.client.get(reverse("beeswax:api_watch_query_refresh_json", kwargs={'id': response.context['query'].id}), follow=True)
     response = wait_for_query_to_finish(self.client, response, max=30.0)
@@ -203,32 +207,34 @@ class TestMetastoreWithHadoop(BeeswaxSampleProvider):
     assert_true(len(results['results']) > 0, results)
 
   def test_browse_partition(self):
-    partition_spec = "baz='baz_one',boom='boom_two'"
+    partition_spec = "baz='baz_one',boom=12345"
     response = self.client.get("/metastore/table/%s/test_partitions/partitions/%s/browse" % (self.db_name, partition_spec), follow=True)
     if is_live_cluster():
-      path = '/user/hive/warehouse/%s.db/test_partitions/baz=baz_one/boom=boom_two' % self.db_name
+      path = '/user/hive/warehouse/%s.db/test_partitions/baz=baz_one/boom=12345' % self.db_name
     else:
-      path = '/user/hive/warehouse/test_partitions/baz=baz_one/boom=boom_two'
+      path = '/user/hive/warehouse/test_partitions/baz=baz_one/boom=12345'
     filebrowser_path = urllib.unquote(reverse("filebrowser.views.view", kwargs={'path': path}))
     assert_equal(response.request['PATH_INFO'], filebrowser_path)
 
   def test_drop_partition(self):
     # Create partition first
-    partition_spec = "baz='baz_drop',boom='boom_drop'"
+    partition_spec = "baz='baz_drop',boom=54321"
     hql = 'ALTER TABLE `%s`.`test_partitions` ADD IF NOT EXISTS PARTITION (%s);' % (self.db_name, partition_spec)
     resp = _make_query(self.client, hql, database=self.db_name)
     wait_for_query_to_finish(self.client, resp, max=30.0)
 
     # Assert partition exists
-    response = self.client.get("/metastore/table/%s/test_partitions/partitions" % self.db_name)
-    assert_true("baz_drop" in response.content)
+    response = self.client.get("/metastore/table/%s/test_partitions/partitions" % self.db_name, {'format': 'json'})
+    data = json.loads(response.content)
+    assert_true("baz_drop" in [part['columns'][0] for part in data['partition_values_json']], data)
 
     # Drop partition
     self.client.post("/metastore/table/%s/test_partitions/partitions/drop" % self.db_name, {'partition_selection': [partition_spec]}, follow=True)
     query = QueryHistory.objects.latest('id')
     assert_equal_mod_whitespace("ALTER TABLE `%s`.`test_partitions` DROP IF EXISTS PARTITION (%s) PURGE" % (self.db_name, partition_spec), query.query)
-    response = self.client.get("/metastore/table/%s/test_partitions/partitions" % self.db_name)
-    assert_false("baz_drop" in response.content)
+    response = self.client.get("/metastore/table/%s/test_partitions/partitions" % self.db_name, {'format': 'json'})
+    data = json.loads(response.content)
+    assert_false("baz_drop" in [part['columns'][0] for part in data['partition_values_json']], data)
 
   def test_drop_multi_tables(self):
     hql = """
@@ -245,6 +251,28 @@ class TestMetastoreWithHadoop(BeeswaxSampleProvider):
     resp = self.client.post('/metastore/tables/drop/%s' % self.db_name, {u'table_selection': [u'test_drop_1', u'test_drop_2', u'test_drop_3']})
     assert_equal(resp.status_code, 302)
 
+  def test_drop_multi_tables_with_skip_trash(self):
+    hql = """
+      CREATE TABLE test_drop_multi_tables_with_skip_trash_1 (a int);
+      CREATE TABLE test_drop_multi_tables_with_skip_trash_2 (a int);
+      CREATE TABLE test_drop_multi_tables_with_skip_trash_3 (a int);
+    """
+    resp = _make_query(self.client, hql, database=self.db_name)
+    resp = wait_for_query_to_finish(self.client, resp, max=30.0)
+
+    # Drop them
+    resp = self.client.get('/metastore/tables/drop/%s' % self.db_name, follow=True)
+    assert_true('want to delete' in resp.content, resp.content)
+    resp = self.client.post('/metastore/tables/drop/%s' % self.db_name, {u'table_selection': [u'test_drop_multi_tables_with_skip_trash_1', u'test_drop_multi_tables_with_skip_trash_2', u'test_drop_multi_tables_with_skip_trash_3'], u'skip_trash': u'on'})
+    assert_equal(resp.status_code, 302)
+
+    response = self.client.get("/metastore/tables/%s?format=json" % self.db_name)
+    assert_equal(200, response.status_code)
+    data = json.loads(response.content)
+    assert_false('test_drop_multi_tables_with_skip_trash_1' in data['tables'])
+    assert_false('test_drop_multi_tables_with_skip_trash_2' in data['tables'])
+    assert_false('test_drop_multi_tables_with_skip_trash_3' in data['tables'])
+
   def test_drop_multi_databases(self):
     db1 = '%s_test_drop_1' % self.db_name
     db2 = '%s_test_drop_2' % self.db_name
@@ -258,6 +286,12 @@ class TestMetastoreWithHadoop(BeeswaxSampleProvider):
       """ % {'db1': db1, 'db2': db2, 'db3': db3}
       resp = _make_query(self.client, hql)
       resp = wait_for_query_to_finish(self.client, resp, max=30.0)
+
+      # Add a table to db1
+      hql = "CREATE TABLE " + "`" + db1 + "`." + "`test_drop_1` (a int);"
+      resp = _make_query(self.client, hql, database=db1)
+      resp = wait_for_query_to_finish(self.client, resp, max=30.0)
+      assert_equal(resp.status_code, 200)
 
       # Drop them
       resp = self.client.get('/metastore/databases/drop', follow=True)
@@ -281,11 +315,15 @@ class TestMetastoreWithHadoop(BeeswaxSampleProvider):
     resp = self.client.get("/metastore/table/%s/test/load" % self.db_name, follow=True)
     assert_true('Path' in resp.content)
 
-    data_path = '%(prefix)s/tmp/foo' % {'prefix': self.cluster.fs_prefix}
+    data_dir = '%(prefix)s/tmp' % {'prefix': self.cluster.fs_prefix}
+    data_path = data_dir + '/foo'
+    self.cluster.fs.mkdir(data_dir)
+    self.cluster.fs.create(data_path, data='123')
 
     # Try the submission
-    self.client.post("/metastore/table/%s/test/load" % self.db_name, {'path': data_path, 'overwrite': True}, follow=True)
-    query = QueryHistory.objects.latest('id')
+    response = self.client.post("/metastore/table/%s/test/load" % self.db_name, {'path': data_path, 'overwrite': True}, follow=True)
+    data = json.loads(response.content)
+    query = QueryHistory.objects.get(id=data['query_history_id'])
 
     assert_equal_mod_whitespace("LOAD DATA INPATH '%(data_path)s' OVERWRITE INTO TABLE `%(db)s`.`test`" % {'data_path': data_path, 'db': self.db_name}, query.query)
 
@@ -294,9 +332,9 @@ class TestMetastoreWithHadoop(BeeswaxSampleProvider):
     assert_equal_mod_whitespace("LOAD DATA INPATH '%(data_path)s' INTO TABLE `%(db)s`.`test`" % {'data_path': data_path, 'db': self.db_name}, query.query)
 
     # Try it with partitions
-    resp = self.client.post("/metastore/table/%s/test_partitions/load" % self.db_name, {'path': data_path, 'partition_0': "alpha", 'partition_1': "beta"}, follow=True)
+    resp = self.client.post("/metastore/table/%s/test_partitions/load" % self.db_name, {'path': data_path, 'partition_0': "alpha", 'partition_1': 12345}, follow=True)
     query = QueryHistory.objects.latest('id')
-    assert_equal_mod_whitespace(query.query, "LOAD DATA INPATH '%(data_path)s' INTO TABLE `%(db)s`.`test_partitions` PARTITION (baz='alpha', boom='beta')" % {'data_path': data_path, 'db': self.db_name})
+    assert_equal_mod_whitespace(query.query, "LOAD DATA INPATH '%(data_path)s' INTO TABLE `%(db)s`.`test_partitions` PARTITION (baz='alpha', boom='12345')" % {'data_path': data_path, 'db': self.db_name})
 
 
   def test_has_write_access_frontend(self):
@@ -347,6 +385,21 @@ class TestMetastoreWithHadoop(BeeswaxSampleProvider):
     GroupPermission.objects.get_or_create(group=group, hue_permission=perm)
 
     check(client, [200, 302]) # Ok
+
+
+  def test_alter_database(self):
+    resp = self.client.post(reverse("metastore:get_database_metadata", kwargs={'database': self.db_name}))
+    json_resp = json.loads(resp.content)
+    assert_true('data' in json_resp, json_resp)
+    assert_true('parameters' in json_resp['data'], json_resp)
+    assert_false('message=After Alter' in json_resp['data']['parameters'], json_resp)
+
+    # Alter message
+    resp = self.client.post(reverse("metastore:alter_database", kwargs={'database': self.db_name}),
+                            {'properties': json.dumps({'message': 'After Alter'})})
+    json_resp = json.loads(resp.content)
+    assert_equal(0, json_resp['status'], json_resp)
+    assert_equal('{message=After Alter}', json_resp['data']['parameters'], json_resp)
 
 
   def test_alter_table(self):
@@ -458,5 +511,13 @@ class TestParser(object):
     type = 'array<struct<name:string,age:int>>'
     comment = 'test_parse_nested'
     column = {'name': name, 'type': 'array', 'comment': comment, 'item': {'type': 'struct', 'fields': [{'name': 'name', 'type': 'string'}, {'name': 'age', 'type': 'int'}]}}
+    parse_tree = parser.parse_column(name, type, comment)
+    assert_equal(parse_tree, column)
+
+  def test_parse_nested_with_array(self):
+    name = 'nested'
+    type = 'struct<fieldname1:bigint,fieldname2:int,fieldname3:int,fieldname4:array<bigint>,fieldname5:bigint,fieldname6:array<struct<array_elem:string>>,fieldname7:string>'
+    comment = 'test_parse_nested'
+    column = {'comment': 'test_parse_nested', 'fields': [{'type': 'bigint', 'name': 'fieldname1'}, {'type': 'int', 'name': 'fieldname2'}, {'type': 'int', 'name': 'fieldname3'}, {'item': {'type': 'bigint'}, 'type': 'array', 'name': 'fieldname4'}, {'type': 'bigint', 'name': 'fieldname5'}, {'item': {'fields': [{'type': 'string', 'name': 'array_elem'}], 'type': 'struct'}, 'type': 'array', 'name': 'fieldname6'}, {'type': 'string', 'name': 'fieldname7'}], 'type': 'struct', 'name': 'nested'}
     parse_tree = parser.parse_column(name, type, comment)
     assert_equal(parse_tree, column)

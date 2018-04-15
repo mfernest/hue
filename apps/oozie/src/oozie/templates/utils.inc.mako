@@ -125,7 +125,7 @@
 
 
 <%def name="display_conf(configs, id=None)">
-  <table class="table table-condensed table-striped"
+  <table class="table table-condensed"
     % if id is not None:
       id="${ id }"
     % endif
@@ -141,7 +141,7 @@
         <tr>
           <td>${ name }</td>
           <td>
-            ${ guess_hdfs_link(name, str(value)) }
+            ${ guess_hdfs_link(name, unicode(value)) }
           </td>
         </tr>
       % endfor
@@ -324,10 +324,10 @@
 
 
 <%def name="path_chooser_libs(select_folder=False, skip_init=False)">
-  <div id="chooseFile" class="modal hide fade">
+  <div id="chooseFileModal" class="modal hide fade">
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3>${ _('Choose a') } ${ if_true(select_folder, _('folder'), _('file')) }</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 class="modal-title">${ _('Choose a') } ${ if_true(select_folder, _('folder'), _('file')) }</h2>
     </div>
     <div class="modal-body">
       <div id="fileChooserModal">
@@ -337,7 +337,7 @@
     </div>
   </div>
 
-  <script type="text/javascript" charset="utf-8">
+  <script type="text/javascript">
     $(document).ready(function(){
 
       $("*").on("focusin", false); //fixes an infinite loop on Firefox
@@ -360,7 +360,7 @@
         // check if it's a relative path
         var pathAddition = "";
         if ($.trim(inputElement.val()) != "") {
-          var checkPath = "/filebrowser/chooser=${ workflow.deployment_dir }" + "/" + inputElement.val();
+          var checkPath = "/filebrowser/view=${ workflow.deployment_dir }" + "/" + inputElement.val();
           $.getJSON(checkPath, function (data) {
             pathAddition = "${ workflow.deployment_dir }/";
             callFileChooser();
@@ -378,12 +378,12 @@
             onFolderChoose:function (filePath) {
               handleChoice(filePath);
               if (selectFolder) {
-                $("#chooseFile").modal("hide");
+                $("#chooseFileModal").modal("hide");
               }
             },
             onFileChoose:function (filePath) {
               handleChoice(filePath);
-              $("#chooseFile").modal("hide");
+              $("#chooseFileModal").modal("hide");
             },
             createFolder:false,
             uploadFile:true,
@@ -391,7 +391,7 @@
             errorRedirectPath:"",
             forceRefresh:true
           });
-          $("#chooseFile").modal("show");
+          $("#chooseFileModal").modal("show");
         }
 
         function handleChoice(filePath) {
@@ -428,7 +428,7 @@
   <script src="${ static('desktop/ext/js/bootstrap-datepicker.min.js') }" type="text/javascript" charset="utf-8"></script>
   <script src="${ static('desktop/ext/js/bootstrap-timepicker.min.js') }" type="text/javascript" charset="utf-8"></script>
 
-  <script type="text/javascript" charset="utf-8">
+  <script type="text/javascript">
 
     var DATE_FORMAT = "MM/DD/YYYY";
     var TIME_FORMAT = "hh:mm A";
@@ -580,12 +580,31 @@ function renderCrons() {
 }
 </%def>
 
+<%def name="submit_popup_event()">
+  <script type="text/javascript">
+    $(document).ready(function () {
+      $(document).off('showSubmitPopup');
+      $(document).on('showSubmitPopup', function (event, data) {
+        $('.submit-modal').html(data);
+        $('.submit-modal').modal('show');
+        $('.submit-modal').on('hidden', function () {
+          huePubSub.publish('hide.datepicker');
+        });
+        var _sel = $('.submit-form .control-group[rel!="popover"]:visible');
+        if (_sel.length > 0) {
+          $('.submit-modal .modal-body').height($('.submit-modal .modal-body').height() + 60);
+        }
+      });
+    });
+  </script>
+</%def>
+
 <%def name="bulk_dashboard_functions()">
 
 <div id="bulkConfirmation" class="modal hide">
   <div class="modal-header">
-    <a href="#" class="close" data-dismiss="modal">&times;</a>
-    <h3>${ _('Do you really want to kill the selected jobs?') }</h3>
+    <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+    <h2 class="modal-title">${ _('Do you really want to kill the selected jobs?') }</h2>
   </div>
   <div class="modal-footer">
     <a href="#" class="btn" data-dismiss="modal">${_('No')}</a>
@@ -608,10 +627,10 @@ function renderCrons() {
     });
 
     function toggleBulkButtons() {
-      if ($(".hueCheckbox.fa-check:not(.select-all)").length > 0){
+      if ($(".hue-checkbox.fa-check:not(.select-all)").length > 0){
         var _allResume = true;
         var _allSuspended = true;
-        $(".hueCheckbox.fa-check:not(.select-all)").each(function(){
+        $(".hue-checkbox.fa-check:not(.select-all)").each(function(){
           if (['RUNNING', 'PREP', 'WAITING'].indexOf($(this).parents("tr").find(".label").text()) > -1){
             _allResume = false;
           }
@@ -649,7 +668,7 @@ function renderCrons() {
 
     function bulkOperation(what) {
       var _ids = [];
-      $(".hueCheckbox.fa-check:not(.select-all)").each(function(){
+      $(".hue-checkbox.fa-check:not(.select-all)").each(function(){
         _ids.push($(this).parents("tr").find("a[data-row-selector='true']").text());
       });
 
@@ -675,21 +694,21 @@ function renderCrons() {
           else {
             $.jHueNotify.info(_messages[what]);
           }
-          $(".hueCheckbox").removeClass("fa-check");
+          $(".hue-checkbox").removeClass("fa-check");
           toggleBulkButtons();
           $(".btn-toolbar").find(".loader").addClass("hide");
           $(".bulkToolbarBtn").show();
       });
     }
 
-    $(document).on("click", ".hueCheckbox", function(){
+    $(document).on("click", ".hue-checkbox", function(){
       var _check = $(this);
       if (_check.hasClass("select-all")){
         if (_check.hasClass("fa-check")){
-          $(".hueCheckbox").removeClass("fa-check");
+          $(".hue-checkbox").removeClass("fa-check");
         }
         else {
-          $(".hueCheckbox").addClass("fa-check");
+          $(".hue-checkbox").addClass("fa-check");
         }
       }
       else {

@@ -72,6 +72,24 @@ def get_connection(ldap_config):
   else:
     return LdapConnection(ldap_config, ldap_url, get_ldap_username(username, ldap_config.NT_DOMAIN.get()), password, ldap_cert)
 
+def get_auth(ldap_config):
+  ldap_url = ldap_config.LDAP_URL.get()
+  if ldap_url is None:
+    raise Exception('No LDAP URL was specified')
+  username = ldap_config.BIND_DN.get()
+  password = ldap_config.BIND_PASSWORD.get()
+  if not password:
+    password = ldap_config.BIND_PASSWORD_SCRIPT.get()
+  ldap_cert = ldap_config.LDAP_CERT.get()
+  search_bind_authentication = ldap_config.SEARCH_BIND_AUTHENTICATION.get()
+
+  if search_bind_authentication:
+    ldap_conf = (ldap_url, username, password, ldap_cert)
+  else:
+    ldap_conf = (ldap_url, get_ldap_username(username, ldap_config.NT_DOMAIN.get()), password, ldap_cert)
+
+  return ldap_conf
+
 def get_ldap_username(username, nt_domain):
   if nt_domain:
     return '%s@%s' % (username, nt_domain)
@@ -119,10 +137,16 @@ class LdapConnection(object):
     Constructor initializes the LDAP connection
     """
     self.ldap_config = ldap_config
+    self._ldap_url = ldap_url
+    self._username = bind_user
+    self._ldap_cert = cert_file
 
-    if cert_file is not None:
-      ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_ALLOW)
-      ldap.set_option(ldap.OPT_X_TLS_CACERTFILE, cert_file)
+    # Certificate-related config settings
+    if ldap_config.LDAP_CERT.get():
+      ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_DEMAND)
+      ldap.set_option(ldap.OPT_X_TLS_CACERTFILE, ldap_config.LDAP_CERT.get())
+    else:
+      ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_NEVER)
 
     if self.ldap_config.FOLLOW_REFERRALS.get():
       ldap.set_option(ldap.OPT_REFERRALS, 1)
@@ -137,18 +161,26 @@ class LdapConnection(object):
     if bind_user:
       try:
         self.ldap_handle.simple_bind_s(bind_user, bind_password)
-      except:
-        msg = "Failed to bind to LDAP server as user %s" % bind_user
-        LOG.exception(msg)
-        raise LdapBindException(msg)
+      except Exception, e:
+        self.handle_bind_exception(e, bind_user)
     else:
       try:
         # Do anonymous bind
         self.ldap_handle.simple_bind_s('','')
-      except:
+      except Exception, e:
+        self.handle_bind_exception(e)
+
+  def handle_bind_exception(self, exception, bind_user=None):
+    LOG.error("LDAP access bind error: %s" % exception)
+    if 'Can\'t contact LDAP server' in str(exception):
+      msg = "Can\'t contact LDAP server"
+    else:
+      if bind_user:
+        msg = "Failed to bind to LDAP server as user %s" % bind_user
+      else:
         msg = "Failed to bind to LDAP server anonymously"
-        LOG.exception(msg)
-        raise LdapBindException(msg)
+
+    raise LdapBindException(msg)
 
   def _get_search_params(self, name, attr, find_by_dn=False):
     """
@@ -170,7 +202,8 @@ class LdapConnection(object):
     else:
       return (base_dn, '(' + attr + '=' + name + ')')
 
-  def _transform_find_user_results(self, result_data, user_name_attr):
+  @classmethod
+  def _transform_find_user_results(cls, result_data, user_name_attr):
     """
     :param result_data: List of dictionaries that have ldap attributes and their associated values. Generally the result list from an ldapsearch request.
     :param user_name_attr: The ldap attribute that is returned by the server to map to ``username`` in the return dictionary.
@@ -203,9 +236,13 @@ class LdapConnection(object):
           }
 
           if 'givenName' in data:
-            ldap_info['first'] = data['givenName'][0]
+            if len(data['givenName'][0]) > 30:
+              LOG.warn('First name is truncated to 30 characters for [<User: %s>].' % ldap_info['username'])
+            ldap_info['first'] = data['givenName'][0][:30]
           if 'sn' in data:
-            ldap_info['last'] = data['sn'][0]
+            if len(data['sn'][0]) > 30:
+              LOG.warn('Last name is truncated to 30 characters for [<User: %s>].' % ldap_info['username'])
+            ldap_info['last'] = data['sn'][0][:30]
           if 'mail' in data:
             ldap_info['email'] = data['mail'][0]
           # memberOf and isMemberOf should be the same if they both exist
@@ -303,6 +340,10 @@ class LdapConnection(object):
       ldap_filter = '(&' + ldap_filter + user_name_filter + ')'
     attrlist = ['objectClass', 'isMemberOf', 'memberOf', 'givenName', 'sn', 'mail', 'dn', user_name_attr]
 
+    self._search_dn = search_dn
+    self._ldap_filter = ldap_filter
+    self._attrlist = attrlist
+
     ldap_result_id = self.ldap_handle.search(search_dn, scope, ldap_filter, attrlist)
     result_type, result_data = self.ldap_handle.result(ldap_result_id)
 
@@ -353,6 +394,10 @@ class LdapConnection(object):
     ldap_filter = '(&' + group_filter + group_name_filter + ')'
     attrlist = ['objectClass', 'dn', 'memberUid', group_member_attr, group_name_attr]
 
+    self._search_dn = search_dn
+    self._ldap_filter = ldap_filter
+    self._attrlist = attrlist
+
     ldap_result_id = self.ldap_handle.search(search_dn, scope, ldap_filter, attrlist)
     result_type, result_data = self.ldap_handle.result(ldap_result_id)
 
@@ -373,6 +418,10 @@ class LdapConnection(object):
     search_dn, _ = self._get_search_params(dn, search_attr)
     ldap_filter = '(&%(ldap_filter)s(|(isMemberOf=%(group_dn)s)(memberOf=%(group_dn)s)))' % {'group_dn': dn, 'ldap_filter': ldap_filter}
     attrlist = ['objectClass', 'isMemberOf', 'memberOf', 'givenName', 'sn', 'mail', 'dn', search_attr]
+
+    self._search_dn = search_dn
+    self._ldap_filter = ldap_filter
+    self._attrlist = attrlist
 
     ldap_result_id = self.ldap_handle.search(search_dn, scope, ldap_filter, attrlist)
     result_type, result_data = self.ldap_handle.result(ldap_result_id)
@@ -397,3 +446,12 @@ class LdapConnection(object):
 
   def _get_root_dn(self):
     return self.ldap_config.BASE_DN.get()
+
+  def ldapsearch_cmd(self):
+    ldapsearch = 'ldapsearch -x -LLL -H {ldap_url} -D "{binddn}" -w "********" -b "{base}" ' \
+                 '"{filterstring}" {attr}'.format(ldap_url=self._ldap_url,
+                                                  binddn=self._username,
+                                                  base=self._search_dn,
+                                                  filterstring=self._ldap_filter,
+                                                  attr=" ".join(self._attrlist))
+    return ldapsearch

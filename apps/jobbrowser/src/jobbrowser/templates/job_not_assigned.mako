@@ -23,7 +23,7 @@
   from django.utils.translation import ugettext as _
 %>
 
-${ commonheader(_('Job'), "jobbrowser", user) | n,unicode }
+${ commonheader(_('Job'), "jobbrowser", user, request) | n,unicode }
 ${ comps.menubar() }
 
 <link href="${ static('jobbrowser/css/jobbrowser.css') }" rel="stylesheet">
@@ -34,7 +34,7 @@ ${ comps.menubar() }
       <div class="sidebar-nav" style="padding-top: 0">
         <ul class="nav nav-list">
           <li class="nav-header">${_('Job ID')}</li>
-          <li class="white truncate" title="${ jobid }">${ jobid }</li>
+          <li class="white truncate-text" title="${ jobid }">${ jobid }</li>
         </ul>
       </div>
     </div>
@@ -50,15 +50,14 @@ ${ comps.menubar() }
               <br/>
               <br/>
 
-              <!--[if !IE]><!--><i class="fa fa-spinner fa-spin" style="font-size: 60px; color: #DDD"></i><!--<![endif]-->
-              <!--[if IE]><img src="${ static('desktop/art/spinner.gif') }" /><![endif]-->
+              <i class="fa fa-spinner fa-spin" style="font-size: 60px; color: #DDD"></i>
             </p>
       </div>
     </div>
   </div>
 </div>
 
-<script type="text/javascript" charset="utf-8">
+<script type="text/javascript">
   $(document).ready(function () {
 
     function checkStatus() {

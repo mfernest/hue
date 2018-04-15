@@ -198,6 +198,7 @@ var Autocomplete = function() {
             } else {
                 this.editor.execCommand("insertstring", data.value || data);
             }
+            this.editor.renderer.scrollCursorIntoView();
         }
         this.detach();
     };
@@ -410,6 +411,18 @@ var Autocomplete = function() {
 Autocomplete.startCommand = {
     name: "startAutocomplete",
     exec: function(editor) {
+        if (editor.useHueAutocompleter) {
+            var renderer = editor.renderer;
+            var lineHeight = renderer.layerConfig.lineHeight;
+            var pos = renderer.$cursorLayer.getPixelPosition(this.base, true);
+            var rect = editor.container.getBoundingClientRect();
+            pos.top += rect.top - renderer.layerConfig.offset;
+            pos.left += rect.left - editor.renderer.scrollLeft;
+            pos.left += renderer.gutterWidth;
+
+            huePubSub.publish('hue.ace.autocompleter.show', { editor: editor, position: pos, lineHeight: lineHeight });
+            return;
+        }
         if (!editor.completer)
             editor.completer = new Autocomplete();
         editor.completer.autoInsert = false;
@@ -437,14 +450,32 @@ var FilteredList = function(array, filterText) {
         this.filterText = str;
         matches = this.filterCompletions(matches, this.filterText);
         matches = matches.sort(function (a, b) {
-          var alpha = 0;
-          if (a.caption > b.caption) {
-            alpha = 1;
-          }
-          if (a.caption < b.caption) {
-            alpha = -1;
-          }
-          return alpha + b.exactMatch - a.exactMatch || alpha + b.score - a.score;
+            if (a.completeMatch && ! b.completeMatch) {
+                return -1;
+            } else if (! a.completeMatch && b.completeMatch) {
+                return 1;
+            } else if (a.completeMatch && b.completeMatch && a.weight && b.weight && b.weight !== a.weight) {
+                return b.weight - a.weight;
+            } else if (a.completeMatch && b.completeMatch && a.startsWith && ! b.startsWith) {
+                return -1;
+            } else if (a.completeMatch && b.completeMatch && ! a.startsWith && b.startsWith) {
+                return 1;
+            }
+            if (a.prioritizeScore && b.prioritizeScore) {
+                return b.score - a.score
+            } else if (a.prioritizeScore) {
+                return -1;
+            } else if (b.prioritizeScore) {
+                return 1;
+            }
+            var alpha = 0;
+            if (a.caption > b.caption) {
+                alpha = 1;
+            }
+            if (a.caption < b.caption) {
+                alpha = -1;
+            }
+            return alpha + b.exactMatch - a.exactMatch || alpha + b.score - a.score;
         });
 
         // make unique
@@ -469,6 +500,7 @@ var FilteredList = function(array, filterText) {
             var matchMask = 0;
             var penalty = 0;
             var index, distance;
+            var completeIndex = 0;
 
             if (this.exactMatch && item.ignoreCase) {
                 if (upper !== item.upperCaseValue.substr(0, needle.length)) {
@@ -479,9 +511,11 @@ var FilteredList = function(array, filterText) {
             } else if (this.exactMatch && needle !== caption.substr(0, needle.length)) {
                 continue loop;
             } else {
-                // caption char iteration is faster in Chrome but slower in Firefox, so lets use indexOf
+                completeIndex = caption.toUpperCase().indexOf(upper);
+                if (completeIndex > -1) {
+                    lastIndex = completeIndex - 1;
+                }
                 for (var j = 0; j < needle.length; j++) {
-                    // TODO add penalty on case mismatch
                     var i1 = caption.indexOf(lower[j], lastIndex + 1);
                     var i2 = caption.indexOf(upper[j], lastIndex + 1);
                     index = (i1 >= 0) ? ((i2 < 0 || i1 < i2) ? i1 : i2) : i2;
@@ -489,9 +523,6 @@ var FilteredList = function(array, filterText) {
                         continue loop;
                     distance = index - lastIndex - 1;
                     if (distance > 0) {
-                        // first char mismatch should be more sensitive
-                        if (lastIndex === -1)
-                            penalty += 10;
                         penalty += distance;
                     }
                     matchMask = matchMask | (1 << index);
@@ -501,6 +532,8 @@ var FilteredList = function(array, filterText) {
             item.matchMask = matchMask;
             item.exactMatch = penalty ? 0 : 1;
             item.score = (item.score || 0) - penalty;
+            item.startsWith = completeIndex === 0;
+            item.completeMatch = completeIndex > -1;
             results.push(item);
         }
         return results;

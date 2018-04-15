@@ -15,18 +15,52 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
+import threading
+
+from desktop.lib.rest.http_client import HttpClient
+from desktop.lib.rest.resource import Resource
 
 from beeswax.server.dbms import QueryServerException
-from beeswax.server.hive_server2_lib import HiveServerClient, HiveServerDataTable
+from beeswax.server.hive_server2_lib import HiveServerClient
 
 from ImpalaService import ImpalaHiveServer2Service
+from impala.impala_flags import get_webserver_certificate_file
 
 
 LOG = logging.getLogger(__name__)
 
+API_CACHE = None
+API_CACHE_LOCK = threading.Lock()
+
+
+def get_api(user, url):
+  global  API_CACHE
+  if API_CACHE is None:
+    API_CACHE_LOCK.acquire()
+    try:
+      if API_CACHE is None:
+        API_CACHE = ImpalaDaemonApi(url)
+    finally:
+      API_CACHE_LOCK.release()
+  API_CACHE.set_user(user)
+  return API_CACHE
+
+
+def _get_impala_server_url(session):
+  impala_settings = session.get_formatted_properties()
+  http_addr = next((setting['value'] for setting in impala_settings if setting['key'].lower() == 'http_addr'), None)
+  # Remove scheme if found
+  http_addr = http_addr.replace('http://', '').replace('https://', '')
+  return ('https://' if get_webserver_certificate_file() else 'http://') + http_addr
+
 
 class ImpalaServerClientException(Exception):
+  pass
+
+
+class ImpalaDaemonApiException(Exception):
   pass
 
 
@@ -100,3 +134,100 @@ class ImpalaServerClient(HiveServerClient):
       return summary_dict
     except Exception, e:
       raise ImpalaServerClientException('Failed to serialize the TExecSummary object: %s' % str(e))
+
+
+class ImpalaDaemonApi(object):
+
+  def __init__(self, server_url):
+    self._url = server_url
+    self._client = HttpClient(self._url, logger=LOG)
+    self._root = Resource(self._client)
+    self._security_enabled = False
+    self._thread_local = threading.local()
+
+
+  def __str__(self):
+    return "ImpalaDaemonApi at %s" % self._url
+
+
+  @property
+  def url(self):
+    return self._url
+
+
+  @property
+  def security_enabled(self):
+    return self._security_enabled
+
+
+  @property
+  def user(self):
+    return self._thread_local.user
+
+
+  def set_user(self, user):
+    if hasattr(user, 'username'):
+      self._thread_local.user = user.username
+    else:
+      self._thread_local.user = user
+
+
+  def get_queries(self):
+    params = {
+      'json': 'true'
+    }
+
+    resp = self._root.get('queries', params=params)
+    try:
+      return json.loads(resp)
+    except ValueError, e:
+      raise ImpalaDaemonApiException('ImpalaDaemonApi did not return valid JSON: %s' % e)
+
+
+  def get_query(self, query_id):
+    params = {
+      'query_id': query_id,
+      'json': 'true'
+    }
+
+    resp = self._root.get('query_plan', params=params)
+    try:
+      return json.loads(resp)
+    except ValueError, e:
+      raise ImpalaDaemonApiException('ImpalaDaemonApi did not return valid JSON: %s' % e)
+
+
+  def get_query_profile(self, query_id):
+    params = {
+      'query_id': query_id,
+      'json': 'true'
+    }
+
+    resp = self._root.get('query_profile', params=params)
+    try:
+      return json.loads(resp)
+    except ValueError, e:
+      raise ImpalaDaemonApiException('ImpalaDaemonApi query_profile did not return valid JSON: %s' % e)
+
+  def get_query_memory(self, query_id):
+    params = {
+      'query_id': query_id,
+      'json': 'true'
+    }
+
+    resp = self._root.get('query_memory', params=params)
+    try:
+      return json.loads(resp)
+    except ValueError, e:
+      raise ImpalaDaemonApiException('ImpalaDaemonApi query_memory did not return valid JSON: %s' % e)
+
+  def kill(self, query_id):
+    params = {
+      'query_id': query_id,
+      'json': 'true'
+    }
+    resp = self._root.get('cancel_query', params=params)
+    try:
+      return json.loads(resp)
+    except ValueError, e:
+      raise ImpalaDaemonApiException('ImpalaDaemonApi kill did not return valid JSON: %s' % e)

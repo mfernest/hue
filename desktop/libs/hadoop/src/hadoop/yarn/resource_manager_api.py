@@ -25,7 +25,7 @@ from django.utils.translation import ugettext as _
 from desktop.conf import DEFAULT_USER
 from desktop.lib.exceptions_renderable import PopupException
 from desktop.lib.i18n import smart_str
-from desktop.lib.rest.http_client import HttpClient, RestException
+from desktop.lib.rest.http_client import HttpClient
 from desktop.lib.rest.resource import Resource
 
 from hadoop import cluster
@@ -40,8 +40,9 @@ API_CACHE = None
 API_CACHE_LOCK = threading.Lock()
 
 
-def get_resource_manager(username):
+def get_resource_manager(username=None):
   global API_CACHE
+
   if API_CACHE is None:
     API_CACHE_LOCK.acquire()
     try:
@@ -58,10 +59,6 @@ def get_resource_manager(username):
   return API_CACHE
 
 
-class YarnFailoverOccurred(Exception):
-  pass
-
-
 class ResourceManagerApi(object):
 
   def __init__(self, rm_url, security_enabled=False, ssl_cert_ca_verify=False):
@@ -70,6 +67,7 @@ class ResourceManagerApi(object):
     self._root = Resource(self._client)
     self._security_enabled = security_enabled
     self._thread_local = threading.local() # To store user info
+    self.from_failover = False
 
     if self._security_enabled:
       self._client.set_kerberos_auth()
@@ -126,6 +124,14 @@ class ResourceManagerApi(object):
     params = self._get_params()
     return self._execute(self._root.get, 'cluster/apps/%(app_id)s' % {'app_id': app_id}, params=params, headers={'Accept': _JSON_CONTENT_TYPE})
 
+  def appattempts(self, app_id):
+    params = self._get_params()
+    return self._execute(self._root.get, 'cluster/apps/%(app_id)s/appattempts' % {'app_id': app_id}, params=params, headers={'Accept': _JSON_CONTENT_TYPE})
+
+  def appattempts_attempt(self, app_id, attempt_id):
+    params = self._get_params()
+    return self._execute(self._root.get, 'cluster/apps/%(app_id)s/appattempts/%(attempt_id)s' % {'app_id': app_id, 'attempt_id': attempt_id}, params=params, headers={'Accept': _JSON_CONTENT_TYPE})
+
   def kill(self, app_id):
     data = {'state': 'KILLED'}
     token = None
@@ -160,21 +166,6 @@ class ResourceManagerApi(object):
     response = None
     try:
       response = function(*args, **kwargs)
-    except RestException, e:
-      # YARN-2605: Yarn does not use proper HTTP redirects when the standby RM has
-      # failed back to the master RM.
-      if e.code == 307 and e.message.startswith('This is standby RM'):
-        LOG.info('Received YARN failover redirect response, attempting to resolve redirect.')
-        try:
-          kwargs.update({'allow_redirects': True})
-          response = function(*args, **kwargs)
-        except Exception, e:
-          if response:
-            raise YarnFailoverOccurred(response)
-          else:
-            raise PopupException(_('Failed to resolve YARN RM: %s') % e)
-      else:
-        raise PopupException(_('YARN RM returned a failed response: %s') % e)
-
+    except Exception, e:
+      raise PopupException(_('YARN RM returned a failed response: %s') % e)
     return response
-

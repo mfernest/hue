@@ -26,6 +26,7 @@ from django.forms.formsets import formset_factory
 from django.forms.models import inlineformset_factory
 from django.http import HttpResponse
 from django.shortcuts import redirect
+from django.template.defaultfilters import strip_tags
 from django.utils.functional import curry
 from django.utils.http import http_date
 from django.utils.translation import ugettext as _, activate as activate_translation
@@ -43,7 +44,7 @@ from liboozie.submittion import Submission
 from filebrowser.lib.archives import archive_factory
 from oozie.decorators import check_job_access_permission, check_job_edition_permission,\
                              check_dataset_access_permission, check_dataset_edition_permission
-from oozie.conf import ENABLE_CRON_SCHEDULING
+from oozie.conf import ENABLE_CRON_SCHEDULING, ENABLE_V2
 from oozie.importlib.workflows import import_workflow as _import_workflow
 from oozie.importlib.coordinators import import_coordinator as _import_coordinator
 from oozie.management.commands import oozie_setup
@@ -143,6 +144,9 @@ def create_workflow(request):
 
 
 def import_workflow(request):
+  if ENABLE_V2.get():
+    raise PopupException('/oozie/import_workflow is deprecated in the version 2 of Editor')
+
   workflow = Workflow.objects.new_workflow(request.user)
 
   if request.method == 'POST':
@@ -499,7 +503,7 @@ def edit_coordinator(request, coordinator):
       new_data_output_formset.save()
       coordinator.sla = json.loads(request.POST.get('sla'))
       if enable_cron_scheduling:
-        coordinator.cron_frequency = {'frequency': request.POST.get('cron_frequency'), 'isAdvancedCron': request.POST.get('isAdvancedCron') == 'on'}
+        coordinator.cron_frequency = {'frequency': strip_tags(request.POST.get('cron_frequency')), 'isAdvancedCron': request.POST.get('isAdvancedCron') == 'on'}
       coordinator.save()
 
       request.info(_('Coordinator saved.'))

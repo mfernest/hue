@@ -18,3 +18,18 @@
 from django.utils.translation import ugettext_lazy as _
 
 from desktop.lib.conf import Config
+
+
+ENABLE_NEW_CREATE_TABLE = Config(
+  key="enable_new_create_table",
+  help=_("Flag to turn on the new version of the create table wizard."),
+  type=bool,
+  default=True
+)
+
+FORCE_HS2_METADATA = Config(
+  key="force_hs2_metadata",
+  help=_("Flag to force all metadata calls (e.g. list tables, table or column details...) to happen via HiveServer2 if available instead of Impala."),
+  type=bool,
+  default=False
+)

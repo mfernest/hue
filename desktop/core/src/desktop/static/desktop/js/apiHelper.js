@@ -14,53 +14,239 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-(function (root, factory) {
-  if(typeof define === "function" && define.amd) {
-    define(['knockout'], factory);
-  } else {
-    root.ApiHelper = factory(ko);
-  }
-}(this, function (ko) {
+var ApiQueueManager = (function () {
 
-  var TIME_TO_LIVE_IN_MILLIS = $.totalStorage('hue.cacheable.ttl.override') || $.totalStorage('hue.cacheable.ttl'); // 1 day by default, configurable with desktop.custom.cacheable_ttl in the .ini or $.totalStorage('hue.cacheable.ttl.override', 1234567890)
+  var instance = null;
+
+  function ApiQueueManager() {
+    var self = this;
+    self.callQueue = {};
+  }
+
+  ApiQueueManager.prototype.getQueued = function (url, hash) {
+    var self = this;
+    return self.callQueue[url + (hash || '')];
+  };
+
+  ApiQueueManager.prototype.addToQueue = function (promise, url, hash) {
+    var self = this;
+    self.callQueue[url + (hash || '')] = promise;
+    promise.always(function () {
+      delete self.callQueue[url + (hash || '')];
+    })
+  };
+
+  return {
+    /**
+     * @returns {ApiQueueManager}
+     */
+    getInstance: function () {
+      if (instance === null) {
+        instance = new ApiQueueManager();
+      }
+      return instance;
+    }
+  };
+})();
+
+var CancellablePromise = (function () {
+
+  function CancellablePromise(deferred, request, otherCancellables) {
+    var self = this;
+    self.deferred = deferred;
+    self.request = request;
+    self.otherCancellables = otherCancellables;
+    self.cancelled = false;
+    self.cancelPrevented = false;
+  }
+
+  /**
+   * A promise might be shared across multiple components in the UI, in some cases cancel is not an option and calling
+   * this will prevent that to happen.
+   *
+   * One example is autocompletion of databases while the assist is loading the database tree, closing the autocomplete
+   * results would make the assist loading fail if cancel hasn't been prevented.
+   *
+   * @returns {CancellablePromise}
+   */
+  CancellablePromise.prototype.preventCancel = function () {
+    var self = this;
+    self.cancelPrevented = true;
+    return self;
+  };
+
+  CancellablePromise.prototype.cancel = function () {
+    var self = this;
+    if (self.cancelPrevented || self.cancelled || self.state() !== 'pending') {
+      return;
+    }
+    self.cancelled = true;
+    if (self.request) {
+      ApiHelper.getInstance().cancelActiveRequest(self.request);
+    }
+
+    if (self.state && self.state() === 'pending' && self.deferred.reject) {
+      self.deferred.reject();
+    }
+
+    if (self.otherCancellables) {
+      self.otherCancellables.forEach(function (cancellable) { if (cancellable.cancel) { cancellable.cancel() } });
+    }
+    return this;
+  };
+
+  CancellablePromise.prototype.then = function () {
+    var self = this;
+    self.deferred.then.apply(self.deferred, arguments);
+    return self;
+  };
+
+  CancellablePromise.prototype.done = function (callback) {
+    var self = this;
+    self.deferred.done.apply(self.deferred, arguments);
+    return self;
+  };
+
+  CancellablePromise.prototype.fail = function (callback) {
+    var self = this;
+    self.deferred.fail.apply(self.deferred, arguments);
+    return self;
+  };
+
+  CancellablePromise.prototype.always = function (callback) {
+    var self = this;
+    self.deferred.always.apply(self.deferred, arguments);
+    return self;
+  };
+
+  CancellablePromise.prototype.pipe = function (callback) {
+    var self = this;
+    self.deferred.pipe.apply(self.deferred, arguments);
+    return self;
+  };
+
+  CancellablePromise.prototype.progress = function (callback) {
+    var self = this;
+    self.deferred.progress.apply(self.deferred, arguments);
+    return self;
+  };
+
+  CancellablePromise.prototype.state = function () {
+    var self = this;
+    return self.deferred.state && self.deferred.state();
+  };
+
+  return CancellablePromise;
+})();
+
+var ApiHelper = (function () {
 
   var AUTOCOMPLETE_API_PREFIX = "/notebook/api/autocomplete/";
   var SAMPLE_API_PREFIX = "/notebook/api/sample/";
   var DOCUMENTS_API = "/desktop/api2/doc/";
   var DOCUMENTS_SEARCH_API = "/desktop/api2/docs/";
-  var HDFS_API_PREFIX = "/filebrowser/view=";
-  var HDFS_PARAMETERS = "?pagesize=100&format=json";
+  var FETCH_CONFIG = '/desktop/api2/get_config/';
+  var HDFS_API_PREFIX = "/filebrowser/view=/";
+  var ADLS_API_PREFIX = "/filebrowser/view=adl:/";
+  var GIT_API_PREFIX = "/desktop/api/vcs/contents/";
+  var S3_API_PREFIX = "/filebrowser/view=S3A://";
   var IMPALA_INVALIDATE_API = '/impala/api/invalidate';
   var CONFIG_SAVE_API = '/desktop/api/configurations/save/';
   var CONFIG_APPS_API = '/desktop/api/configurations';
+  var SOLR_COLLECTIONS_API = '/indexer/api/indexes/list/';
+  var SOLR_FIELDS_API = '/indexer/api/index/list/';
+  var DASHBOARD_TERMS_API = '/dashboard/get_terms';
+  var DASHBOARD_STATS_API = '/dashboard/get_stats';
+  var FORMAT_SQL_API = '/notebook/api/format';
 
-  /**
-   * @param {Object} i18n
-   * @param {string} i18n.errorLoadingDatabases
-   * @param {string} i18n.errorLoadingTablePreview
-   * @param {string} user
-   *
-   * @constructor
-   */
-  function ApiHelper (i18n, user) {
+  var SEARCH_API = '/desktop/api/search/entities';
+  var INTERACTIVE_SEARCH_API = '/desktop/api/search/entities_interactive';
+
+  var HBASE_API_PREFIX = '/hbase/api/';
+  var SAVE_TO_FILE = '/filebrowser/save';
+
+  var NAV_URLS = {
+    ADD_TAGS: '/metadata/api/navigator/add_tags',
+    DELETE_TAGS: '/metadata/api/navigator/delete_tags',
+    FIND_ENTITY: '/metadata/api/navigator/find_entity',
+    LIST_TAGS: '/metadata/api/navigator/list_tags',
+    UPDATE_PROPERTIES: '/metadata/api/navigator/update_properties',
+  };
+
+  var NAV_OPT_URLS = {
+    TOP_AGGS: '/metadata/api/optimizer/top_aggs',
+    TOP_COLUMNS: '/metadata/api/optimizer/top_columns',
+    TOP_FILTERS: '/metadata/api/optimizer/top_filters',
+    TOP_JOINS: '/metadata/api/optimizer/top_joins',
+    TOP_TABLES: '/metadata/api/optimizer/top_tables',
+    TABLE_DETAILS: '/metadata/api/optimizer/table_details'
+  };
+
+  function ApiHelper () {
     var self = this;
-    self.i18n = i18n;
-    self.user = user;
-    self.lastKnownDatabases = {};
-    self.fetchQueue = {};
-    self.invalidateImpala = 'cache';
-
-    huePubSub.subscribe('assist.clear.db.cache', function (options) {
-      self.clearDbCache(options);
-    });
+    self.queueManager = ApiQueueManager.getInstance();
 
     huePubSub.subscribe('assist.clear.hdfs.cache', function () {
-      $.totalStorage("hue.assist." + self.getTotalStorageUserPrefix('hdfs'), {});
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 'hdfs' }), {});
     });
+
+    huePubSub.subscribe('assist.clear.adls.cache', function () {
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 'adls' }), {});
+    });
+
+    huePubSub.subscribe('assist.clear.git.cache', function () {
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 'git' }), {});
+    });
+
+    huePubSub.subscribe('assist.clear.s3.cache', function () {
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 's3' }), {});
+    });
+
+    huePubSub.subscribe('assist.clear.collections.cache', function () {
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 'collections' }), {});
+    });
+
+    huePubSub.subscribe('assist.clear.hbase.cache', function () {
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 'hbase' }), {});
+    });
+
+    huePubSub.subscribe('assist.clear.document.cache', function () {
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 'document' }), {});
+    });
+
+    var clearAllCaches = function () {
+      self.clearDbCache({
+        sourceType: 'hive',
+        clearAll: true
+      });
+      self.clearDbCache({
+        sourceType: 'impala',
+        clearAll: true
+      });
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 'hdfs' }), {});
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 'adls' }), {});
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 'git' }), {});
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 's3' }), {});
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 'collections' }), {});
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 'hbase' }), {});
+      $.totalStorage(self.getAssistCacheIdentifier({ sourceType: 'document' }), {});
+    };
+
+    huePubSub.subscribe('assist.clear.all.caches', clearAllCaches);
+
+    if (window.performance && window.performance.navigation) {
+      if (window.performance.navigation.type === 1 && location.href.indexOf('/metastore') !== -1) {
+        // Browser refresh of the metastore page
+        clearAllCaches();
+      }
+    }
   }
 
-  ApiHelper.prototype.hasExpired = function (timestamp) {
-    return (new Date()).getTime() - timestamp > TIME_TO_LIVE_IN_MILLIS;
+  ApiHelper.prototype.hasExpired = function (timestamp, cacheType) {
+    if (typeof hueDebug !== 'undefined' && typeof hueDebug.cacheTimeout !== 'undefined') {
+      return (new Date()).getTime() - timestamp > hueDebug.cacheTimeout;
+    }
+    return (new Date()).getTime() - timestamp > CACHEABLE_TTL[cacheType];
   };
 
   /**
@@ -68,8 +254,18 @@
    * @returns {string}
    */
   ApiHelper.prototype.getTotalStorageUserPrefix = function (sourceType) {
+    return sourceType + '_' + LOGGED_USERNAME + '_' + window.location.hostname;
+  };
+
+  /**
+   * @param {object} options
+   * @param {string} options.sourceType
+   * @param {string} [options.cacheType] - Default value 'default'
+   * @returns {string}
+   */
+  ApiHelper.prototype.getAssistCacheIdentifier = function (options) {
     var self = this;
-    return sourceType + "_" + self.user;
+    return "hue.assist." + (options.cacheType || 'default') + '.' + self.getTotalStorageUserPrefix(options.sourceType);
   };
 
   /**
@@ -80,14 +276,16 @@
    */
   ApiHelper.prototype.setInTotalStorage = function(owner, id, value) {
     var self = this;
-    var cachedData = $.totalStorage("hue.user.settings." + self.getTotalStorageUserPrefix(owner)) || {};
-    if (typeof value !== 'undefined' && value !== null) {
-      cachedData[id] = value;
-      $.totalStorage("hue.user.settings." + self.getTotalStorageUserPrefix(owner), cachedData);
-    } else if (cachedData[id]) {
-      delete cachedData[id];
-      $.totalStorage("hue.user.settings." + self.getTotalStorageUserPrefix(owner), cachedData);
-    }
+    try {
+      var cachedData = $.totalStorage("hue.user.settings." + self.getTotalStorageUserPrefix(owner)) || {};
+      if (typeof value !== 'undefined' && value !== null) {
+        cachedData[id] = value;
+        $.totalStorage("hue.user.settings." + self.getTotalStorageUserPrefix(owner), cachedData, { secure: window.location.protocol.indexOf('https') > -1 });
+      } else if (cachedData[id]) {
+        delete cachedData[id];
+        $.totalStorage("hue.user.settings." + self.getTotalStorageUserPrefix(owner), cachedData, { secure: window.location.protocol.indexOf('https') > -1 });
+      }
+    } catch (e) {}
   };
 
   /**
@@ -124,6 +322,7 @@
       }
       self.setInTotalStorage(owner, id, newValue);
     });
+    return observable;
   };
 
   /**
@@ -148,8 +347,10 @@
   ApiHelper.prototype.assistErrorCallback = function (options) {
     return function (errorResponse) {
       var errorMessage = 'Unknown error occurred';
-      if (errorResponse !== 'undefined') {
-        if (typeof errorResponse.responseText !== 'undefined') {
+      if (typeof errorResponse !== 'undefined' && errorResponse !== null) {
+        if (typeof errorResponse.statusText !== 'undefined' && errorResponse.statusText === 'abort') {
+          return;
+        } else if (typeof errorResponse.responseText !== 'undefined') {
           try {
             var errorJs = JSON.parse(errorResponse.responseText);
             if (typeof errorJs.message !== 'undefined') {
@@ -160,29 +361,36 @@
           } catch(err) {
             errorMessage = errorResponse.responseText;
           }
-        } else if (typeof errorResponse.message !== 'undefined') {
+        } else if (typeof errorResponse.message !== 'undefined' && errorResponse.message !== null) {
           errorMessage = errorResponse.message;
-        } else if (typeof errorResponse.statusText !== 'undefined') {
+        } else if (typeof errorResponse.statusText !== 'undefined' && errorResponse.statusText !== null) {
           errorMessage = errorResponse.statusText;
-        } else if (errorResponse.error !== 'undefined' && toString.call(errorResponse.error) === '[object String]' ) {
+        } else if (errorResponse.error !== 'undefined' && Object.prototype.toString.call(errorResponse.error) === '[object String]' ) {
           errorMessage = errorResponse.error;
-        } else if (toString.call(errorResponse) === '[object String]') {
+        } else if (Object.prototype.toString.call(errorResponse) === '[object String]') {
           errorMessage = errorResponse;
         }
       }
 
-      if (! options.silenceErrors) {
-        if (typeof window.console !== 'undefined') {
-          console.error(errorResponse);
-          console.error(new Error().stack);
-        }
+      if (!options || !options.silenceErrors) {
+        hueUtils.logError(errorResponse);
         $(document).trigger("error", errorMessage);
       }
 
-      if (options.errorCallback) {
+      if (options && options.errorCallback) {
         options.errorCallback(errorMessage);
       }
+      return errorMessage;
     };
+  };
+
+  ApiHelper.prototype.cancelActiveRequest = function (request) {
+    if (typeof request !== 'undefined' && request !== null) {
+      var readyState = request.getReadyState ? request.getReadyState() : request.readyState;
+      if (readyState < 4) {
+        request.abort();
+      }
+    }
   };
 
   /**
@@ -192,17 +400,54 @@
    * @param {function} [options.successCallback]
    * @param {function} [options.errorCallback]
    * @param {boolean} [options.silenceErrors]
+   *
+   * @return {Promise}
    */
   ApiHelper.prototype.simplePost = function (url, data, options) {
     var self = this;
-    $.post(url, data, function (data) {
+    var deferred = $.Deferred();
+
+    var request = $.post(url, data, function (data) {
       if (self.successResponseIsError(data)) {
-        self.assistErrorCallback(options)(data);
-      } else if (typeof options.successCallback !== 'undefined') {
+        deferred.reject(self.assistErrorCallback(options)(data));
+        return;
+      }
+      if (options && options.successCallback) {
         options.successCallback(data);
       }
+      deferred.resolve(data);
     })
     .fail(self.assistErrorCallback(options));
+
+    request.fail(function (data) {
+      deferred.reject(self.assistErrorCallback(options)(data));
+    });
+
+    var promise = deferred.promise();
+
+    promise.getReadyState = function () {
+      return request.readyState;
+    };
+
+    promise.abort = function () {
+      request.abort();
+    };
+
+    return promise;
+  };
+
+  /**
+   * @param {Object} data
+   * @param {Object} options
+   * @param {function} [options.successCallback]
+   */
+  ApiHelper.prototype.saveSnippetToFile = function (data, options) {
+    var self = this;
+    $.post(SAVE_TO_FILE, data, function (result) {
+      if (typeof options.successCallback !== 'undefined') {
+        options.successCallback(result);
+      }
+    }, dataType='json').fail(self.assistErrorCallback(options));
   };
 
   /**
@@ -215,7 +460,7 @@
    */
   ApiHelper.prototype.simpleGet = function (url, data, options) {
     var self = this;
-    $.get(url, data, function (data) {
+    return $.get(url, data, function (data) {
       if (self.successResponseIsError(data)) {
         self.assistErrorCallback(options)(data);
       } else if (typeof options.successCallback !== 'undefined') {
@@ -227,7 +472,30 @@
 
   ApiHelper.prototype.fetchUsersAndGroups = function (options) {
     var self = this;
-    self.simpleGet('/desktop/api/users/autocomplete', {}, options);
+    $.ajax({
+      method: "GET",
+      url: "/desktop/api/users/autocomplete",
+      data: options.data || {},
+      contentType: 'application/json'
+    }).done(function(response) {
+      options.successCallback(response);
+    }).fail(function (response) {
+      options.errorCallback(response);
+    });
+  };
+
+  ApiHelper.prototype.fetchUsersByIds = function (options) {
+    var self = this;
+    $.ajax({
+      method: "GET",
+      url: "/desktop/api/users",
+      data: { userids: options.userids},
+      contentType: 'application/json'
+    }).done(function(response) {
+      options.successCallback(response);
+    }).fail(function (response) {
+      options.errorCallback(response);
+    });
   };
 
   /**
@@ -239,11 +507,122 @@
    * @param {Object} [options.editor] - Ace editor
    *
    * @param {string[]} options.pathParts
+   * @param {number} [options.pageSize] - Default 500
+   * @param {number} [options.page] - Default 1
+   * @param {string} [options.filter]
    */
   ApiHelper.prototype.fetchHdfsPath = function (options) {
     var self = this;
-    var url = HDFS_API_PREFIX + "/" + options.pathParts.join("/") + HDFS_PARAMETERS;
+    if (options.pathParts.length > 0 && (options.pathParts[0] === '/' || options.pathParts[0] === '')) {
+      options.pathParts.shift();
+    }
+    var url = HDFS_API_PREFIX + options.pathParts.join("/") + '?format=json&sortby=name&descending=false&pagesize=' + (options.pageSize || 500) + '&pagenum=' + (options.page || 1);
+    if (options.filter) {
+      url += '&filter=' + options.filter;
+    }
+    var fetchFunction = function (storeInCache) {
+      if (options.timeout === 0) {
+        self.assistErrorCallback(options)({ status: -1 });
+        return;
+      }
+      return $.ajax({
+        dataType: "json",
+        url: url,
+        timeout: options.timeout,
+        success: function (data) {
+          if (!data.error && !self.successResponseIsError(data) && typeof data.files !== 'undefined' && data.files !== null) {
+            if (data.files.length > 2 && !options.filter) {
+              storeInCache(data);
+            }
+            options.successCallback(data);
+          } else {
+            self.assistErrorCallback(options)(data);
+          }
+        }
+      })
+      .fail(self.assistErrorCallback(options))
+      .always(function () {
+        if (typeof options.editor !== 'undefined' && options.editor !== null) {
+          options.editor.hideSpinner();
+        }
+      });
+    };
 
+    return fetchCached.bind(self)($.extend({}, options, {
+      sourceType: 'hdfs',
+      url: url,
+      fetchFunction: fetchFunction
+    }));
+  };
+
+  /**
+   * @param {Object} options
+   * @param {Function} options.successCallback
+   * @param {Function} [options.errorCallback]
+   * @param {boolean} [options.silenceErrors]
+   * @param {Number} [options.timeout]
+   * @param {Object} [options.editor] - Ace editor
+   *
+   * @param {string[]} options.pathParts
+   * @param {number} [options.pageSize] - Default 500
+   * @param {number} [options.page] - Default 1
+   * @param {string} [options.filter]
+   */
+  ApiHelper.prototype.fetchAdlsPath = function (options) {
+    var self = this;
+    options.pathParts.shift();
+    var url = ADLS_API_PREFIX + options.pathParts.join("/") + '?format=json&sortby=name&descending=false&pagesize=' + (options.pageSize || 500) + '&pagenum=' + (options.page || 1);
+    if (options.filter) {
+      url += '&filter=' + options.filter;
+    }
+    var fetchFunction = function (storeInCache) {
+      if (options.timeout === 0) {
+        self.assistErrorCallback(options)({ status: -1 });
+        return;
+      }
+      return $.ajax({
+        dataType: "json",
+        url: url,
+        timeout: options.timeout,
+        success: function (data) {
+          if (!data.error && !self.successResponseIsError(data) && typeof data.files !== 'undefined' && data.files !== null) {
+            if (data.files.length > 2 && !options.filter) {
+              storeInCache(data);
+            }
+            options.successCallback(data);
+          } else {
+            self.assistErrorCallback(options)(data);
+          }
+        }
+      })
+      .fail(self.assistErrorCallback(options))
+      .always(function () {
+        if (typeof options.editor !== 'undefined' && options.editor !== null) {
+          options.editor.hideSpinner();
+        }
+      });
+    };
+
+    return fetchCached.bind(self)($.extend({}, options, {
+      sourceType: 'adls',
+      url: url,
+      fetchFunction: fetchFunction
+    }));
+  };
+
+  /**
+   * @param {Object} options
+   * @param {Function} options.successCallback
+   * @param {Function} [options.errorCallback]
+   * @param {boolean} [options.silenceErrors]
+   * @param {Number} [options.timeout]
+   *
+   * @param {string[]} options.pathParts
+   * @param {string} options.fileType
+   */
+  ApiHelper.prototype.fetchGitContents = function (options) {
+    var self = this;
+    var url = GIT_API_PREFIX + '?path=' + options.pathParts.join("/") + '&fileType=' + options.fileType;
     var fetchFunction = function (storeInCache) {
       if (options.timeout === 0) {
         self.assistErrorCallback(options)({ status: -1 });
@@ -254,8 +633,63 @@
         url: url,
         timeout: options.timeout,
         success: function (data) {
+          if (!data.error && !self.successResponseIsError(data)) {
+            if (data.fileType === 'dir' && typeof data.files !== 'undefined' && data.files !== null) {
+              if (data.files.length > 2) {
+                storeInCache(data);
+              }
+              options.successCallback(data);
+            } else if (data.fileType === 'file' && typeof data.content !== 'undefined' && data.content !== null) {
+              options.successCallback(data);
+            }
+          } else {
+            self.assistErrorCallback(options)(data);
+          }
+        }
+      })
+      .fail(self.assistErrorCallback(options));
+    };
+
+    fetchCached.bind(self)($.extend({}, options, {
+      sourceType: 'git',
+      url: url,
+      fetchFunction: fetchFunction
+    }));
+  };
+
+  /**
+   * @param {Object} options
+   * @param {Function} options.successCallback
+   * @param {Function} [options.errorCallback]
+   * @param {boolean} [options.silenceErrors]
+   * @param {Number} [options.timeout]
+   * @param {Object} [options.editor] - Ace editor
+   *
+   * @param {string[]} options.pathParts
+   * @param {number} [options.pageSize] - Default 500
+   * @param {number} [options.page] - Default 1
+   * @param {string} [options.filter]
+   */
+  ApiHelper.prototype.fetchS3Path = function (options) {
+    var self = this;
+    options.pathParts.shift(); // remove the trailing /
+    var url = S3_API_PREFIX + options.pathParts.join("/") + '?format=json&sortby=name&descending=false&pagesize=' + (options.pageSize || 500) + '&pagenum=' + (options.page || 1);
+    if (options.filter) {
+      url += '&filter=' + options.filter;
+    }
+    var fetchFunction = function (storeInCache) {
+      if (options.timeout === 0) {
+        self.assistErrorCallback(options)({ status: -1 });
+        return;
+      }
+
+      $.ajax({
+        dataType: "json",
+        url: url,
+        timeout: options.timeout,
+        success: function (data) {
           if (!data.error && !self.successResponseIsError(data) && typeof data.files !== 'undefined' && data.files !== null) {
-            if (data.files.length > 2) {
+            if (data.files.length > 2 && !options.filter) {
               storeInCache(data);
             }
             options.successCallback(data);
@@ -273,25 +707,159 @@
     };
 
     fetchCached.bind(self)($.extend({}, options, {
-      sourceType: 'hdfs',
+      sourceType: 's3',
       url: url,
       fetchFunction: fetchFunction
     }));
   };
 
-  ApiHelper.prototype.getFetchQueue = function (fetchFunction, identifier) {
+  /**
+   * @param {Object} options
+   * @param {String} options.collectionName
+   * @param {String} options.fieldName
+   * @param {String} options.prefix
+   * @param {String} [options.engine]
+   * @param {Function} options.successCallback
+   * @param {Function} [options.alwaysCallback]
+   * @param {Number} [options.timeout]
+   *
+   */
+  ApiHelper.prototype.fetchDashboardTerms = function (options) {
     var self = this;
-    if (! self.fetchQueue[fetchFunction]) {
-      self.fetchQueue[fetchFunction] = {};
+    if (options.timeout === 0) {
+      self.assistErrorCallback(options)({ status: -1 });
+      return;
     }
-    var queueForFunction = self.fetchQueue[fetchFunction];
+    $.ajax({
+      dataType: 'json',
+      url: DASHBOARD_TERMS_API,
+      type: 'POST',
+      data: {
+        collection: ko.mapping.toJSON({
+          id: '',
+          name: options.collectionName,
+          engine: options.engine || 'solr'
+        }),
+        analysis: ko.mapping.toJSON({
+          name: options.fieldName,
+          terms: {
+            prefix: options.prefix || ''
+          }
+        })
+      },
+      timeout: options.timeout,
+      success: function (data) {
+        if (!data.error && !self.successResponseIsError(data) && data.status === 0) {
+          options.successCallback(data);
+        } else {
+          self.assistErrorCallback(options)(data);
+        }
+      }
+    })
+    .fail(self.assistErrorCallback(options))
+    .always(options.alwaysCallback);
+  };
 
-    var id = typeof identifier === 'undefined' || identifier === null ? 'DEFAULT_QUEUE' : identifier;
-
-    if (! queueForFunction[id]) {
-      queueForFunction[id] = [];
+  /**
+   * @param {Object} options
+   * @param {String} options.collectionName
+   * @param {String} options.fieldName
+   * @param {String} [options.engine]
+   * @param {Function} options.successCallback
+   * @param {Function} [options.alwaysCallback]
+   * @param {Number} [options.timeout]
+   *
+   */
+  ApiHelper.prototype.fetchDashboardStats = function (options) {
+    var self = this;
+    if (options.timeout === 0) {
+      self.assistErrorCallback(options)({ status: -1 });
+      return;
     }
-    return queueForFunction[id];
+    $.ajax({
+      dataType: 'json',
+      url: DASHBOARD_STATS_API,
+      type: 'POST',
+      data: {
+        collection: ko.mapping.toJSON({
+          id: '',
+          name: options.collectionName,
+          engine: options.engine || 'solr'
+        }),
+        analysis: ko.mapping.toJSON({
+          name: options.fieldName,
+          stats: {
+            facet: ''
+          },
+        }),
+        query: ko.mapping.toJSON({
+          qs: [{q: ''}],
+          fqs: []
+        })
+      },
+      timeout: options.timeout,
+      success: function (data) {
+        if (!data.error && !self.successResponseIsError(data) && data.status === 0) {
+          options.successCallback(data);
+        } else {
+          if (data.status === 1) {
+            options.notSupportedCallback(data);
+          } else {
+            self.assistErrorCallback(options)(data);
+          }
+        }
+      }
+    })
+    .fail(self.assistErrorCallback(options))
+    .always(options.alwaysCallback);
+  };
+
+  /**
+   * @param {Object} options
+   * @param {Function} options.successCallback
+   * @param {Function} [options.errorCallback]
+   * @param {boolean} [options.silenceErrors]
+   * @param {Number} [options.timeout]
+   * @param {Object} [options.editor] - Ace editor
+   */
+  ApiHelper.prototype.fetchHBase = function (options) {
+    var self = this;
+    var suffix = 'getClusters';
+    if (options.parent.name !== '') {
+      suffix = 'getTableList/' + options.parent.name;
+    }
+    var url = HBASE_API_PREFIX + suffix;
+    var fetchFunction = function (storeInCache) {
+      if (options.timeout === 0) {
+        self.assistErrorCallback(options)({ status: -1 });
+        return;
+      }
+      $.ajax({
+        dataType: "json",
+        url: url,
+        timeout: options.timeout,
+        success: function (data) {
+          if (!data.error && !self.successResponseIsError(data)) {
+            storeInCache(data);
+            options.successCallback(data);
+          } else {
+            self.assistErrorCallback(options)(data);
+          }
+        }
+      })
+      .fail(self.assistErrorCallback(options))
+      .always(function () {
+        if (typeof options.editor !== 'undefined' && options.editor !== null) {
+          options.editor.hideSpinner();
+        }
+      });
+    };
+
+    fetchCached.bind(self)($.extend({}, options, {
+      sourceType: 'hbase',
+      url: url,
+      fetchFunction: fetchFunction
+    }));
   };
 
   /**
@@ -346,34 +914,47 @@
   ApiHelper.prototype.fetchDocuments = function (options) {
     var self = this;
 
-    var queue = self.getFetchQueue('fetchDocuments', options.uuid);
-    queue.push(options);
-    if (queue.length > 1) {
+    var id = '';
+    if (options.uuid) {
+      id += options.uuid;
+    }
+    if (options.type && options.type !== 'all') {
+      id += options.type;
+    }
+
+    var promise = self.queueManager.getQueued(DOCUMENTS_API, id);
+    var firstInQueue = typeof promise === 'undefined';
+    if (firstInQueue) {
+      promise = $.Deferred();
+      self.queueManager.addToQueue(promise, DOCUMENTS_API, id);
+    }
+
+    promise.done(options.successCallback).fail(self.assistErrorCallback(options));
+
+    if (!firstInQueue) {
       return;
+    }
+
+    var data = {
+      uuid: options.uuid
+    };
+
+    if (options.type && options.type !== 'all') {
+      data.type = ['directory', options.type];
     }
 
     $.ajax({
       url: DOCUMENTS_API,
-      data: {
-        uuid: options.uuid
-      },
+      data: data,
+      traditional: true,
       success: function (data) {
-        while (queue.length > 0) {
-          var next = queue.shift();
-          if (! self.successResponseIsError(data)) {
-            next.successCallback(data);
-          } else {
-            self.assistErrorCallback(next)(data);
-          }
+        if (! self.successResponseIsError(data)) {
+          promise.resolve(data);
+        } else {
+          promise.reject(data);
         }
       }
-    })
-    .fail(function (response) {
-      while (queue.length > 0) {
-        var next = queue.shift();
-        self.assistErrorCallback(next)(response);
-      }
-    });
+    }).fail(promise.reject);
   };
 
   /**
@@ -390,7 +971,7 @@
    */
   ApiHelper.prototype.searchDocuments = function (options) {
     var self = this;
-    $.ajax({
+    return $.ajax({
       url: DOCUMENTS_SEARCH_API,
       data: {
         uuid: options.uuid,
@@ -416,25 +997,34 @@
    * @param {Function} options.successCallback
    * @param {Function} [options.errorCallback]
    * @param {boolean} [options.silenceErrors]
-   *
+   * @param {boolean} [options.fetchContents]
    * @param {number} options.uuid
+   *
+   * @return {CancellablePromise}
    */
   ApiHelper.prototype.fetchDocument = function (options) {
     var self = this;
-    $.ajax({
+    var deferred = $.Deferred();
+    var request = $.ajax({
       url: DOCUMENTS_API,
       data: {
-        uuid: options.uuid
+        uuid: options.uuid,
+        data: !!options.fetchContents
       },
       success: function (data) {
         if (! self.successResponseIsError(data)) {
-          options.successCallback(data);
+          deferred.resolve(data)
         } else {
-          self.assistErrorCallback(options)(data);
+          deferred.reject(self.assistErrorCallback({
+            silenceErrors: options.silenceErrors
+          }));
         }
       }
     })
-    .fail(self.assistErrorCallback(options));
+    .fail(function (errorResponse) {
+      deferred.reject(self.assistErrorHandler(errorResponse))
+    });
+    return new CancellablePromise(deferred, request);
   };
 
   /**
@@ -448,7 +1038,7 @@
    */
   ApiHelper.prototype.createDocumentsFolder = function (options) {
     var self = this;
-    self.simplePost("/desktop/api2/doc/mkdir", {
+    self.simplePost(DOCUMENTS_API + 'mkdir', {
       parent_uuid: ko.mapping.toJSON(options.parentUuid),
       name: ko.mapping.toJSON(options.name)
     }, options);
@@ -465,7 +1055,7 @@
    */
   ApiHelper.prototype.updateDocument = function (options) {
     var self = this;
-    self.simplePost("/desktop/api2/doc/update", {
+    self.simplePost(DOCUMENTS_API + 'update', {
       uuid: ko.mapping.toJSON(options.uuid),
       name: options.name
     }, options);
@@ -483,7 +1073,7 @@
   ApiHelper.prototype.uploadDocument = function (options) {
     var self = this;
     $.ajax({
-      url: '/desktop/api2/doc/import',
+      url: DOCUMENTS_API + 'import',
       type: 'POST',
       success: function (data) {
         if (! self.successResponseIsError(data)) {
@@ -519,7 +1109,7 @@
    */
   ApiHelper.prototype.moveDocument = function (options) {
     var self = this;
-    self.simplePost("/desktop/api2/doc/move", {
+    self.simplePost(DOCUMENTS_API + 'move', {
       source_doc_uuid: ko.mapping.toJSON(options.sourceId),
       destination_doc_uuid: ko.mapping.toJSON(options.destinationId)
     }, options);
@@ -536,9 +1126,39 @@
    */
   ApiHelper.prototype.deleteDocument = function (options) {
     var self = this;
-    self.simplePost("/desktop/api2/doc/delete", {
+    self.simplePost(DOCUMENTS_API + 'delete', {
       uuid: ko.mapping.toJSON(options.uuid),
       skip_trash: ko.mapping.toJSON(options.skipTrash || false)
+    }, options);
+  };
+
+  /**
+   * @param {Object} options
+   * @param {Function} options.successCallback
+   * @param {Function} [options.errorCallback]
+   * @param {boolean} [options.silenceErrors]
+   *
+   * @param {string} options.uuid
+   */
+  ApiHelper.prototype.copyDocument = function (options) {
+    var self = this;
+    self.simplePost(DOCUMENTS_API + 'copy', {
+      uuid: ko.mapping.toJSON(options.uuid)
+    }, options);
+  };
+
+  /**
+   * @param {Object} options
+   * @param {Function} options.successCallback
+   * @param {Function} [options.errorCallback]
+   * @param {boolean} [options.silenceErrors]
+   *
+   * @param {string} options.uuid
+   */
+  ApiHelper.prototype.restoreDocument = function (options) {
+    var self = this;
+    self.simplePost(DOCUMENTS_API + 'restore', {
+      uuids: ko.mapping.toJSON(options.uuids)
     }, options);
   };
 
@@ -547,16 +1167,16 @@
    * @param {Object} options
    * @param {string} options.sourceType
    * @param {string} [options.databaseName]
-   * @param {boolean} [options.invalidateImpala]
    * @param {string} [options.tableName]
+   * @param {string} [options.cacheType] - Possible values 'default', 'optimizer. Default value 'default'
    * @param {string[]} [options.fields]
    * @param {boolean} [options.clearAll]
    */
   ApiHelper.prototype.clearDbCache = function (options) {
     var self = this;
-    self.invalidateImpala = options.invalidateImpala || 'cache';
+    var cacheIdentifier = self.getAssistCacheIdentifier(options);
     if (options.clearAll) {
-      $.totalStorage("hue.assist." + self.getTotalStorageUserPrefix(options.sourceType), {});
+      $.totalStorage(cacheIdentifier, {});
     } else {
       var url = AUTOCOMPLETE_API_PREFIX;
       if (options.databaseName) {
@@ -568,439 +1188,789 @@
       if (options.fields) {
         url += options.fields.length > 0 ? "/" + options.fields.join("/") : "";
       }
-      var cachedData = $.totalStorage("hue.assist." + self.getTotalStorageUserPrefix(options.sourceType)) || {};
+      var cachedData = $.totalStorage(cacheIdentifier) || {};
       delete cachedData[url];
-      $.totalStorage("hue.assist." + self.getTotalStorageUserPrefix(options.sourceType), cachedData);
+      $.totalStorage(cacheIdentifier, cachedData);
     }
   };
 
   /**
    * @param {Object} options
-   * @param {Function} options.successCallback
-   * @param {Function} [options.errorCallback]
-   * @param {boolean} [options.silenceErrors]
-   *
    * @param {string} options.sourceType
-   * @param {string} [options.database]
-   **/
-  ApiHelper.prototype.loadDatabases = function (options) {
-    var self = this;
-
-    var loadFunction = function () {
-      self.invalidateImpala = 'cache';
-      fetchAssistData.bind(self)($.extend({}, options, {
-        url: AUTOCOMPLETE_API_PREFIX,
-        successCallback: function (data) {
-          var databases = data.databases || [];
-          // Blacklist of system databases
-          self.lastKnownDatabases[options.sourceType] = $.grep(databases, function (database) {
-            return database !== "_impala_builtins";
-          });
-          options.successCallback(self.lastKnownDatabases[options.sourceType]);
-        },
-        errorCallback: function (response) {
-          if (response.status == 401) {
-            $(document).trigger("showAuthModal", {
-              'type': options.sourceType, 'callback': function () {
-                self.loadDatabases(options);
-              }
-            });
-            return;
-          }
-          self.lastKnownDatabases[options.sourceType] = [];
-          self.assistErrorCallback(options)(response);
-        },
-        cacheCondition: function (data) {
-          return typeof data !== 'undefined' && data !== null && typeof data.databases !== 'undefined' && data.databases !== null && data.databases.length > 0;
-        }
-      }));
-    };
-
-    if (options.sourceType === 'impala' && self.invalidateImpala == 'invalidateAndFlush') {
-      $.post(IMPALA_INVALIDATE_API, { flush_all: true, database: options.database }, loadFunction);
-    } else if (options.sourceType === 'impala' && self.invalidateImpala == 'invalidate') {
-      $.post(IMPALA_INVALIDATE_API, { flush_all: false, database: options.database }, loadFunction);
-    } else {
-      loadFunction();
-    }
-  };
-
-  /**
-   * @param {Object} options
-   * @param {Function} options.successCallback
-   * @param {Function} [options.errorCallback]
+   * @param {string} options.invalidate - 'invalidate' or 'invalidateAndFlush'
+   * @param {string[]} [options.path]
    * @param {boolean} [options.silenceErrors]
-   *
-   * @param {string} options.databaseName
-   * @param {string} options.tableName
    */
-  ApiHelper.prototype.fetchPartitions = function (options) {
+  ApiHelper.prototype.invalidateSourceMetadata = function (options) {
     var self = this;
-    $.ajax({
-      url: "/metastore/table/" + options.databaseName + "/" + options.tableName + "/partitions",
-      data: {
-        "format" : 'json'
-      },
-      beforeSend: function (xhr) {
-        xhr.setRequestHeader("X-Requested-With", "Hue");
-      },
-      success: function (response) {
-        if (! self.successResponseIsError(response)) {
-          options.successCallback(response);
-        } else {
-          self.assistErrorCallback(options)(response);
-        }
+    var deferred = $.Deferred();
 
-      },
-      error: self.assistErrorCallback(options)
-    });
-  };
+    if (options.sourceType === 'impala' && (options.invalidate === 'invalidate' || options.invalidate === 'invalidateAndFlush')) {
+      var data = {
+        flush_all: options.invalidate === 'invalidateAndFlush'
+      };
 
-  /**
-   * @param {Object} options
-   * @param {string} options.sourceType
-   * @param {Function} options.successCallback
-   * @param {Function} [options.errorCallback]
-   * @param {boolean} [options.silenceErrors]
-   *
-   * @param {string} options.databaseName
-   * @param {string} options.tableName
-   */
-  ApiHelper.prototype.fetchTableDetails = function (options) {
-    var self = this;
-    $.ajax({
-      url: "/" + (options.sourceType == "hive" ? "beeswax" : options.sourceType) + "/api/table/" + options.databaseName + "/" + options.tableName,
-      data: {
-        "format" : 'json'
-      },
-      beforeSend: function (xhr) {
-        xhr.setRequestHeader("X-Requested-With", "Hue");
-      },
-      success: function (response) {
-        if (! self.successResponseIsError(response)) {
-          options.successCallback(response);
-        } else {
-          self.assistErrorCallback(options)(response);
-        }
-      },
-      error: self.assistErrorCallback(options)
-    });
-  };
-
-
-  /**
-   * @param {Object} options
-   * @param {string} options.sourceType
-   * @param {Function} options.successCallback
-   * @param {Function} [options.errorCallback]
-   * @param {boolean} [options.silenceErrors]
-   *
-   * @param {string} options.databaseName
-   * @param {string} options.tableName
-   * @param {Number} [options.timeout]
-   * @param {string} [options.columnName]
-   * @param {Object} [options.editor] - Ace editor
-   */
-  ApiHelper.prototype.fetchTableSample = function (options) {
-    var self = this;
-    var url = SAMPLE_API_PREFIX + options.databaseName + '/' + options.tableName + (options.columnName ? '/' + options.columnName : '');
-
-    var fetchFunction = function (storeInCache) {
-      if (options.timeout === 0) {
-        self.assistErrorCallback(options)({ status: -1 });
-        return;
+      if (options.path && options.path.length > 0) {
+        data.database = options.path[0];
       }
-      $.ajax({
-        type: 'POST',
-        url: url,
-        data: {
-          notebook: {},
-          snippet: ko.mapping.toJSON({
-            type: options.sourceType
-          })
-        },
-        timeout: options.timeout
-      }).done(function (data) {
-        if (! self.successResponseIsError(data)) {
-          if ((typeof data.rows !== 'undefined' && data.rows.length > 0) || typeof data.sample !== 'undefined') {
-            storeInCache(data);
-          }
-          options.successCallback(data);
-        } else {
-          self.assistErrorCallback(options)(data);
-        }
-      })
-      .fail(self.assistErrorCallback(options))
-      .always(function () {
-        if (typeof options.editor !== 'undefined' && options.editor !== null) {
-          options.editor.hideSpinner();
-        }
-      });
-    };
-
-    if (options.columnName) {
-      fetchCached.bind(self)($.extend({}, options, {
-        url: url,
-        fetchFunction: fetchFunction
-      }));
-    } else {
-      fetchFunction($.noop);
-    }
-  };
-
-
-  /**
-   * @param {Object} options
-   * @param {string} options.sourceType
-   * @param {Function} options.successCallback
-   * @param {Function} [options.errorCallback]
-   * @param {boolean} [options.silenceErrors]
-   *
-   * @param {string} options.databaseName
-   * @param {string} options.tableName
-   * @param {string} options.columnName
-   */
-  ApiHelper.prototype.refreshTableStats = function (options) {
-    var self = this;
-    var pollRefresh = function (url) {
-      $.post(url, function (data) {
-        if (data.isSuccess) {
-          options.successCallback(data);
-        } else if (data.isFailure) {
-          self.assistErrorCallback(options)(data.message);
-        } else {
-          window.setTimeout(function () {
-            pollRefresh(url);
-          }, 1000);
-        }
-      }).fail(self.assistErrorCallback(options));
-    };
-
-    $.post("/" + (options.sourceType == "hive" ? "beeswax" : options.sourceType) + "/api/analyze/" + options.databaseName + "/" + options.tableName + "/"  + (options.columnName || ""), function (data) {
-      if (data.status == 0 && data.watch_url) {
-        pollRefresh(data.watch_url);
-      } else {
-        self.assistErrorCallback(options)(data);
+      if (options.path && options.path.length > 1) {
+        data.table = options.path[1];
       }
-    }).fail(self.assistErrorCallback(options));
+
+      var request = self.simplePost(IMPALA_INVALIDATE_API, data, options).done(deferred.resolve).fail(deferred.reject);
+
+      return new CancellablePromise(deferred, request);
+    }
+
+    return deferred.resolve().promise();
   };
+
 
   /**
    * @param {Object} options
    * @param {string} options.sourceType
-   * @param {Function} options.successCallback
-   * @param {Function} [options.errorCallback]
    * @param {boolean} [options.silenceErrors]
    *
-   * @param {string} options.databaseName
-   * @param {string} options.tableName
-   * @param {string} options.columnName
-   */
-  ApiHelper.prototype.fetchStats = function (options) {
-    var self = this;
-    $.ajax({
-      url: "/" + options.sourceType + "/api/table/" + options.databaseName + "/" + options.tableName + "/stats/" + ( options.columnName || ""),
-      data: {},
-      beforeSend: function (xhr) {
-        xhr.setRequestHeader("X-Requested-With", "Hue");
-      },
-      dataType: "json",
-      success: function (response) {
-        if (! self.successResponseIsError(response)) {
-          options.successCallback(response)
-        } else {
-          self.assistErrorCallback(options)(response);
-        }
-      },
-      error: self.assistErrorCallback(options)
-    });
-  };
-
-  /**
-   * @param {Object} options
-   * @param {string} options.sourceType
-   * @param {Function} options.successCallback
-   * @param {Function} [options.errorCallback]
-   * @param {boolean} [options.silenceErrors]
+   * @param {string[]} [options.path] - The path to fetch
    *
-   * @param {Object} [options.prefixFilter]
-   * @param {string} options.databaseName
-   * @param {string} options.tableName
-   * @param {string} options.columnName
+   * @return {CancellablePromise}
    */
-  ApiHelper.prototype.fetchTerms = function (options) {
+  ApiHelper.prototype.fetchSourceMetadata = function (options) {
     var self = this;
-    $.ajax({
-      url: "/" + options.sourceType + "/api/table/" + options.databaseName + "/" + options.tableName + "/terms/" + options.columnName + "/" + (options.prefixFilter || ""),
-      data: {},
-      beforeSend: function (xhr) {
-        xhr.setRequestHeader("X-Requested-With", "Hue");
-      },
-      dataType: "json",
-      success: function (response) {
-        if (! self.successResponseIsError(response)) {
-          options.successCallback(response);
-        } else {
-          self.assistErrorCallback(options)(response);
-        }
-      },
-      error: self.assistErrorCallback(options)
-    });
-  };
+    var deferred = $.Deferred();
 
-  /**
-   * @param {Object} options
-   * @param {string} options.sourceType
-   * @param {Function} options.successCallback
-   * @param {Function} [options.errorCallback]
-   * @param {boolean} [options.silenceErrors]
-   * @param {Number} [options.timeout]
-   * @param {Object} [options.editor] - Ace editor
-   *
-   * @param {string} options.databaseName
-   */
-  ApiHelper.prototype.fetchTables = function (options) {
-    var self = this;
-    fetchAssistData.bind(self)($.extend({}, options, {
-      url: AUTOCOMPLETE_API_PREFIX + options.databaseName,
-      errorCallback: self.assistErrorCallback(options),
-      cacheCondition: function (data) {
-        return typeof data !== 'undefined' && data !== null && typeof data.tables_meta !== 'undefined' && data.tables_meta !== null && data.tables_meta.length > 0;
-      }
-    }));
-  };
+    var isQuery = options.sourceType.indexOf('-query') !== -1;
+    var sourceType = isQuery ? options.sourceType.replace('-query', '') : options.sourceType;
 
-  var fieldCacheCondition = function (data) {
-    if (typeof data !== 'undefined' && data !== null) {
-      return (typeof data.item !== 'undefined' && data.item !== null) ||
-          (typeof data.key !== 'undefined' && data.key !== null) ||
-          (typeof data.sample !== 'undefined' && data.sample !== null) ||
-          (typeof data.tables_meta !== 'undefined' && data.tables_meta !== null && data.tables_meta.length > 0) ||
-          (typeof data.extended_columns !== 'undefined' && data.extended_columns !== null && data.extended_columns.length > 0) ||
-          (typeof data.columns !== 'undefined' && data.columns !== null && data.columns.length > 0) ||
-          (typeof data.fields !== 'undefined' && data.fields !== null && data.fields.length > 0)
-    }
-    return false;
-  };
-
-  /**
-   * @param {Object} options
-   * @param {string} options.sourceType
-   * @param {Function} options.successCallback
-   * @param {Function} [options.errorCallback]
-   * @param {boolean} [options.silenceErrors]
-   * @param {Number} [options.timeout]
-   * @param {Object} [options.editor] - Ace editor
-   *
-   * @param {string} options.databaseName
-   * @param {string} options.tableName
-   * @param {string[]} options.fields
-   */
-  ApiHelper.prototype.fetchFields = function (options) {
-    var self = this;
-    var fieldPart = options.fields.length > 0 ? "/" + options.fields.join("/") : "";
-    fetchAssistData.bind(self)($.extend({}, options, {
-      url: AUTOCOMPLETE_API_PREFIX + options.databaseName + "/" + options.tableName + fieldPart,
-      errorCallback: self.assistErrorCallback(options),
-      cacheCondition: fieldCacheCondition
-    }));
-  };
-
-  /**
-   * @param {Object} options
-   * @param {string} options.sourceType
-   * @param {Function} options.successCallback
-   * @param {Function} [options.errorCallback]
-   * @param {boolean} [options.silenceErrors]
-   *
-   * @param {string[]} options.hierarchy
-   */
-  ApiHelper.prototype.fetchPanelData = function (options) {
-    var self = this;
-    fetchAssistData.bind(self)($.extend({}, options, {
-      url: AUTOCOMPLETE_API_PREFIX + options.hierarchy.join("/"),
-      errorCallback: self.assistErrorCallback(options),
-      cacheCondition: fieldCacheCondition
-    }));
-  };
-
-  /**
-   * @param {Object} options
-   * @param {string} options.sourceType
-   * @param {string} options.url
-   * @param {Function} options.cacheCondition - Determines whether it should be cached or not
-   * @param {Function} options.successCallback
-   * @param {Function} options.errorCallback
-   * @param {Number} [options.timeout]
-   * @param {Object} [options.editor] - Ace editor
-   */
-  var fetchAssistData = function (options) {
-    var self = this;
-    if (!options.sourceType) {
-      return
-    }
-
-    var cachedData = $.totalStorage("hue.assist." + self.getTotalStorageUserPrefix(options.sourceType)) || {};
-    if (typeof cachedData[options.url] !== "undefined" && ! self.hasExpired(cachedData[options.url].timestamp)) {
-      options.successCallback(cachedData[options.url].data);
-      return;
-    }
-    if (typeof options.editor !== 'undefined' && options.editor !== null) {
-      options.editor.showSpinner();
-    }
-
-    var queue = self.getFetchQueue('fetchAssistData', options.sourceType + '_' + options.url);
-    queue.push(options);
-    if (queue.length > 1) {
-      return;
-    }
-
-    var failCallback = function (data) {
-      while (queue.length > 0) {
-        var next = queue.shift();
-        next.errorCallback(data);
-        if (typeof next.editor !== 'undefined' && next.editor !== null) {
-          next.editor.hideSpinner();
-        }
-      }
-    };
-
-    if (options.timeout === 0) {
-      failCallback({ status: -1 });
-      return;
-    }
-
-    $.ajax({
+    var request = $.ajax({
       type: 'POST',
-      url: options.url,
+      url: AUTOCOMPLETE_API_PREFIX + (isQuery ? options.path.slice(1) : options.path).join('/'),
       data: {
         notebook: {},
         snippet: ko.mapping.toJSON({
-          type: options.sourceType
+          type: sourceType,
+          source: isQuery ? 'query' : 'data'
         })
       },
       timeout: options.timeout
     }).success(function (data) {
-      // Safe to assume all requests in the queue have the same cacheCondition
-      if (data.status === 0 && !self.successResponseIsError(data) && options.cacheCondition(data)) {
-        cachedData[options.url] = {
-          timestamp: (new Date()).getTime(),
-          data: data
-        };
-        $.totalStorage("hue.assist." + self.getTotalStorageUserPrefix(options.sourceType), cachedData);
+      data.notFound = data.status === 0 && data.code === 500 && data.error && (data.error.indexOf('Error 10001') !== -1 || data.error.indexOf('AnalysisException') !== -1);
+      data.hueTimestamp = Date.now();
+
+      // TODO: Display warning in autocomplete when an entity can't be found
+      // Hive example: data.error: [...] SemanticException [Error 10001]: Table not found default.foo
+      // Impala example: data.error: [...] AnalysisException: Could not resolve path: 'default.foo'
+      if (!data.notFound && self.successResponseIsError(data)) {
+        self.assistErrorCallback({
+          silenceErrors: options.silenceErrors,
+          errorCallback: deferred.reject
+        })(data);
+      } else {
+        deferred.resolve(data);
       }
-      while (queue.length > 0) {
-        var next = queue.shift();
-        if (data.status === 0 && !self.successResponseIsError(data)) {
-          next.successCallback(data);
+    }).fail(self.assistErrorCallback({
+      silenceErrors: options.silenceErrors,
+      errorCallback: deferred.reject
+    }));
+
+    return new CancellablePromise(deferred, request);
+  };
+
+
+  ApiHelper.prototype.updateSourceMetadata = function (options) {
+    var self = this;
+    var url;
+    var data = {
+      source_type: options.sourceType
+    };
+    if (options.path.length === 1) {
+      url = '/metastore/databases/' + options.path[1] + '/alter';
+      data.properties = ko.mapping.toJSON(options.properties);
+    } else if (options.path.length === 2) {
+      url = '/metastore/table/' + options.path[0] + '/' + options.path[1] + '/alter';
+      if (options.properties) {
+        if (options.properties.comment) {
+          data.comment = options.properties.comment;
+        }
+        if (options.properties.name) {
+          data.new_table_name = options.properties.name;
+        }
+      }
+    } else if (options.path > 2) {
+      url = '/metastore/table/' + options.path[0] + '/' + options.path[1] + '/alter_column';
+      data.column = options.path.slice(2).join('.');
+      if (options.properties) {
+        if (options.properties.comment) {
+          data.comment = options.properties.comment;
+        }
+        if (options.properties.name) {
+          data.new_column_name = options.properties.name;
+        }
+        if (options.properties.type) {
+          data.new_column_type = options.properties.name;
+        }
+        if (options.properties.partitions) {
+          data.partition_spec = ko.mapping.toJSON(options.properties.partitions);
+        }
+      }
+    }
+    return self.simplePost(url, data, options);
+  };
+
+  /**
+   * Fetches the analysis for the given source and path
+   *
+   * @param {Object} options
+   * @param {boolean} [options.silenceErrors]
+   *
+   * @param {string[]} options.path
+   *
+   * @return {CancellablePromise}
+   */
+  ApiHelper.prototype.fetchAnalysis = function (options) {
+    var self = this;
+    var deferred = $.Deferred();
+
+    var url;
+
+    if (options.path.length === 1) {
+      url = '/metastore/databases/' + options.path[0] + '/metadata';
+    } else {
+      url = '/' + (options.sourceType === 'hive' ? 'beeswax' : options.sourceType) + '/api/table/' + options.path[0];
+
+      if (options.path.length > 1) {
+        url += '/' + options.path[1];
+      }
+
+      if (options.path.length > 2) {
+        url += '/stats/' + options.path.slice(2).join('/');
+      }
+    }
+
+    var request = self.simpleGet(url, {
+      'format' : 'json'
+    }, {
+      silenceErrors: options.silenceErrors,
+      successCallback: function (response) {
+        if (options.path.length === 1) {
+          if (response.data) {
+            response.data.hueTimestamp = Date.now();
+            deferred.resolve(response.data);
+          } else {
+            deferred.reject();
+          }
         } else {
-          next.errorCallback(data);
+          deferred.resolve(response)
         }
-        if (typeof next.editor !== 'undefined' && next.editor !== null) {
-          next.editor.hideSpinner();
+      },
+      errorCallback: deferred.reject
+    });
+
+    return new CancellablePromise(deferred, request);
+  };
+
+  /**
+   * Fetches the partitions for the given path
+   *
+   * @param {Object} options
+   * @param {boolean} [options.silenceErrors]
+   *
+   * @param {string[]} options.path
+   *
+   * @return {CancellablePromise}
+   */
+  ApiHelper.prototype.fetchPartitions = function (options) {
+    var self = this;
+    var deferred = $.Deferred();
+
+    // TODO: No sourceType needed?
+    var request = $.ajax({
+      url: '/metastore/table/' + options.path.join('/') + '/partitions',
+      data: { format: 'json' },
+      success: function (response) {
+        if (!self.successResponseIsError(response)) {
+          if (!response) {
+            response = {};
+          }
+          response.hueTimestamp = Date.now();
+          deferred.resolve(response);
+        } else {
+          self.assistErrorCallback({
+            silenceErrors: options.silenceErrors,
+            errorCallback: deferred.reject
+          })(response);
+        }
+      },
+      error: function (response) {
+        // Don't report any partitions if it's not partitioned instead of error to prevent unnecessary calls
+        if (response && response.responseText && response.responseText.indexOf('is not partitioned') !== -1) {
+          deferred.resolve({
+            hueTimestamp: Date.now(),
+            partition_keys_json: [],
+            partition_values_json: []
+          })
+        } else {
+          self.assistErrorCallback({
+            silenceErrors: options.silenceErrors,
+            errorCallback: deferred.reject
+          })(response);
         }
       }
-    }).fail(failCallback);
+    });
+
+    return new CancellablePromise(deferred, request);
+  };
+
+  /**
+   * Refreshes the analysis for the given source and path
+   *
+   * @param {Object} options
+   * @param {boolean} [options.silenceErrors]
+   *
+   * @param {string} options.sourceType
+   * @param {string[]} options.path
+   *
+   * @return {CancellablePromise}
+   */
+  ApiHelper.prototype.refreshAnalysis = function (options) {
+    var self = this;
+
+    if (options.path.length === 1) {
+      return self.fetchAnalysis(options);
+    }
+    var deferred = $.Deferred();
+
+    var promises = [];
+
+    var pollForAnalysis = function (url, delay) {
+      window.setTimeout(function () {
+        promises.push(self.simplePost(url, undefined, {
+          silenceErrors: options.silenceErrors,
+          successCallback: function (data) {
+            promises.pop();
+            if (data.isSuccess) {
+              promises.push(self.fetchAnalysis(options).done(deferred.resolve).fail(deferred.reject));
+            } else if (data.isFailure) {
+              deferred.reject(data);
+            } else {
+              pollForAnalysis(url, 1000);
+            }
+          },
+          errorCallback: deferred.reject
+        }));
+      }, delay);
+    };
+
+    var url = '/' + (options.sourceType === 'hive' ? 'beeswax' : options.sourceType) + '/api/analyze/' + options.path.join('/') + '/';
+
+    promises.push(self.simplePost(url, undefined, {
+      silenceErrors: options.silenceErrors,
+      successCallback: function (data) {
+        promises.pop();
+        if (data.status === 0 && data.watch_url) {
+          pollForAnalysis(data.watch_url, 500);
+        } else {
+          deferred.reject();
+        }
+      },
+      errorCallback: deferred.reject
+    }));
+
+    return new CancellablePromise(deferred, undefined, promises);
+  };
+
+  /**
+   * Checks the status for the given snippet ID
+   * Note: similar to notebook and search check_status.
+   *
+   * @param {Object} options
+   * @param {Object} options.notebookJson
+   * @param {Object} options.snippetJson
+   * @param {boolean} [options.silenceErrors]
+   *
+   * @return {CancellablePromise}
+   */
+  ApiHelper.prototype.whenAvailable = function (options) {
+    var self = this;
+    var deferred = $.Deferred();
+    var cancellablePromises = [];
+
+    var waitTimeout = -1;
+
+    deferred.fail(function () {
+      window.clearTimeout(waitTimeout);
+    });
+
+    var waitForAvailable = function () {
+      var request = self.simplePost('/notebook/api/check_status', {
+        notebook: options.notebookJson,
+        snippet: options.snippetJson
+      }, {
+        silenceErrors: options.silenceErrors
+      }).done(function (response) {
+        if (response && response.query_status && response.query_status.status) {
+          var status = response.query_status.status;
+          if (status === 'available') {
+            deferred.resolve();
+          } else if (status === 'running' || status === 'starting' || status === 'waiting') {
+            waitTimeout = window.setTimeout(function () {
+              waitForAvailable();
+            }, 500);
+          } else {
+            deferred.reject();
+          }
+        }
+      }).fail(deferred.reject);
+
+      cancellablePromises.push(new CancellablePromise(request, request));
+    };
+
+    waitForAvailable();
+    return new CancellablePromise(deferred, undefined, cancellablePromises);
+  };
+
+  /**
+   * Wrapper around the response from the Query API
+   *
+   * @param {string} sourceType
+   * @param {Object} response
+   *
+   * @constructor
+   */
+  var QueryResult = function (sourceType, response) {
+    var self = this;
+    self.id = UUID();
+    self.type = sourceType;
+    self.status = response.status || 'running';
+    self.result = response.result || {};
+    self.result.type = 'table';
+  };
+
+  /**
+   * Fetches samples for the given source and path
+   *
+   * @param {Object} options
+   * @param {boolean} [options.silenceErrors]
+   *
+   * @param {string} options.sourceType
+   * @param {number} [options.sampleCount] - Default 100
+   * @param {string[]} options.path
+   *
+   * @return {CancellablePromise}
+   */
+  ApiHelper.prototype.fetchSample = function (options) {
+    var self = this;
+    var deferred = $.Deferred();
+
+    var cancellablePromises = [];
+
+    var notebookJson = null;
+    var snippetJson = null;
+    var cancelled = false;
+
+    var cancelQuery = function () {
+      cancelled = true;
+      if (notebookJson) {
+        self.simplePost('/notebook/api/cancel_statement', {
+          notebook: notebookJson,
+          snippet: snippetJson
+        }, { silenceErrors:  options.silenceErrors });
+      }
+    };
+
+    self.simplePost(SAMPLE_API_PREFIX + options.path.join('/'), {
+      notebook: {},
+      snippet: JSON.stringify({
+        type: options.sourceType
+      }),
+      async: true
+    }, {
+      silenceErrors: options.silenceErrors
+    }).done(function (sampleResponse) {
+      var queryResult = new QueryResult(options.sourceType, sampleResponse);
+
+      notebookJson = JSON.stringify({ type: options.sourceType });
+      snippetJson = JSON.stringify(queryResult);
+
+      if (sampleResponse && sampleResponse.rows) { // Sync results
+        var data = { data: sampleResponse.rows, meta: sampleResponse.full_headers };
+        data.hueTimestamp = Date.now();
+        deferred.resolve(data);
+      } else {
+        cancellablePromises.push(
+          self.whenAvailable({ notebookJson: notebookJson, snippetJson: snippetJson, silenceErrors: options.silenceErrors }).done(function () {
+            var resultRequest = self.simplePost('/notebook/api/fetch_result_data', {
+              notebook: notebookJson,
+              snippet: snippetJson,
+              rows: options.sampleCount || 100,
+              startOver: 'false'
+            }, {
+              silenceErrors: options.silenceErrors
+            }).done(function (sampleResponse) {
+              var data = (sampleResponse && sampleResponse.result) || { data: [], meta: [] };
+              data.hueTimestamp = Date.now();
+              deferred.resolve(data);
+            }).fail(deferred.reject);
+
+            cancellablePromises.push(resultRequest, resultRequest);
+          }).fail(deferred.reject)
+        );
+      }
+    }).fail(deferred.reject);
+
+    cancellablePromises.push({
+      cancel: cancelQuery
+    });
+
+    return new CancellablePromise(deferred, undefined, cancellablePromises);
+  };
+
+  /**
+   * Fetches a navigator entity for the given source and path
+   *
+   * @param {Object} options
+   * @param {boolean} [options.silenceErrors]
+   *
+   * @param {boolean} [options.isView] - Default false
+   * @param {string[]} options.path
+   *
+   * @return {CancellablePromise}
+   */
+  ApiHelper.prototype.fetchNavigatorMetadata = function (options) {
+    var self = this;
+    var deferred = $.Deferred();
+    var url = NAV_URLS.FIND_ENTITY;
+
+    if (options.path.length === 1) {
+      url += '?type=database&name=' + options.path[0];
+    } else if (options.path.length === 2) {
+      url +=  (options.isView ? '?type=view' : '?type=table') + '&database=' + options.path[0] + '&name=' + options.path[1];
+    } else if (options.path.length === 3) {
+      url +=  '?type=field&database=' + options.path[0] + '&table=' + options.path[1] + '&name=' + options.path[2];
+    } else {
+      return new CancellablePromise($.Deferred().reject());
+    }
+
+    var request = self.simplePost(url, {
+      notebook: {},
+      snippet: ko.mapping.toJSON({
+        type: 'nav'
+      })
+    }, {
+      silenceErrors: options.silenceErrors,
+      successCallback: function (data) {
+        data = data.entity || data;
+        data.hueTimestamp = Date.now();
+        deferred.resolve(data);
+      },
+      errorCallback: deferred.reject
+    });
+
+    return new CancellablePromise(deferred, request);
+  };
+
+  /**
+   * Updates Navigator properties and custom metadata for the given entity
+   *
+   * @param {Object} options
+   * @param {string} options.identity - The identifier for the Navigator entity to update
+   * @param {Object} [options.properties]
+   * @param {Object} [options.modifiedCustomMetadata]
+   * @param {string[]} [options.deletedCustomMetadataKeys]
+   * @param {boolean} [options.silenceErrors]
+   *
+   * @return {Promise}
+   */
+  ApiHelper.prototype.updateNavigatorProperties = function (options) {
+    var self = this;
+    var data = { id: ko.mapping.toJSON(options.identity) };
+
+    if (options.properties) {
+      data.properties = ko.mapping.toJSON(options.properties);
+    }
+    if (options.modifiedCustomMetadata) {
+      data.modifiedCustomMetadata = ko.mapping.toJSON(options.modifiedCustomMetadata);
+    }
+    if (options.deletedCustomMetadataKeys) {
+      data.deletedCustomMetadataKeys = ko.mapping.toJSON(options.deletedCustomMetadataKeys);
+    }
+    return self.simplePost(NAV_URLS.UPDATE_PROPERTIES, data, options)
+  };
+
+  /**
+   * Lists all available navigator tags
+   *
+   * @param {Object} options
+   * @param {Function} options.successCallback
+   * @param {Function} [options.errorCallback]
+   * @param {boolean} [options.silenceErrors]
+   *
+   * @return {CancellablePromise}
+   */
+  ApiHelper.prototype.fetchAllNavigatorTags = function (options) {
+    var self = this;
+
+    var deferred = $.Deferred();
+
+    var request = self.simplePost(NAV_URLS.LIST_TAGS, undefined, {
+      silenceErrors: options.silenceErrors,
+      successCallback: function (data) {
+        if (data && data.tags) {
+          deferred.resolve(data.tags);
+        } else {
+          deferred.resolve({});
+        }
+      },
+      errorCallback: deferred.reject
+    });
+
+    return new CancellablePromise(deferred, request);
+  };
+
+  ApiHelper.prototype.addNavTags = function (entityId, tags) {
+    var self = this;
+    return self.simplePost(NAV_URLS.ADD_TAGS, {
+      id: ko.mapping.toJSON(entityId),
+      tags: ko.mapping.toJSON(tags)
+    });
+  };
+
+  ApiHelper.prototype.deleteNavTags = function (entityId, tags) {
+    var self = this;
+    return self.simplePost(NAV_URLS.DELETE_TAGS, {
+      id: ko.mapping.toJSON(entityId),
+      tags: ko.mapping.toJSON(tags)
+    });
+  };
+
+  /**
+   * Fetches navOpt popularity for the children of the given path
+   *
+   * @param {Object} options
+   * @param {boolean} [options.silenceErrors]
+   * @param {string[][]} options.paths
+   * @return {CancellablePromise}
+   */
+  ApiHelper.prototype.fetchNavOptPopularity = function (options) {
+    var self = this;
+    var deferred = $.Deferred();
+    var url, data;
+
+    if (options.paths.length === 1 && options.paths[0].length === 1) {
+      url = NAV_OPT_URLS.TOP_TABLES;
+      data = {
+        database: options.paths[0][0]
+      };
+    } else {
+      url = NAV_OPT_URLS.TOP_COLUMNS;
+      var dbTables = [];
+      options.paths.forEach(function (path) {
+        dbTables.push(path.join('.'));
+      });
+      data = {
+        dbTables: ko.mapping.toJSON(dbTables)
+      };
+    }
+
+    var request = self.simplePost(url, data, {
+      silenceErrors: options.silenceErrors,
+      successCallback: function (data) {
+        data.hueTimestamp = Date.now();
+        deferred.resolve(data);
+      },
+      errorCallback: deferred.reject
+    });
+
+    return new CancellablePromise(deferred, request);
+  };
+
+  /**
+   * Fetches the popularity for various aspects of the given tables
+   *
+   * @param {ApiHelper} apiHelper
+   * @param {Object} options
+   * @param {boolean} [options.silenceErrors]
+   * @param {string[][]} options.paths
+   * @param {string} url
+   * @return {CancellablePromise}
+   */
+  var genericNavOptMultiTableFetch = function (apiHelper, options, url) {
+    var deferred = $.Deferred();
+
+    var dbTables = {};
+    options.paths.forEach(function (path) {
+      dbTables[path.join('.')] = true;
+    });
+    var data = {
+      dbTables: ko.mapping.toJSON(Object.keys(dbTables))
+    };
+
+    var request = apiHelper.simplePost(url, data, {
+      silenceErrors: options.silenceErrors,
+      successCallback: function (data) {
+        data.hueTimestamp = Date.now();
+        deferred.resolve(data);
+      },
+      errorCallback: deferred.reject
+    });
+
+    return new CancellablePromise(deferred, request);
+  };
+
+  /**
+   * Fetches the popular aggregate functions for the given tables
+   *
+   * @param {Object} options
+   * @param {boolean} [options.silenceErrors]
+   * @param {string[][]} options.paths
+   * @return {CancellablePromise}
+   */
+  ApiHelper.prototype.fetchNavOptTopAggs = function (options) {
+    return genericNavOptMultiTableFetch(this, options, NAV_OPT_URLS.TOP_AGGS);
+  };
+
+  /**
+   * Fetches the popular columns for the given tables
+   *
+   * @param {Object} options
+   * @param {boolean} [options.silenceErrors]
+   * @param {string[][]} options.paths
+   * @return {CancellablePromise}
+   */
+  ApiHelper.prototype.fetchNavOptTopColumns = function (options) {
+    return genericNavOptMultiTableFetch(this, options, NAV_OPT_URLS.TOP_COLUMNS);
+  };
+
+  /**
+   * Fetches the popular filters for the given tables
+   *
+   * @param {Object} options
+   * @param {boolean} [options.silenceErrors]
+   * @param {string[][]} options.paths
+   * @return {CancellablePromise}
+   */
+  ApiHelper.prototype.fetchNavOptTopFilters = function (options) {
+    return genericNavOptMultiTableFetch(this, options, NAV_OPT_URLS.TOP_FILTERS);
+  };
+
+  /**
+   * Fetches the popular joins for the given tables
+   *
+   * @param {Object} options
+   * @param {boolean} [options.silenceErrors]
+   * @param {string[][]} options.paths
+   * @return {CancellablePromise}
+   */
+  ApiHelper.prototype.fetchNavOptTopJoins = function (options) {
+    return genericNavOptMultiTableFetch(this, options, NAV_OPT_URLS.TOP_JOINS);
+  };
+
+  /**
+   * Fetches navOpt meta for the given path, only possible for tables atm.
+   *
+   * @param {Object} options
+   * @param {boolean} [options.silenceErrors]
+   * @param {string[]} options.path
+   *
+   * @return {CancellablePromise}
+   */
+  ApiHelper.prototype.fetchNavOptMeta = function (options) {
+    var self = this;
+    var deferred = $.Deferred();
+
+    var request = self.simplePost(NAV_OPT_URLS.TABLE_DETAILS, {
+      databaseName: options.path[0],
+      tableName: options.path[1]
+    }, {
+      silenceErrors: options.silenceErrors,
+      successCallback: function (response) {
+        if (response.status === 0 && response.details) {
+          response.details.hueTimestamp = Date.now();
+          deferred.resolve(response.details);
+        } else {
+          deferred.reject();
+        }
+      },
+      errorCallback: deferred.reject
+    });
+
+    return new CancellablePromise(deferred, request);
+  };
+
+  ApiHelper.prototype.getClusterConfig = function (data) {
+    return $.post(FETCH_CONFIG, data);
+  };
+
+  ApiHelper.prototype.fetchHueDocsInteractive = function (query) {
+    var deferred = $.Deferred();
+    var request = $.post(INTERACTIVE_SEARCH_API, {
+      query_s: ko.mapping.toJSON(query),
+      limit: 50,
+      sources: '["documents"]'
+    }).done(function (data) {
+      if (data.status === 0) {
+        deferred.resolve(data);
+      } else {
+        deferred.reject(data);
+      }
+    }).fail(deferred.reject);
+    return new CancellablePromise(deferred, request);
+  };
+
+  ApiHelper.prototype.fetchNavEntitiesInteractive = function (options) {
+    var deferred = $.Deferred();
+    var request = $.post(INTERACTIVE_SEARCH_API, {
+      query_s: ko.mapping.toJSON(options.query),
+      field_facets: ko.mapping.toJSON(options.facets || []),
+      limit: 50,
+      sources: '["sql", "hdfs", "s3"]'
+    }).done(function (data) {
+      if (data.status === 0) {
+        deferred.resolve(data);
+      } else {
+        deferred.reject(data);
+      }
+    }).fail(deferred.reject);
+    return new CancellablePromise(deferred, request);
+  };
+
+  ApiHelper.prototype.searchEntities = function (options) {
+    var self = this;
+    var deferred = $.Deferred();
+
+    var request = self.simplePost(SEARCH_API, {
+      query_s: ko.mapping.toJSON(options.query),
+      limit: options.limit || 100,
+      raw_query: !!options.rawQuery,
+      sources: options.sources ? ko.mapping.toJSON(options.sources) : '["sql"]'
+    }, {
+      silenceErrors: options.silenceErrors,
+      successCallback: deferred.resolve,
+      errorCallback: deferred.reject
+    });
+
+    return new CancellablePromise(deferred, request);
+  };
+
+  /**
+   *
+   * @param {Object} options
+   * @param {string} options.statements
+   * @param {boolean} [options.silenceErrors]
+   */
+  ApiHelper.prototype.formatSql = function (options) {
+    var self = this;
+    var deferred = $.Deferred();
+
+    var request = self.simplePost(FORMAT_SQL_API, {
+      statements: options.statements
+    }, {
+      silenceErrors: options.silenceErrors,
+      successCallback: deferred.resolve,
+      errorCallback: deferred.reject
+    });
+
+    return new CancellablePromise(deferred, request);
   };
 
   /**
@@ -1008,27 +1978,39 @@
    * @param {Object} options
    * @param {string} options.sourceType
    * @param {string} options.url
+   * @param {boolean} options.refreshCache
+   * @param {string} [options.hash] - Optional hash to use as well as the url
    * @param {Function} options.fetchFunction
    * @param {Function} options.successCallback
+   * @param {string} [options.cacheType] - Possible values 'default'|'optimizer'. Default value 'default'
    * @param {Object} [options.editor] - Ace editor
+   * @param {Object} [options.promise] - Optional promise that will be resolved if cached data exists
    */
   var fetchCached = function (options) {
     var self = this;
-    var cachedData = $.totalStorage("hue.assist." + self.getTotalStorageUserPrefix(options.sourceType)) || {};
+    var cacheIdentifier = self.getAssistCacheIdentifier(options);
+    var cachedData = $.totalStorage(cacheIdentifier) || {};
+    var cachedId = options.hash ? options.url + options.hash : options.url;
 
-    if (typeof cachedData[options.url] == "undefined" || self.hasExpired(cachedData[options.url].timestamp)) {
+    if (options.refreshCache || typeof cachedData[cachedId] == "undefined" || self.hasExpired(cachedData[cachedId].timestamp, options.cacheType || 'default')) {
       if (typeof options.editor !== 'undefined' && options.editor !== null) {
         options.editor.showSpinner();
       }
-      options.fetchFunction(function (data) {
-        cachedData[options.url] = {
+      return options.fetchFunction(function (data) {
+        cachedData[cachedId] = {
           timestamp: (new Date()).getTime(),
           data: data
         };
-        $.totalStorage("hue.assist." + self.getTotalStorageUserPrefix(options.sourceType), cachedData);
+        try {
+          $.totalStorage(cacheIdentifier, cachedData);
+        } catch (e) {}
       });
     } else {
-      options.successCallback(cachedData[options.url].data);
+      if (options.promise) {
+        options.promise.resolve(cachedData[cachedId].data)
+      }
+
+      options.successCallback(cachedData[cachedId].data);
     }
   };
 
@@ -1037,19 +2019,13 @@
   return {
 
     /**
-     * @param {Object} options
-     * @param {Object} options.i18n
-     * @param {string} options.i18n.errorLoadingDatabases
-     * @param {string} options.i18n.errorLoadingTablePreview
-     * @param {string} options.user
-     *
      * @returns {ApiHelper}
      */
-    getInstance: function (options) {
+    getInstance: function () {
       if (instance === null) {
-        instance = new ApiHelper(options.i18n, options.user);
+        instance = new ApiHelper();
       }
       return instance;
     }
   };
-}));
+})();

@@ -33,6 +33,7 @@ import notebook.monkey_patches
 urlpatterns = patterns('notebook.views',
   url(r'^$', 'notebook', name='index'),
   url(r'^notebook/?$', 'notebook', name='notebook'),
+  url(r'^notebook_embeddable/?$', 'notebook_embeddable', name='notebook_embeddable'),
   url(r'^notebooks/?$', 'notebooks', name='notebooks'),
   url(r'^new/?$', 'new', name='new'),
   url(r'^download/?$', 'download', name='download'),
@@ -41,8 +42,10 @@ urlpatterns = patterns('notebook.views',
   url(r'^copy/?$', 'copy', name='copy'),
 
   url(r'^editor/?$', 'editor', name='editor'),
-  url(r'^browse/(?P<database>\w+)/(?P<table>\w+)/?$', 'browse', name='browse'),
+  url(r'^editor_m/?$', 'editor_m', name='editor_m'),
+  url(r'^browse/(?P<database>\w+)/(?P<table>\w+)/(?P<partition_spec>.+?)?$', 'browse', name='browse'),
   url(r'^execute_and_watch/?$', 'execute_and_watch', name='execute_and_watch'),
+  url(r'^workers_embedded$', 'workers_embedded', name='workers_embedded'),
 )
 
 # APIs
@@ -50,15 +53,18 @@ urlpatterns += patterns('notebook.api',
   url(r'^api/create_notebook/?$', 'create_notebook', name='create_notebook'),
   url(r'^api/create_session/?$', 'create_session', name='create_session'),
   url(r'^api/close_session/?$', 'close_session', name='close_session'),
-  url(r'^api/execute/?$', 'execute', name='execute'),
+  url(r'^api/execute/?(?P<engine>.+)?$', 'execute', name='execute'),
   url(r'^api/check_status/?$', 'check_status', name='check_status'),
   url(r'^api/fetch_result_data/?$', 'fetch_result_data', name='fetch_result_data'),
   url(r'^api/fetch_result_metadata/?$', 'fetch_result_metadata', name='fetch_result_metadata'),
+  url(r'^api/fetch_result_size/?$', 'fetch_result_size', name='fetch_result_size'),
   url(r'^api/cancel_statement/?$', 'cancel_statement', name='cancel_statement'),
   url(r'^api/close_statement/?$', 'close_statement', name='close_statement'),
   url(r'^api/get_logs/?$', 'get_logs', name='get_logs'),
 
   url(r'^api/explain/?$', 'explain', name='explain'),
+  url(r'^api/format/?$', 'format', name='format'),
+  url(r'^api/get_external_statement/?$', 'get_external_statement', name='get_external_statement'),
 
   url(r'^api/get_history/?', 'get_history', name='get_history'),
   url(r'^api/clear_history/?', 'clear_history', name='clear_history'),
@@ -68,6 +74,10 @@ urlpatterns += patterns('notebook.api',
   url(r'^api/notebook/close/?$', 'close_notebook', name='close_notebook'),
 
   url(r'^api/notebook/export_result/?$', 'export_result', name='export_result'),
+
+  url(r'^api/optimizer/statement/risk/?$', 'statement_risk', name='statement_risk'),
+  url(r'^api/optimizer/statement/compatibility/?$', 'statement_compatibility', name='statement_compatibility'),
+  url(r'^api/optimizer/statement/similarity/?$', 'statement_similarity', name='statement_similarity'),
 )
 
 # Assist API
@@ -75,22 +85,16 @@ urlpatterns += patterns('notebook.api',
   # HS2, RDBMS, JDBC
   url(r'^api/autocomplete/?$', 'autocomplete', name='api_autocomplete_databases'),
   url(r'^api/autocomplete/(?P<database>\w+)/?$', 'autocomplete', name='api_autocomplete_tables'),
-  url(r'^api/autocomplete/(?P<database>\w+)/(?P<table>\w+)/?$', 'autocomplete', name='api_autocomplete_columns'),
-  url(r'^api/autocomplete/(?P<database>\w+)/(?P<table>\w+)/(?P<column>\w+)/?$', 'autocomplete', name='api_autocomplete_column'),
-  url(r'^api/autocomplete/(?P<database>\w+)/(?P<table>\w+)/(?P<column>\w+)/(?P<nested>.+)/?$', 'autocomplete', name='api_autocomplete_nested'),
-  url(r'^api/sample/(?P<database>\w+)/(?P<table>\w+)/?$', 'get_sample_data', name='api_sample_data'),
-  url(r'^api/sample/(?P<database>\w+)/(?P<table>\w+)/(?P<column>\w+)/?$', 'get_sample_data', name='api_sample_data_column'),
+  url(r'^api/autocomplete/(?P<database>\w+)/(?P<table>[\w_\-]+)/?$', 'autocomplete', name='api_autocomplete_columns'),
+  url(r'^api/autocomplete/(?P<database>\w+)/(?P<table>[\w_\-]+)/(?P<column>\w+)/?$', 'autocomplete', name='api_autocomplete_column'),
+  url(r'^api/autocomplete/(?P<database>\w+)/(?P<table>[\w_\-]+)/(?P<column>\w+)/(?P<nested>.+)/?$', 'autocomplete', name='api_autocomplete_nested'),
+  url(r'^api/sample/(?P<database>\w+)/(?P<table>[\w_\-]+)/?$', 'get_sample_data', name='api_sample_data'),
+  url(r'^api/sample/(?P<database>\w+)/(?P<table>[\w_\-]+)/(?P<column>\w+)/?$', 'get_sample_data', name='api_sample_data_column'),
 
   # SQLite
-  url(r'^api/autocomplete/(?P<server>\w+)/(?P<database>[\w._\-0-9]+)/?$', 'autocomplete', name='api_autocomplete_tables'),
-  url(r'^api/autocomplete/(?P<server>\w+)/(?P<database>[\w._\-0-9]+)/(?P<table>\w+)/?$', 'autocomplete', name='api_autocomplete_columns'),
-  url(r'^api/sample/(?P<server>\w+)/(?P<database>[\w._\-0-9]+)/(?P<table>\w+)/?$', 'get_sample_data', name='api_sample_data'),
-  url(r'^api/sample/(?P<server>\w+)/(?P<database>[\w._\-0-9]+)/(?P<table>\w+)/(?P<column>\w+)/?$', 'get_sample_data', name='api_sample_data_column'),
-)
-
-# Github
-urlpatterns += patterns('notebook.api',
-  url(r'^api/github/fetch/?$', 'github_fetch', name='github_fetch'),
-  url(r'^api/github/authorize/?$', 'github_authorize', name='github_authorize'),
-  url(r'^api/github/callback/?$', 'github_callback', name='github_callback'),
+  url(r'^api/autocomplete//?(?P<server>[\w_\-/]+)/(?P<database>[\w._\-0-9]+)/?$', 'autocomplete', name='api_autocomplete_tables'),
+  url(r'^api/autocomplete//?(?P<server>[\w_\-/]+)/(?P<database>[\w._\-0-9]+)/(?P<table>\w+)/?$', 'autocomplete', name='api_autocomplete_columns'),
+  url(r'^api/autocomplete//?(?P<server>[\w_\-/]+)/(?P<database>[\w._\-0-9]+)/(?P<table>\w+)/(?P<column>\w+)/?$', 'autocomplete', name='api_autocomplete_column'),
+  url(r'^api/sample/(?P<server>[\w_\-/]+)/(?P<database>[\w._\-0-9]+)/(?P<table>\w+)/?$', 'get_sample_data', name='api_sample_data'),
+  url(r'^api/sample/(?P<server>[\w_\-/]+)/(?P<database>[\w._\-0-9]+)/(?P<table>\w+)/(?P<column>\w+)/?$', 'get_sample_data', name='api_sample_data_column'),
 )

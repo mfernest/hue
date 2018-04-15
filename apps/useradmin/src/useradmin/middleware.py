@@ -20,11 +20,13 @@ from datetime import datetime
 
 from django.contrib import messages
 from django.contrib.auth.models import User
+from django.contrib.sessions.models import Session
 from django.db import DatabaseError
+from django.db.models import Q
 from django.utils.translation import ugettext as _
 
 from desktop.auth.views import dt_logout
-from desktop.conf import AUTH, LDAP
+from desktop.conf import AUTH, LDAP, SESSION
 
 from models import UserProfile, get_profile
 from views import import_ldap_users
@@ -43,6 +45,11 @@ class LdapSynchronizationMiddleware(object):
 
   def process_request(self, request):
     user = request.user
+    server = None
+
+    # Used by tests only
+    if request.method == "GET":
+      server = request.GET.get('server')
 
     if not user or not user.is_authenticated():
       return
@@ -58,7 +65,7 @@ class LdapSynchronizationMiddleware(object):
       else:
         connection = ldap_access.get_connection_from_server()
 
-      import_ldap_users(connection, user.username, sync_groups=True, import_by_dn=False)
+      import_ldap_users(connection, user.username, sync_groups=True, import_by_dn=False, server=server)
 
       request.session[self.USER_CACHE_NAME] = True
       request.session.modified = True
@@ -84,7 +91,7 @@ class LastActivityMiddleware(object):
       logout = True
 
     # Save last activity for user except when polling
-    if not (request.path.strip('/') == 'jobbrowser' and request.GET.get('format') == 'json') and not (request.path == '/desktop/debug/is_idle'):
+    if not (request.path.strip('/') == 'jobbrowser/jobs' and request.POST.get('format') == 'json') and not (request.path == '/desktop/debug/is_idle'):
       try:
         profile.last_activity = datetime.now()
         profile.save()
@@ -101,3 +108,28 @@ class LastActivityMiddleware(object):
       return dt.total_seconds()
     else:
       return (dt.microseconds + (dt.seconds + dt.days * 24 * 3600) * 10**6) / 10**6
+
+class ConcurrentUserSessionMiddleware(object):
+  """
+  Middleware that remove concurrent user sessions when configured
+  """
+  def process_response(self, request, response):
+    try:
+      user = request.user
+    except AttributeError: # When the request does not store user. We care only about the login request which does store the user.
+      return response
+
+    if request.user.is_authenticated() and request.session.modified and request.user.id: # request.session.modified checks if a user just logged in
+      limit = SESSION.CONCURRENT_USER_SESSION_LIMIT.get()
+      if limit:
+        count = 1;
+        for session in Session.objects.filter(~Q(session_key=request.session.session_key), expire_date__gte=datetime.now()).order_by('-expire_date'):
+          data = session.get_decoded()
+          if data.get('_auth_user_id') == request.user.id:
+            if count >= limit:
+              LOG.info('Expiring concurrent user session %s' % request.user.username)
+              session.expire_date = datetime.now()
+              session.save()
+            else:
+              count += 1
+    return response

@@ -31,6 +31,7 @@ def parse_column(name, type_string, comment=None):
   Returns a dictionary of a Hive column's type metadata and
    any complex or nested type info
   """
+  type_string = type_string.lower()
   column = {
     'name': name,
     'comment': comment or ''
@@ -118,6 +119,7 @@ def _split_struct_fields(fields_string):
 
 def _get_next_struct_field(fields_string):
   fieldname, rest = fields_string.split(':', 1)
+  fieldname = fieldname.strip(',')
   balanced = 0
   for pos, char in enumerate(rest):
     balanced += {'<': 1, '>': -1, '(': 1, ')': -1}.get(char, 0)

@@ -16,8 +16,12 @@
 # limitations under the License.
 
 import logging
+import os
 import sys
 
+from desktop.lib.i18n import force_unicode, smart_str
+from notebook.conf import DBPROXY_EXTRA_CLASSPATH
+from notebook.connectors.base import AuthenticationRequired
 
 LOG = logging.getLogger(__name__)
 
@@ -41,6 +45,11 @@ def query_and_fetch(db, statement, n=None):
       return data, meta
     finally:
       curs.close()
+  except Exception, e:
+    message = force_unicode(smart_str(e))
+    if 'Access denied' in message:
+      raise AuthenticationRequired()
+    raise
   finally:
     db.close()
 
@@ -51,7 +60,11 @@ class Jdbc():
     if 'py4j' not in sys.modules:
       raise Exception('Required py4j module is not imported.')
 
-    self.gateway = JavaGateway()
+    classpath = os.environ.get('CLASSPATH', '')
+    if DBPROXY_EXTRA_CLASSPATH.get():
+      classpath = '%s:%s' % (DBPROXY_EXTRA_CLASSPATH.get(), classpath)
+
+    self.gateway = JavaGateway.launch_gateway(classpath=classpath)
 
     self.jdbc_driver = driver_name
     self.db_url = url
@@ -60,8 +73,24 @@ class Jdbc():
 
     self.conn = None
 
+  def test_connection(self, throw_exception=True):
+    try:
+      self.connect()
+      return True
+    except Exception, e:
+      message = force_unicode(smart_str(e))
+      if throw_exception:
+        if 'Access denied' in message:
+          raise AuthenticationRequired()
+        raise
+      else:
+        return False
+    finally:
+      self.close()
+
   def connect(self):
     if self.conn is None:
+      self.gateway.jvm.Class.forName(self.jdbc_driver)
       self.conn = self.gateway.jvm.java.sql.DriverManager.getConnection(self.db_url, self.username, self.password)
 
   def cursor(self):
@@ -122,7 +151,7 @@ class Cursor():
     else:
       return [[
         self._meta.getColumnName(i),
-        self._meta.getColumnTypeName(i),
+        self._meta.getColumnTypeName(i) + '_TYPE',
         self._meta.getColumnDisplaySize(i),
         self._meta.getColumnDisplaySize(i),
         self._meta.getPrecision(i),

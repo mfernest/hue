@@ -32,7 +32,7 @@ nv.models.multiBarWithBrushChart = function() {
     , yAxis = nv.models.axis()
     , legend = nv.models.legend()
     , controls = nv.models.legend()
-    , brush = d3.svg.brush()
+    , brush = d3v3.svg.brush()
     ;
 
   var margin = {top: 30, right: 20, bottom: 50, left: 60}
@@ -54,11 +54,12 @@ nv.models.multiBarWithBrushChart = function() {
       }
     , x //can be accessed via chart.xScale()
     , y //can be accessed via chart.yScale()
-    , state = { stacked: false }
+    , state = { stacked: false, selectionEnabled: false }
     , defaultState = null
     , noData = "No Data Available."
-    , dispatch = d3.dispatch('tooltipShow', 'tooltipHide', 'stateChange', 'changeState', 'brush')
+    , dispatch = d3v3.dispatch('tooltipShow', 'tooltipHide', 'stateChange', 'changeState', 'brush')
     , controlWidth = function() { return showControls ? (selectionHidden ? 240 : 300) : 0 }
+    , legendWidth = 175
     , transitionDuration = 250
     , extent
     , brushExtent = null
@@ -82,7 +83,7 @@ nv.models.multiBarWithBrushChart = function() {
     ;
   yAxis
     .orient((rightAlignYAxis) ? 'right' : 'left')
-    .tickFormat(d3.format(',.1f'))
+    .tickFormat(d3v3.format(',.1f'))
     ;
 
   controls.updateState(false);
@@ -98,7 +99,7 @@ nv.models.multiBarWithBrushChart = function() {
         top = e.pos[1] + ( offsetElement.offsetTop || 0),
         x = xAxis.tickFormat()(multibar.x()(e.point, e.pointIndex)),
         y = yAxis.tickFormat()(multibar.y()(e.point, e.pointIndex)),
-        content = tooltip(e.series.key, x, y, e, chart);
+        content = tooltip(e.point.seriesKey, x, y, e, chart);
 
     nv.tooltip.show([left, top], content, e.value < 0 ? 'n' : 's', null, offsetElement);
   };
@@ -108,11 +109,12 @@ nv.models.multiBarWithBrushChart = function() {
 
   function chart(selection) {
     selection.each(function(data) {
-      var container = d3.select(this),
+      var container = d3v3.select(this),
           that = this;
 
       var availableWidth = (width  || parseInt(container.style('width')) || 960)
                              - margin.left - margin.right,
+          availableChartWidth = Math.max(availableWidth - legendWidth, 0),
           availableHeight = (height || parseInt(container.style('height')) || 400)
                              - margin.top - margin.bottom;
 
@@ -191,7 +193,11 @@ nv.models.multiBarWithBrushChart = function() {
       gEnter.append('g').attr('class', 'nv-x nv-axis');
       gEnter.append('g').attr('class', 'nv-y nv-axis');
       gEnter.append('g').attr('class', 'nv-barsWrap');
-      gEnter.append('g').attr('class', 'nv-legendWrap');
+      // We put the legend in an another SVG to support scrolling
+      var legendDiv = d3.select(container.node().parentNode).select('div');
+      var legendSvg = legendDiv.select('svg').size() === 0 ? legendDiv.append('svg') : legendDiv.select('svg');
+      legendSvg.style('height', (data.length * 20 + 6) + 'px').selectAll('g').remove();
+      var legendG = legendSvg.append('g').attr('class', 'nvd3 nv-wrap nv-legendWrap');
       gEnter.append('g').attr('class', 'nv-controlsWrap');
 
 
@@ -202,28 +208,26 @@ nv.models.multiBarWithBrushChart = function() {
       // Legend
 
       if (showLegend) {
-        legend.width(availableWidth - controlWidth());
-
+        legend.width(legendWidth);
+        legend.height(availableHeight);
+        legend.rightAlign(false);
+        legend.margin({top: 5, right: 0, left: 10, bottom: 0});
         if (multibar.barColor())
           data.forEach(function(series,i) {
-            series.color = d3.rgb('#ccc').darker(i * 1.5).toString();
-          })
+            series.color = d3v3.rgb('#ccc').darker(i * 1.5).toString();
+          });
 
         try {
-          g.select('.nv-legendWrap')
-              .datum(data)
-              .call(legend);
+          legendG
+            .datum(data)
+            .call(legend)
+          .selectAll('text')
+          .append('title')
+          .text(function(d){
+            return d.key;
+          });
         }
         catch (e){}
-
-        if ( margin.top != legend.height()) {
-          margin.top = legend.height();
-          availableHeight = (height || parseInt(container.style('height')) || 400)
-                             - margin.top - margin.bottom;
-        }
-
-        g.select('.nv-legendWrap')
-            .attr('transform', 'translate(' + controlWidth() + ',' + (-margin.top) +')');
       }
 
       //------------------------------------------------------------
@@ -256,7 +260,7 @@ nv.models.multiBarWithBrushChart = function() {
 
       if (rightAlignYAxis) {
           g.select(".nv-y.nv-axis")
-              .attr("transform", "translate(" + availableWidth + ",0)");
+              .attr("transform", "translate(" + availableChartWidth + ",0)");
       }
 
       //------------------------------------------------------------
@@ -264,7 +268,7 @@ nv.models.multiBarWithBrushChart = function() {
 
       multibar
         .disabled(data.map(function(series) { return series.disabled }))
-        .width(availableWidth)
+        .width(availableChartWidth)
         .height(availableHeight)
         .color(data.map(function(d,i) {
           return d.color || color(d, i);
@@ -339,7 +343,7 @@ nv.models.multiBarWithBrushChart = function() {
       if (showXAxis) {
           xAxis
             .scale(x)
-            .ticks( availableWidth / 100 )
+            .ticks( availableChartWidth / 100 )
             .tickSize(-availableHeight, 0);
 
           g.select('.nv-x.nv-axis')
@@ -365,7 +369,7 @@ nv.models.multiBarWithBrushChart = function() {
               xTicks
                 .selectAll("text")
                 .attr('transform', function(d,i,j) {
-                    var self = d3.select(this),
+                    var self = d3v3.select(this),
                       textLength = self.node().getComputedTextLength(),
                       text = self.text();
                     while (textLength > rangeBand && text.length > 0) {
@@ -376,7 +380,7 @@ nv.models.multiBarWithBrushChart = function() {
                     return  getTranslate(0, (j % 2 == 0 ? staggerUp : staggerDown));
                   });
 
-              var totalInBetweenTicks = d3.selectAll(".nv-x.nv-axis .nv-wrap g g text")[0].length;
+              var totalInBetweenTicks = d3v3.selectAll(".nv-x.nv-axis .nv-wrap g g text")[0].length;
               g.selectAll(".nv-x.nv-axis .nv-axisMaxMin text")
                 .attr("transform", function(d,i) {
                     return getTranslate(0, (i === 0 || totalInBetweenTicks % 2 !== 0) ? staggerDown : staggerUp);
@@ -386,7 +390,7 @@ nv.models.multiBarWithBrushChart = function() {
           if (reduceXTicks)
             xTicks
               .filter(function(d,i) {
-                  return i % Math.ceil(data[0].values.length / (availableWidth / 100)) !== 0;
+                  return i % Math.ceil(data[0].values.length / (availableChartWidth / 100)) !== 0;
                 })
               .selectAll('text, line')
               .style('opacity', 0);
@@ -406,7 +410,7 @@ nv.models.multiBarWithBrushChart = function() {
           yAxis
             .scale(y)
             .ticks( availableHeight / 36 )
-            .tickSize( -availableWidth, 0);
+            .tickSize( -availableChartWidth, 0);
 
           g.select('.nv-y.nv-axis').transition()
               .call(yAxis);
@@ -450,6 +454,7 @@ nv.models.multiBarWithBrushChart = function() {
         }
 
         state.stacked = multibar.stacked();
+        state.selectionEnabled = selectionEnabled;
         if (onStateChange != null) {
           onStateChange(state);
         }
@@ -550,7 +555,7 @@ nv.models.multiBarWithBrushChart = function() {
   chart.yAxis = yAxis;
   chart.LABELS = LABELS;
 
-  d3.rebind(chart, multibar, 'x', 'y', 'xDomain', 'yDomain', 'xRange', 'yRange', 'forceX', 'forceY', 'clipEdge',
+  d3v3.rebind(chart, multibar, 'x', 'y', 'xDomain', 'yDomain', 'xRange', 'yRange', 'forceX', 'forceY', 'clipEdge',
    'id', 'stacked', 'stackOffset', 'delay', 'barColor','groupSpacing');
 
   chart.options = nv.utils.optionsFunc.bind(chart);

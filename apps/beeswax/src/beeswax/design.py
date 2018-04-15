@@ -127,7 +127,7 @@ class HQLdesign(object):
   @property
   def statements(self):
     hql_query = strip_trailing_semicolon(self.hql_query)
-    return [strip_trailing_semicolon(statement.strip()) for (start_row, start_col), (end_row, end_col), statement in split_statements(hql_query)]
+    return [strip_trailing_semicolon(statement) for (start_row, start_col), (end_row, end_col), statement in split_statements(hql_query)]
 
   @staticmethod
   def get_default_data_dict():
@@ -232,6 +232,7 @@ class HQLdesign(object):
     return not self.__eq__(other)
 
 
+# Note: Might be replaceable by sqlparse.split
 def split_statements(hql):
   """
   Split statements at semicolons ignoring the ones inside quotes and comments.

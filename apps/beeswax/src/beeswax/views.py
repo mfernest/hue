@@ -32,6 +32,7 @@ from django.utils.translation import ugettext as _
 from django.core.urlresolvers import reverse
 
 from desktop.appmanager import get_apps_dict
+from desktop.conf import ENABLE_DOWNLOAD, REDIRECT_WHITELIST
 from desktop.context_processors import get_app_name
 from desktop.lib.paginator import Paginator
 from desktop.lib.django_util import JsonResponse
@@ -40,6 +41,7 @@ from desktop.lib.django_util import login_notrequired, get_desktop_uri_prefix
 from desktop.lib.exceptions_renderable import PopupException
 from desktop.models import Document
 from desktop.lib.parameterization import find_variables
+from desktop.views import serve_403_error
 from notebook.models import escape_rows
 
 import beeswax.forms
@@ -57,6 +59,7 @@ LOG = logging.getLogger(__name__)
 # For scraping Job IDs from logs
 HADOOP_JOBS_RE = re.compile("Starting Job = ([a-z0-9_]+?),")
 SPARK_APPLICATION_RE = re.compile("Running with YARN Application = (?P<application_id>application_\d+_\d+)")
+TEZ_APPLICATION_RE = re.compile("Executing on YARN cluster with App id ([a-z0-9_]+?)\)")
 
 
 def index(request):
@@ -367,6 +370,9 @@ def massage_query_history_for_json(app_name, query_history):
 
 
 def download(request, id, format):
+  if not ENABLE_DOWNLOAD.get():
+    return serve_403_error(request)
+
   try:
     query_history = authorized_get_query_history(request, id, must_exist=True)
     db = dbms.get(request.user, query_history.get_query_server_config())
@@ -399,7 +405,7 @@ def execute_query(request, design_id=None, query_history_id=None):
         handle, state = _get_query_handle_and_state(query_history)
 
       if 'on_success_url' in request.GET:
-        if request.GET.get('on_success_url'):
+        if request.GET.get('on_success_url') and any([regexp.match(request.GET.get('on_success_url')) for regexp in REDIRECT_WHITELIST.get()]):
           action = 'watch-redirect'
         else:
           action = 'watch-results'
@@ -511,7 +517,7 @@ def view_results(request, id, first_row=0):
     'columns': columns,
     'expected_first_row': first_row,
     'log': log,
-    'hadoop_jobs': app_name != 'impala' and _parse_out_hadoop_jobs(log),
+    'hadoop_jobs': app_name != 'impala' and parse_out_jobs(log),
     'query_context': query_context,
     'can_save': False,
     'context_param': context_param,
@@ -584,7 +590,8 @@ def install_examples(request):
   if request.method == 'POST':
     try:
       app_name = get_app_name(request)
-      beeswax.management.commands.beeswax_install_examples.Command().handle(app_name=app_name, user=request.user)
+      db_name = request.POST.get('db_name', 'default')
+      beeswax.management.commands.beeswax_install_examples.Command().handle(app_name=app_name, db_name=db_name, user=request.user)
       response['status'] = 0
     except Exception, err:
       LOG.exception(err)
@@ -885,7 +892,7 @@ def parse_query_context(context):
   return pair
 
 
-def _parse_out_hadoop_jobs(log, engine='mr', with_state=False):
+def parse_out_jobs(log, engine='mr', with_state=False):
   """
   Ideally, Hive would tell us what jobs it has run directly from the Thrift interface.
 
@@ -897,6 +904,8 @@ def _parse_out_hadoop_jobs(log, engine='mr', with_state=False):
     start_pattern = HADOOP_JOBS_RE
   elif engine.lower() == 'spark':
     start_pattern = SPARK_APPLICATION_RE
+  elif engine.lower() == 'tez':
+    start_pattern = TEZ_APPLICATION_RE
   else:
     raise ValueError(_('Cannot parse job IDs for execution engine %(engine)s') % {'engine': engine})
 
@@ -911,7 +920,7 @@ def _parse_out_hadoop_jobs(log, engine='mr', with_state=False):
       if end_pattern in log:
         job = next((job for job in ret if job['job_id'] == job_id), None)
         if job is not None:
-           job['finished'] = True
+          job['finished'] = True
         else:
           ret.append({'job_id': job_id, 'started': True, 'finished': True})
     else:

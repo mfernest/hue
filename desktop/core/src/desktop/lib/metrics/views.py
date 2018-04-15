@@ -16,12 +16,17 @@
 # limitations under the License.
 
 import datetime
+import logging
 import json
 
 from django.views.decorators.http import require_GET
 
-from desktop.lib.django_util import JsonResponse, render, login_notrequired
+from desktop.lib.django_util import JsonResponse, login_notrequired, render
 from desktop.lib.metrics.registry import global_registry
+
+
+LOG = logging.getLogger(__name__)
+
 
 @login_notrequired
 @require_GET
@@ -35,4 +40,8 @@ def index(request):
       'timestamp': datetime.datetime.utcnow().isoformat(),
       'metric': global_registry().dump_metrics(),
   }
-  return JsonResponse(rep, indent=indent)
+  LOG.debug('Metrics: %s' % json.dumps(rep, indent=indent))
+  if request.is_ajax():
+    return JsonResponse(rep, json_dumps_params={'indent': indent})
+  else:
+    return render("metrics.mako", request, {'metrics': json.dumps(rep['metric']), 'is_embeddable': request.GET.get('is_embeddable', False)})

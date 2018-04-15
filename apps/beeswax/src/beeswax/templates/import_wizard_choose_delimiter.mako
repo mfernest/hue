@@ -19,27 +19,26 @@ from desktop.views import commonheader, commonfooter
 from django.utils.translation import ugettext as _
 %>
 
-<%namespace name="comps" file="beeswax_components.mako" />
-<%namespace name="util" file="util.mako" />
-<%namespace name="layout" file="layout.mako" />
 <%namespace name="assist" file="/assist.mako" />
-<%namespace name="tableStats" file="/table_stats.mako" />
-<%namespace name="require" file="/require.mako" />
+<%namespace name="comps" file="beeswax_components.mako" />
+<%namespace name="layout" file="layout.mako" />
+<%namespace name="util" file="util.mako" />
 
-
-${ commonheader(_('Create table from file'), 'metastore', user) | n,unicode }
+${ commonheader(_('Create table from file'), 'metastore', user, request) | n,unicode }
+<span class="notebook">
 ${ layout.metastore_menubar() }
 
-${ require.config() }
+<script src="${ static('desktop/ext/js/jquery/plugins/jquery-ui-1.10.4.custom.min.js') }"></script>
+<script src="${ static('desktop/ext/js/selectize.min.js') }"></script>
+<script src="${ static('metastore/js/metastore.ko.js') }"></script>
+<script src="${ static('desktop/ext/js/knockout-sortable.min.js') }"></script>
+<script src="${ static('desktop/js/ko.editable.js') }"></script>
 
-${ tableStats.tableStats() }
-${ assist.assistPanel() }
-
-
-<script src="${ static('desktop/ext/js/d3.v3.js') }" type="text/javascript" charset="utf-8"></script>
+${ assist.assistJSModels() }
 
 <link rel="stylesheet" href="${ static('metastore/css/metastore.css') }" type="text/css">
 <link rel="stylesheet" href="${ static('notebook/css/notebook.css') }">
+<link rel="stylesheet" href="${ static('notebook/css/notebook-layout.css') }">
 <style type="text/css">
 % if conf.CUSTOM.BANNER_TOP_HTML.get():
   .show-assist {
@@ -51,6 +50,7 @@ ${ assist.assistPanel() }
 % endif
 </style>
 
+${ assist.assistPanel() }
 
 <a title="${_('Toggle Assist')}" class="pointer show-assist" data-bind="visible: !$root.isLeftPanelVisible() && $root.assistAvailable(), click: function() { $root.isLeftPanelVisible(true); }">
   <i class="fa fa-chevron-right"></i>
@@ -71,10 +71,6 @@ ${ assist.assistPanel() }
               params: {
                 user: '${user.username}',
                 sql: {
-                  sourceTypes: [{
-                    name: 'hive',
-                    type: 'hive'
-                  }],
                   navigationSettings: {
                     openItem: false,
                     showStats: true
@@ -86,7 +82,7 @@ ${ assist.assistPanel() }
         </div>
         <div class="resizer" data-bind="visible: $root.isLeftPanelVisible() && $root.assistAvailable(), splitDraggable : { appName: 'notebook', leftPanelVisible: $root.isLeftPanelVisible }"><div class="resize-bar">&nbsp;</div></div>
 
-        <div class="right-panel">
+        <div class="content-panel">
 
           <div class="metastore-main">
             <h3>
@@ -95,7 +91,7 @@ ${ assist.assistPanel() }
                 <a href="${ url('beeswax:create_table', database=database) }" title="${_('Create a new table manually')}" class="inactive-action margin-left-10"><i class="fa fa-wrench"></i></a>
               </div>
 
-              <ul id="breadcrumbs" class="nav nav-pills hueBreadcrumbBar">
+              <ul id="breadcrumbs" class="nav nav-pills hue-breadcrumbs-bar">
                 <li>
                   <a href="${url('metastore:databases')}">${_('Databases')}</a><span class="divider">&gt;</span>
                 </li>
@@ -139,7 +135,7 @@ ${ assist.assistPanel() }
                       <label class="control-label">${_('Table preview')}</label>
                       <div class="controls">
                           <div class="scrollable">
-                              <table class="table table-striped table-condensed">
+                              <table class="table table-condensed">
                                   <thead>
                                   <tr>
                                     % for i in range(n_cols):
@@ -186,25 +182,15 @@ ${ assist.assistPanel() }
   }
 </style>
 
-<script type="text/javascript" charset="utf-8">
+<script type="text/javascript">
+  (function () {
+    if (ko.options) {
+      ko.options.deferUpdates = true;
+    }
 
-  require([
-    "knockout",
-    "ko.charts",
-    "desktop/js/apiHelper",
-    "assistPanel",
-    "tableStats",
-    "knockout-mapping",
-    "knockout-sortable",
-    "ko.editable",
-    "ko.hue-bindings"
-  ], function (ko, charts, ApiHelper) {
-
-    ko.options.deferUpdates = true;
-
-    function MetastoreViewModel(options) {
+    function ImportWizardChooseDelimiterViewModel() {
       var self = this;
-      self.apiHelper = ApiHelper.getInstance(options);
+      self.apiHelper = ApiHelper.getInstance();
       self.assistAvailable = ko.observable(true);
       self.isLeftPanelVisible = ko.observable();
       self.apiHelper.withTotalStorage('assist', 'assist_panel_visible', self.isLeftPanelVisible, true);
@@ -221,15 +207,7 @@ ${ assist.assistPanel() }
 
     $(document).ready(function () {
 
-      var options = {
-        user: '${ user.username }',
-        i18n: {
-          errorLoadingDatabases: "${ _('There was a problem loading the databases') }",
-          errorLoadingTablePreview: "${ _('There was a problem loading the table preview.') }"
-        }
-      }
-
-      var viewModel = new MetastoreViewModel(options);
+      var viewModel = new ImportWizardChooseDelimiterViewModel(options);
 
       ko.applyBindings(viewModel);
 
@@ -269,11 +247,10 @@ ${ assist.assistPanel() }
           $("input[name='submit_delim']").click();
         }
       });
-
     });
-  });
-
+  })();
 </script>
 
+</span>
 
 ${ commonfooter(request, messages) | n,unicode }

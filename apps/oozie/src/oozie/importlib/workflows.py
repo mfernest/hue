@@ -35,6 +35,7 @@ import json
 import logging
 from lxml import etree
 import os
+import re
 
 from django.core import serializers
 from django.utils.encoding import smart_str
@@ -653,7 +654,8 @@ def import_workflow_root(workflow, workflow_definition_root, metadata=None, fs=N
       })
 
     # Get XSLT
-    xslt = etree.parse(xslt_definition_fh)
+    parser = etree.XMLParser(resolve_entities=False)
+    xslt = etree.parse(xslt_definition_fh, parser=parser)
     xslt_definition_fh.close()
     transform = etree.XSLT(xslt)
 
@@ -705,13 +707,14 @@ def generate_v2_graph_nodes(workflow_definition):
     raise InvalidTagWithNamespaceException(workflow_definition_root.tag)
 
   # Get XSLT
-  xslt = etree.parse(xslt_definition_fh)
+  parser = etree.XMLParser(resolve_entities=False)
+  xslt = etree.parse(xslt_definition_fh, parser=parser)
   xslt_definition_fh.close()
   transform = etree.XSLT(xslt)
 
   # Transform XML using XSLT
   transformed_root = transform(workflow_definition_root)
-  node_list = str(transformed_root).replace('\n', '').replace(' ', '')
+  node_list = re.sub('[\s]', '', str(transformed_root))
   node_list = json.loads(node_list)
 
   return [node for node in node_list if node]

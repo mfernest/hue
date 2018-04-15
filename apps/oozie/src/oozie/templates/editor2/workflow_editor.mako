@@ -14,9 +14,12 @@
 ## See the License for the specific language governing permissions and
 ## limitations under the License.
 <%!
-from desktop.views import commonheader, commonfooter, commonshare, _ko
-from desktop import conf
 from django.utils.translation import ugettext as _
+
+from desktop import conf
+from desktop.views import commonheader, commonfooter, commonshare, _ko
+
+from oozie.conf import ENABLE_DOCUMENT_ACTION, ENABLE_IMPALA_ACTION
 %>
 
 <%namespace name="dashboard" file="/common_dashboard.mako" />
@@ -24,8 +27,11 @@ from django.utils.translation import ugettext as _
 <%namespace name="workflow" file="common_workflow.mako" />
 <%namespace name="layout" file="../navigation-bar.mako" />
 
-${ commonheader(_("Workflow Editor"), "Oozie", user, "40px") | n,unicode }
-<div id="editor">
+%if not is_embeddable:
+${ commonheader(_("Workflow Editor"), "Oozie", user, request, "40px") | n,unicode }
+%endif
+
+<div id="oozie_workflowComponents" class="dashboard-container oozie_workflowComponents">
 
 <%def name="buttons()">
   <div class="pull-right" style="padding-right: 10px">
@@ -38,55 +44,62 @@ ${ commonheader(_("Workflow Editor"), "Oozie", user, "40px") | n,unicode }
       <i class="fa fa-fw fa-pencil"></i>
     </a>
 
-    &nbsp;&nbsp;&nbsp;
-
     <a title="${ _('Submit') }" rel="tooltip" data-placement="bottom" data-bind="click: showSubmitPopup, css: {'btn': true, 'disabled': workflow.isDirty()}, visible: workflow.id() != null">
       <i class="fa fa-fw fa-play"></i>
     </a>
-
-    <a title="${ _('Schedule') }" rel="tooltip" data-placement="bottom" data-bind="click: schedule, css: {'btn': true, 'disabled': workflow.isDirty()}, visible: workflow.id() != null">
-      <i class="fa fa-fw fa-calendar"></i>
-    </a>
-
-    &nbsp;&nbsp;&nbsp;
-
-    <a title="${ _('Settings') }" rel="tooltip" data-placement="bottom" data-toggle="modal" data-target="#settingsModal" data-bind="css: {'btn': true}, visible: canEdit">
-      <i class="fa fa-fw fa-cog"></i>
-    </a>
-
-    <a title="${ _('History') }" rel="tooltip" data-placement="bottom" data-toggle="modal" data-target="#historyModal" data-bind="css: {'btn': true}, visible: workflow.id() != null && history().length > 0">
-      <i class="fa fa-fw fa-history"></i>
-    </a>
-
-    <a title="${ _('Workspace') }" target="_blank" rel="tooltip" data-placement="right"
-        data-original-title="${ _('Go upload additional files and libraries to the deployment directory on HDFS') }"
-        data-bind="css: {'btn': true}, attr: { href: '/filebrowser/view=' + $root.workflow.properties.deployment_dir() }">
-      <i class="fa fa-fw fa-folder-open"></i>
-    </a>
-
-    &nbsp;&nbsp;&nbsp;
 
     <a title="${ _('Save') }" rel="tooltip" data-placement="bottom" data-loading-text="${ _("Saving...") }" data-bind="click: validateAndSave, css: {'btn': true, 'disabled': $root.isSaving()}, visible: canEdit">
       <i class="fa fa-fw fa-save"></i>
     </a>
 
-    <a class="share-link btn" rel="tooltip" data-placement="bottom" data-bind="click: openShareModal,
-        attr: {'data-original-title': '${ _ko("Share") } ' + name},
-        css: {'isShared': isShared(), 'btn': true},
-        visible: workflow.id() != null && canEdit()">
-      <i class="fa fa-users"></i>
-    </a>
-
-    &nbsp;&nbsp;&nbsp;
-
-    <a class="btn" href="${ url('oozie:new_workflow') }" title="${ _('New') }" rel="tooltip" data-placement="bottom" data-bind="css: {'btn': true}">
-      <i class="fa fa-fw fa-file-o"></i>
-    </a>
+    <div class="dropdown pull-right margin-left-10">
+      <a class="btn" data-toggle="dropdown" href="javascript: void(0)">
+        <i class="fa fa-fw fa-ellipsis-v"></i>
+      </a>
+      <ul class="dropdown-menu">
+        <li>
+          <a href="javascript: void(0)" data-bind="hueLink: '${ url('oozie:new_workflow') }'">
+            <i class="fa fa-fw fa-file-o"></i> ${ _('New') }
+          </a>
+        </li>
+        %if is_embeddable:
+          <li>
+            <a href="javascript: void(0)" data-bind="publish: { 'assist.show.documents': 'oozie-workflow2' }">
+              <svg class="hi hi-fw hi-bigger"><use xlink:href="#hi-documents"></use></svg> ${ _('Workflows') }
+            </a>
+          </li>
+        %endif
+        <li class="divider"></li>
+        <li data-bind="visible: workflow.id() != null, css: {'disabled': workflow.isDirty()}">
+          <a class="pointer" data-bind="click: schedule">
+            <i class="fa fa-fw fa-calendar"></i> ${ _('Schedule') }
+          </a>
+        </li>
+        <li data-bind="visible: canEdit">
+          <a class="pointer" data-toggle="modal" data-target="#settingsModal">
+            <i class="fa fa-fw fa-cog"></i> ${ _('Settings') }
+          </a>
+        </li>
+        <li>
+          <a ${ not is_embeddable and 'target="_blank"' or ''}
+              title="${ _('Go upload additional files and libraries to the deployment directory') }"
+              data-bind="hueLink: '/filebrowser/view=' + $root.workflow.properties.deployment_dir()"
+            >
+            <i class="fa fa-fw fa-folder-open"></i> ${ _('Workspace') }
+          </a>
+        </li>
+        <li data-bind="visible: workflow.id() != null && canEdit()">
+          <a class="pointer share-link" rel="tooltip" data-placement="bottom" data-bind="click: openShareModal, css: {'isShared': isShared()}">
+            <i class="fa fa-fw fa-users"></i> ${ _("Share") }
+          </a>
+        </li>
+      </ul>
+    </div>
 
   </div>
 </%def>
 
-${ layout.menubar(section='workflows', is_editor=True, pullright=buttons) }
+${ layout.menubar(section='workflows', is_editor=True, pullright=buttons, is_embeddable=is_embeddable) }
 
 <style type="text/css">
   body {
@@ -94,10 +107,11 @@ ${ layout.menubar(section='workflows', is_editor=True, pullright=buttons) }
   }
 </style>
 
+
 <script type="text/javascript">
   if (window.location.hash != "") {
     if (window.location.hash.indexOf("workflow") > -1) {
-      location.href = "/oozie/editor/workflow/edit/?" + window.location.hash.substr(1).replace(/(<([^>]+)>)/ig, "");
+      location.href = (IS_HUE_4 ? '/hue' : '') + "/oozie/editor/workflow/edit/?" + window.location.hash.substr(1).replace(/(<([^>]+)>)/ig, "");
     }
   }
 </script>
@@ -106,142 +120,305 @@ ${ layout.menubar(section='workflows', is_editor=True, pullright=buttons) }
 
 <%dashboard:layout_toolbar>
   <%def name="skipLayout()"></%def>
-  <%def name="widgetSectionName()">${ _('DOCUMENTS') }</%def>
+  <%def name="widgetSectionName()">
+    % if ENABLE_DOCUMENT_ACTION.get():
+      <a class="dropdown-toggle" data-toggle="dropdown" href="javascript: void(0)">
+        <!-- ko if: $root.currentDraggableSection() === 'documents' -->
+        ${ _('DOCUMENTS') }
+        <!-- /ko -->
+        <!-- ko if: $root.currentDraggableSection() === 'actions' -->
+        ${ _('ACTIONS') }
+        <!-- /ko -->
+        <b class="caret"></b>
+      </a>
+    <ul class="dropdown-menu toolbar-dropdown">
+      <!-- ko if: $root.currentDraggableSection() === 'actions' -->
+      <li><a href="javascript: void(0)" data-bind="click: function(){ $root.currentDraggableSection('documents') }">${ _('Documents') }</a></li>
+      <!-- /ko -->
+      <!-- ko if: $root.currentDraggableSection() === 'documents' -->
+      <li><a href="javascript: void(0)" data-bind="click: function(){ $root.currentDraggableSection('actions') }">${ _('Actions') }</a></li>
+      <!-- /ko -->
+    </ul>
+    % endif
+  </%def>
   <%def name="widgets()">
+    % if ENABLE_DOCUMENT_ACTION.get():
+    <!-- ko if: $root.currentDraggableSection() === 'documents' -->
+    <div class="draggable-documents">
+
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('hive') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableHiveDocumentAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableHiveDocumentAction());}}}"
-         title="${_('Saved Hive query')}" rel="tooltip" data-placement="top">
-         <a class="draggable-icon"><img src="${ static('oozie/art/icon_beeswax_48.png') }" class="app-icon"><sup style="color: #338bb8; margin-left: -4px; top: -14px; font-size: 12px">2</sup></a>
+         title="${_('Hive query')}" rel="tooltip" data-placement="top">
+         <a class="draggable-icon"><img src="${ static('oozie/art/icon_beeswax_48.png') }" class="app-icon" alt="${ _('Hive icon') }"><sup style="color: #0B7FAD; margin-left: -4px; top: -14px; font-size: 12px">2</sup></a>
     </div>
+    <!-- /ko -->
 
+    % if ENABLE_IMPALA_ACTION.get():
+      <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('impala') != -1 -->
+      <div data-bind="css: { 'draggable-widget': true },
+                    draggable: {data: draggableImpalaDocumentAction(), isEnabled: true,
+                    options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableImpalaDocumentAction());}}}"
+         title="${_('Impala query')}" rel="tooltip" data-placement="top">
+         <a class="draggable-icon"><img src="${ static('oozie/art/icon_impala_48.png') }" class="app-icon" alt="${ _('Impala icon') }"></a>
+      </div>
+      <!-- /ko -->
+    % endif
+
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('java') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableJavaDocumentAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableJavaDocumentAction());}}}"
          title="${_('Saved Java program')}" rel="tooltip" data-placement="top">
          <a class="draggable-icon"><i class="fa fa-file-code-o"></i></a>
     </div>
+    <!-- /ko -->
 
-    <div class="toolbar-label">${ _('ACTIONS') }</div>
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('spark2') != -1 -->
+    <div data-bind="css: { 'draggable-widget': true },
+                    draggable: {data: draggableSparkDocumentAction(), isEnabled: true,
+                    options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableSparkDocumentAction());}}}"
+         title="${_('Saved Spark program')}" rel="tooltip" data-placement="top">
+         <a class="draggable-icon"><img src="${ static('oozie/art/icon_spark_48.png') }" class="app-icon" alt="${ _('Spark icon') }"></a>
+    </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('pig') != -1 -->
+    <div data-bind="css: { 'draggable-widget': true },
+                    draggable: {data: draggablePigDocumentAction(), isEnabled: true,
+                    options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggablePigDocumentAction());}}}"
+         title="${_('Saved Pig script')}" rel="tooltip" data-placement="top">
+         <a class="draggable-icon"><img src="${ static('oozie/art/icon_pig_48.png') }" class="app-icon" alt="${ _('Pig icon') }"></a>
+    </div>
+    <!-- /ko -->
+
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('mapreduce') != -1 -->
+    <div data-bind="css: { 'draggable-widget': true },
+                    draggable: {data: draggableMapReduceDocumentAction(), isEnabled: true,
+                    options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableMapReduceDocumentAction());}}}"
+         title="${_('Saved MapReduce job')}" rel="tooltip" data-placement="top">
+         <a class="draggable-icon"><i class="fa fa-file-archive-o"></i></a>
+    </div>
+    <!-- /ko -->
+
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('sqoop1') != -1 -->
+    <div data-bind="css: { 'draggable-widget': true },
+                    draggable: {data: draggableSqoopDocumentAction(), isEnabled: true,
+                    options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableSqoopDocumentAction());}}}"
+         title="${_('Saved Sqoop command')}" rel="tooltip" data-placement="top">
+         <a class="draggable-icon"><img src="${ static('oozie/art/icon_sqoop_48.png') }" class="app-icon" alt="${ _('Sqoop icon') }"></a>
+    </div>
+    <!-- /ko -->
+
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('distcp') != -1 -->
+    <div data-bind="css: { 'draggable-widget': true },
+                    draggable: {data: draggableDistCpDocumentAction(), isEnabled: true,
+                    options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableDistCpDocumentAction());}}}"
+         title="${_('Saved DistCp command')}" rel="tooltip" data-placement="top">
+         <a class="draggable-icon"><i class="fa fa-files-o"></i></a>
+    </div>
+    <!-- /ko -->
+
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('shell') != -1 -->
+    <div data-bind="css: { 'draggable-widget': true },
+                    draggable: {data: draggableShellDocumentAction(), isEnabled: true,
+                    options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableShellDocumentAction());}}}"
+         title="${_('Saved Shell command')}" rel="tooltip" data-placement="top">
+         <a class="draggable-icon"><i class="fa fa-terminal"></i></a>
+    </div>
+    <!-- /ko -->
+
+      <div class="clearfix"></div>
+
+    </div>
+    <!-- /ko -->
+    % endif
+
+    <!-- ko if: $root.currentDraggableSection() === 'actions' -->
+    <div class="draggable-actions">
+
+    % if not ENABLE_DOCUMENT_ACTION.get():
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('hive') != -1 -->
+    <div data-bind="css: { 'draggable-widget': true },
+                    draggable: {data: draggableHiveDocumentAction(), isEnabled: true,
+                    options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableHiveDocumentAction());}}}"
+         title="${_('Hive query')}" rel="tooltip" data-placement="top">
+         <a class="draggable-icon"><img src="${ static('oozie/art/icon_beeswax_48.png') }" class="app-icon" alt="${ _('Hive icon') }"><sup style="color: #0B7FAD; margin-left: -4px; top: -14px; font-size: 12px">2</sup></a>
+    </div>
+    <!-- /ko -->
+    % endif
+
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('hive') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableHiveAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableHiveAction());}}}"
          title="${_('Hive Script')}" rel="tooltip" data-placement="top">
-         <a class="draggable-icon"><img src="${ static('oozie/art/icon_beeswax_48.png') }" class="app-icon"></a>
+         <a class="draggable-icon"><img src="${ static('oozie/art/icon_beeswax_48.png') }" class="app-icon" alt="${ _('Hive icon') }"></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('hive') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableHive2Action(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableHive2Action());}}}"
          title="${_('HiveServer2 Script')}" rel="tooltip" data-placement="top">
-         <a class="draggable-icon"><img src="${ static('oozie/art/icon_beeswax_48.png') }" class="app-icon"><sup style="color: #338bb8; margin-left: -4px; top: -14px; font-size: 12px">2</sup></a>
+         <a class="draggable-icon"><img src="${ static('oozie/art/icon_beeswax_48.png') }" class="app-icon" alt="${ _('Hive icon') }"><sup style="color: #0B7FAD; margin-left: -4px; top: -14px; font-size: 12px">2</sup></a>
     </div>
+    <!-- /ko -->
 
+    % if ENABLE_IMPALA_ACTION.get():
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('impala') != -1 -->
+    <div data-bind="css: { 'draggable-widget': true },
+                    draggable: {data: draggableImpalaAction(), isEnabled: true,
+                    options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableImpalaAction());}}}"
+         title="${_('Impala Script')}" rel="tooltip" data-placement="top">
+         <a class="draggable-icon"><img src="${ static('oozie/art/icon_impala_48.png') }" class="app-icon" alt="${ _('Impala icon') }"></a>
+    </div>
+    <!-- /ko -->
+    % endif
+
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('pig') != -1 -->
     <div data-bind="css: { 'draggable-widget': true},
                     draggable: {data: draggablePigAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggablePigAction());}}}"
          title="${_('Pig Script')}" rel="tooltip" data-placement="top">
-         <a class="draggable-icon"><img src="${ static('oozie/art/icon_pig_48.png') }" class="app-icon"></a>
+         <a class="draggable-icon"><img src="${ static('oozie/art/icon_pig_48.png') }" class="app-icon" alt="${ _('Pig icon') }"></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('spark2') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableSparkAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableSparkAction());}}}"
          title="${_('Spark program')}" rel="tooltip" data-placement="top">
-         <a class="draggable-icon"><img src="${ static('oozie/art/icon_spark_48.png') }" class="app-icon"></a>
+         <a class="draggable-icon"><img src="${ static('oozie/art/icon_spark_48.png') }" class="app-icon" alt="${ _('Spark icon') }"></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('java') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableJavaAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableJavaAction());}}}"
          title="${_('Java program')}" rel="tooltip" data-placement="top">
          <a class="draggable-icon"><i class="fa fa-file-code-o"></i></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('sqoop1') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableSqoopAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableSqoopAction());}}}"
          title="${_('Sqoop 1')}" rel="tooltip" data-placement="top">
-         <a class="draggable-icon"><img src="${ static('oozie/art/icon_sqoop_48.png') }" class="app-icon"></a>
+         <a class="draggable-icon"><img src="${ static('oozie/art/icon_sqoop_48.png') }" class="app-icon" alt="${ _('Sqoop icon') }"></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('mapreduce') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableMapReduceAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableMapReduceAction());}}}"
          title="${_('MapReduce job')}" rel="tooltip" data-placement="top">
          <a class="draggable-icon"><i class="fa fa-file-archive-o"></i></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('subworkflow') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableSubworkflowAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableSubworkflowAction());}}}"
          title="${_('Sub workflow')}" rel="tooltip" data-placement="top">
          <a class="draggable-icon"><i class="fa fa-code-fork"></i></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('shell') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableShellAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableShellAction());}}}"
          title="${_('Shell')}" rel="tooltip" data-placement="top">
          <a class="draggable-icon"><i class="fa fa-terminal"></i></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('ssh') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableSshAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableSshAction());}}}"
          title="${_('Ssh')}" rel="tooltip" data-placement="top">
          <a class="draggable-icon"><i class="fa fa-tty"></i></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('fs') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableFsAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableFsAction());}}}"
-         title="${_('HDFS Fs')}" rel="tooltip" data-placement="top">
+         title="${_('Fs')}" rel="tooltip" data-placement="top">
          <a class="draggable-icon"><i class="fa fa-file-o"></i></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('email') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableEmailAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableEmailAction());}}}"
          title="${_('Email')}" rel="tooltip" data-placement="top">
          <a class="draggable-icon"><i class="fa fa-envelope-o"></i></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('streaming') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableStreamingAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableStreamingAction());}}}"
          title="${_('Streaming')}" rel="tooltip" data-placement="top">
          <a class="draggable-icon"><i class="fa fa-exchange"></i></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('distcp') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableDistCpAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableDistCpAction());}}}"
          title="${_('Distcp')}" rel="tooltip" data-placement="top">
          <a class="draggable-icon"><i class="fa fa-files-o"></i></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('generic') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableGenericAction(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableGenericAction());}}}"
          title="${_('Generic')}" rel="tooltip" data-placement="top">
          <a class="draggable-icon"><i class="fa fa-code"></i></a>
     </div>
+    <!-- /ko -->
 
+    <!-- ko if: $root.availableActions().length == 0 || $root.availableActions().indexOf('stop') != -1 -->
     <div data-bind="css: { 'draggable-widget': true },
                     draggable: {data: draggableKillNode(), isEnabled: true,
                     options: {'refreshPositions': true, 'stop': function(){ $root.isDragging(false); }, 'start': function(event, ui){ $root.isDragging(true); $root.currentlyDraggedWidget(draggableKillNode());}}}"
          title="${_('Kill')}" rel="tooltip" data-placement="top">
          <a class="draggable-icon"><i class="fa fa-stop"></i></a>
     </div>
+    <!-- /ko -->
+
+      <div class="clearfix"></div>
+
+    </div>
+    <!-- /ko -->
 </%def>
 </%dashboard:layout_toolbar>
 
 
   <div class="container-fluid">
   <div class="row-fluid">
+    %if is_embeddable:
+    <div class="span12 margin-top-20">
+    %else:
     <div class="span12" data-bind="style:{'marginTop' : $root.isEditing() ? '120px': '50px'}">
+    %endif
     <div class="object-name" style="text-align: center">
       <span data-bind="editable: $root.workflow.name, editableOptions: {enabled: $root.isEditing(), placement: 'right'}"></span>
     </div>
@@ -260,6 +437,15 @@ ${ workflow.render() }
 
 <div id="addActionDemiModal" class="demi-modal demi-modal-half hide" data-backdrop="false">
   <div class="modal-body">
+
+    <!-- ko if: newAction() && newAction().widgetType() == 'fs-widget' -->
+    <ul class="unstyled">
+      <li>
+        ${ _('Select some file systems operations after adding the action.') }
+      </li>
+    </ul>
+    <!-- /ko -->
+
     <table data-bind="foreach: addActionProperties">
       <tr>
         <td data-bind="text: label" style="width: 1%; padding-right: 10px" class="no-wrap"></td>
@@ -276,17 +462,15 @@ ${ workflow.render() }
           <!-- ko if: type() == 'workflow' -->
           <select data-bind="options: $root.subworkflows, optionsText: 'name', optionsValue: 'value', value: value"></select>
           <!-- /ko -->
-          <!-- ko if: type() == 'hive' || type() == 'java' -->
-          <select data-bind="options: type() == 'java' ? $root.javaQueries() : $root.hiveQueries(), optionsText: 'name', optionsValue: 'uuid', value: value, select2Version4:{ placeholder: '${ _ko('Document name...')}'}"></select>
-          <!-- ko if: $root.getDocumentById(type(), value()) -->
-            <!-- ko with: $root.getDocumentById(type(), value()) -->
-              <a href="#" data-bind="attr: { href: $data.absoluteUrl() }" target="_blank" title="${ _('Open') }">
+          <!-- ko if: ['hive', 'impala', 'java', 'spark', 'pig', 'sqoop', 'distcp-doc', 'shell-doc', 'mapreduce-doc'].indexOf(type()) != -1 -->
+            <div class="selectize-wrapper" style="width: 300px;">
+              <select placeholder="${ _('Search your documents...') }" data-bind="documentChooser: { value: value, document: $root.tempDocument, type: type }"></select>
+            </div>
+            <!-- ko if: $root.tempDocument -->
+              <a class="pointer" data-bind="hueLink: $root.tempDocument().absoluteUrl" title="${ _('Open') }">
                 <i class="fa fa-external-link-square"></i>
               </a>
-              </br>
-              <span data-bind='text: $data.description' class="muted"></span>
             <!-- /ko -->
-          <!-- /ko -->
           <!-- /ko -->
 
           <!-- ko if: type() == 'distcp' -->
@@ -305,9 +489,10 @@ ${ workflow.render() }
           <!-- ko if: ['jar_path', 'script_path', 'mapper', 'reducer', 'hive_xml'].indexOf(name()) != -1 &&  value().length > 0 -->
             <span data-bind='template: { name: "common-fs-link", data: {path: value(), with_label: false}}'></span>
           <!-- /ko -->
+
           <!-- ko if: name() == 'workflow' && $root.getSubWorkflow(value())-->
           <span data-bind="with: $root.getSubWorkflow(value())">
-            <a href="#" data-bind="attr: { href: '${ url('oozie:edit_workflow') }' + '?workflow=' + $data.value() }" target="_blank" title="${ _('Open') }">
+            <a href="#" data-bind="hueLink: '${ url('oozie:edit_workflow') }' + '?workflow=' + $data.value()" title="${ _('Open') }">
               <i class="fa fa-external-link-square"></i>
             </a>
           </span>
@@ -325,8 +510,8 @@ ${ workflow.render() }
 
 <div id="settingsModal" class="modal fade hide">
   <div class="modal-header" style="padding-bottom: 2px">
-    <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
-    <h3>${ _('Workflow Settings') }</h3>
+    <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+    <h2 class="modal-title">${ _('Workflow Settings') }</h2>
   </div>
   <div class="modal-body">
       <h4>${ _('Variables') }</h4>
@@ -379,66 +564,7 @@ ${ workflow.render() }
 </div>
 
 
-<div id="historyModal" class="modal fade hide">
-  <div class="modal-header" style="padding-bottom: 2px">
-    <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
-    <h3>${ _('Submission History') }</h3>
-  </div>
-  <div class="modal-body">
-    <table class="table table-condensed margin-top-20">
-      <tr>
-        <th width="30%">${ _('Date') }</th>
-        <th>${ _('ID') }</th>
-        <th width="20">&nbsp;</th>
-      </tr>
-      <!-- ko foreach: $root.history -->
-      <tr>
-        <td data-bind="text: $data.date"></td>
-        <td><a data-bind="attr:{'href': '/oozie/list_oozie_workflow/' + $data.history.oozie_id() + '/' }, text: $data.history.oozie_id" target="_blank"></a></td>
-        <td><a class="pointer" data-bind="click: function(){$data.expanded(!$data.expanded())}"><i class="fa fa-info-circle"></i></a></td>
-      </tr>
-      <tr data-bind="slideVisible: $data.expanded">
-        <td colspan="3" style="padding-left: 20px;border-left: 5px solid #DDD;">
-        <dl>
-          <!-- ko foreach: Object.keys($data.history.properties) -->
-          <dt data-bind="text: $data"></dt>
-          <dd>
-            <!-- ko if: typeof $parent.history.properties[$data] == 'function' -->
-              <!-- ko if: typeof $parent.history.properties[$data]() == 'string' && $parent.history.properties[$data]().indexOf('/') == 0 -->
-                <a data-bind="text: $parent.history.properties[$data], attr: { href: '/filebrowser/view=' + $root.workflow.properties.deployment_dir() }" target="_blank"></a>
-              <!-- /ko -->
-              <!-- ko ifnot: typeof $parent.history.properties[$data]() == 'string' && $parent.history.properties[$data]().indexOf('/') == 0 -->
-              <span data-bind="text: $parent.history.properties[$data]"></span>
-              <!-- /ko -->
-            <!-- /ko -->
-          </dd>
-          <!-- /ko -->
-          </dl>
-        </td>
-      </tr>
-      <!-- /ko -->
-    </table>
-  </div>
-  <div class="modal-footer">
-    <a class="btn" data-dismiss="modal">${_('Close')}</a>
-  </div>
-</div>
-
-
 <div class="submit-modal modal hide"></div>
-
-<div id="chooseFile" class="modal hide fade">
-  <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3>${_('Choose a file')}</h3>
-  </div>
-  <div class="modal-body">
-      <div id="filechooser">
-      </div>
-  </div>
-  <div class="modal-footer">
-  </div>
-</div>
 
 
 </div>
@@ -453,25 +579,29 @@ ${ workflow.render() }
 
 ${ dashboard.import_layout() }
 
+%if not is_embeddable:
 ${ commonshare() | n,unicode }
+%endif
 
 <script src="${ static('desktop/ext/js/bootstrap-editable.min.js') }" type="text/javascript" charset="utf-8"></script>
 <script src="${ static('desktop/js/hue.utils.js') }"></script>
 <script src="${ static('desktop/js/ko.editable.js') }" type="text/javascript" charset="utf-8"></script>
 <script src="${ static('desktop/ext/chosen/chosen.jquery.min.js') }" type="text/javascript" charset="utf-8"></script>
 <script src="${ static('desktop/js/select2.full.patched.js') }" type="text/javascript" charset="utf-8"></script>
+% if not is_embeddable:
 <script src="${ static('desktop/js/share2.vm.js') }"></script>
-<script src="${ static('desktop/js/jquery.hdfsautocomplete.js') }" type="text/javascript" charset="utf-8"></script>
+%endif
 
 ${ dashboard.import_bindings() }
 
 <script src="${ static('oozie/js/workflow-editor.ko.js') }" type="text/javascript" charset="utf-8"></script>
 <script src="${ static('oozie/js/workflow-editor.utils.js') }" type="text/javascript" charset="utf-8"></script>
 <script src="${ static('desktop/ext/js/jquery/plugins/jquery.curvedarrow.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('oozie/js/editor2-utils.js') }" type="text/javascript" charset="utf-8"></script>
+
+${ utils.submit_popup_event() }
 
 <style type="text/css">
-% if conf.CUSTOM.BANNER_TOP_HTML.get():
+% if conf.CUSTOM.BANNER_TOP_HTML.get() or not is_embeddable:
   .card-toolbar {
     top: 100px!important;
   }
@@ -483,14 +613,26 @@ ${ dashboard.import_bindings() }
 <script type="text/javascript">
   ${ utils.slaGlobal() }
 
-  var viewModel = new WorkflowEditorViewModel(${ layout_json | n,unicode }, ${ workflow_json | n,unicode }, ${ credentials_json | n,unicode }, ${ workflow_properties_json | n,unicode }, ${ subworkflows_json | n,unicode }, ${ can_edit_json | n,unicode }, ${ history_json | n,unicode });
-  ko.applyBindings(viewModel, $("#editor")[0]);
+  var apiHelper = ApiHelper.getInstance();
 
+  var viewModel = new WorkflowEditorViewModel(${ layout_json | n,unicode }, ${ workflow_json | n,unicode }, ${ credentials_json | n,unicode }, ${ workflow_properties_json | n,unicode }, ${ subworkflows_json | n,unicode }, ${ can_edit_json | n,unicode });
+  ko.applyBindings(viewModel, $("#oozie_workflowComponents")[0]);
+
+  % if not is_embeddable:
   var shareViewModel = initSharing("#documentShareModal");
+  % endif
   shareViewModel.setDocUuid('${ doc_uuid }');
 
+
+  % if ENABLE_DOCUMENT_ACTION.get():
+  var defaultSection = apiHelper.getFromTotalStorage('oozie', 'draggable_section', 'documents');
+  % else:
+  var defaultSection = 'actions';
+  % endif
+
+  viewModel.currentDraggableSection(defaultSection);
+
   viewModel.init();
-  viewModel.workflow.tracker().markCurrentStateAsClean();
   fullLayout(viewModel);
 
   var globalFilechooserOptions = {
@@ -513,8 +655,9 @@ ${ dashboard.import_bindings() }
   function widgetDraggedAdditionalHandler(widget) {
     $("canvas").remove();
     if (viewModel.currentlyDraggedWidget() && viewModel.currentlyDraggedWidget().id() == ""){
-      viewModel.workflow.newNode(widget);
-      showAddActionDemiModal(widget);
+      viewModel.workflow.newNode(widget, function() {
+        showAddActionDemiModal(widget);
+      });
     }
     else {
       if (viewModel.currentlyDraggedOp() == "move"){
@@ -538,14 +681,20 @@ ${ dashboard.import_bindings() }
 
     _el.css("position", "absolute");
     _el.css({
-      "top": (lastSeenPosition.top) + "px",
+      "top": lastSeenPosition.top + "px",
       "left": lastSeenPosition.left + "px",
       "width": 450
     });
-    $("#addActionDemiModal").width(_el.width()).css("top", _el.offset().top + 25).css("left", _el.offset().left).modal("show");
+    $("#addActionDemiModal").width(_el.width()).css("top", _el.position().top + 25).css("left", _el.position().left).modal("show");
+    %if is_embeddable:
+    $(".page-content").animate({
+    scrollTop: $("#addActionDemiModal").offset().top - 200
+    }, 200);
+    %else:
     $("html, body").animate({
       scrollTop: $("#addActionDemiModal").offset().top - 200
     }, 200);
+    %endif
   }
 
   function addActionDemiModalFieldPreview(field) {
@@ -570,12 +719,6 @@ ${ dashboard.import_bindings() }
     viewModel.newAction(null);
   }
 
-  $(document).on("editingToggled", function(){
-    $("canvas").remove();
-    exposeOverlayClickHandler();
-    window.setTimeout(renderChangeables, 100);
-  });
-
   function resizeDrops() {
     $(".drop-target-side").each(function () {
       var _el = $(this);
@@ -588,11 +731,11 @@ ${ dashboard.import_bindings() }
 
   function renderChangeables() {
     resizeDrops();
-    if (viewModel.workflow.properties.show_arrows()){
-      drawArrows();
+    if (viewModel.workflow && viewModel.workflow.properties && viewModel.workflow.properties.show_arrows()){
+      viewModel.drawArrows();
     }
-    $(".widget-main-section").removeClass("zoom-in");
-    $(".widget-main-section").each(function(){
+    $("#oozie_workflowComponents .widget-main-section").removeClass("zoom-in");
+    $("#oozie_workflowComponents .widget-main-section").each(function(){
       var $el = $(this);
       if (!$el.is("a") && !$el.is("input") && !$el.is("i") && !$el.is("button")) {
         var w = ko.dataFor($el.parents(".card-widget")[0]);
@@ -617,18 +760,14 @@ ${ dashboard.import_bindings() }
         _el.parent().css("height", viewModel.isEditing() ? _el.height() : (_el.height() + 17) + "px");
         _el.css("position", "absolute");
         _el.css({
-          "top": (lastSeenPosition.top) + "px",
-          "left": lastSeenPosition.left + "px",
-          "width": _width
+          "width": _width,
+          "marginBottom": "20px"
         });
         $("#exposeOverlay").fadeIn(300);
         _el.animate({
           "width": "500px"
         }, 200, function(){
           widget.oozieExpanded(true);
-          if ($(document).width() > $(window).width()){
-            $("html, body").scrollLeft($(document).width() - $(window).width());
-          }
         });
       }
       else {
@@ -686,17 +825,40 @@ ${ dashboard.import_bindings() }
   $(document).ready(function(){
     renderChangeables();
 
+    $(document).on("editingToggled", function () {
+      if (window.location.pathname.indexOf('/oozie/editor/workflow') > -1) {
+        $("canvas").remove();
+        exposeOverlayClickHandler();
+        if (viewModel.isEditing()) {
+          hueUtils.waitForRendered('#oozie_workflowComponents .card-toolbar-content', function (el) {
+            return el.height() > 40 && el.height() < 200
+          }, function () {
+            renderChangeables();
+          });
+        }
+        else {
+          hueUtils.waitForRendered('#oozie_workflowComponents .card-toolbar-content', function (el) {
+            return !el.is(':visible')
+          }, renderChangeables);
+        }
+      }
+    });
+
     $(document).on("blur", "[validate]", function() {
-      validateFields();
+      if (window.location.pathname.indexOf('/oozie/editor/workflow') > -1) {
+        validateFields();
+      }
     });
 
     $("#exposeOverlay").on("click", exposeOverlayClickHandler);
 
     $(document).keyup(function(e) {
-      if (e.keyCode == 27) {
-        exposeOverlayClickHandler();
-        addActionDemiModalFieldCancel();
-        $("#addActionDemiModal").modal("hide");
+      if (window.location.pathname.indexOf('/oozie/editor/workflow') > -1) {
+        if (e.keyCode == 27) {
+          exposeOverlayClickHandler();
+          addActionDemiModalFieldCancel();
+          $("#addActionDemiModal").modal("hide");
+        }
       }
     });
 
@@ -708,16 +870,48 @@ ${ dashboard.import_bindings() }
       }, 200);
     });
 
-    $(document).on("click", ".widget-main-section", function(e){
-      if (! $(e.target).is("a") && ! $(e.target).is("input") && ! $(e.target).is("i") && ! $(e.target).is("button")){
-        setLastExpandedWidget(ko.dataFor($(e.target).parents(".card-widget")[0]));
+    huePubSub.subscribe('submit.popup.return', function (data) {
+      if (data.type == 'workflow') {
+        $.jHueNotify.info('${_('Workflow submitted.')}');
+        huePubSub.publish('open.link', '/jobbrowser/#!id=' + data.job_id);
+        huePubSub.publish('browser.job.open.link', data.job_id);
+        $('.submit-modal').modal('hide');
+        $('.modal-backdrop').hide();
+      }
+    }, 'oozie');
+
+    huePubSub.subscribe('oozie.draggable.section.change', function(val){
+      apiHelper.setInTotalStorage('oozie', 'draggable_section', val);
+    });
+
+    $(document).on("click", ".widget-main-section", function (e) {
+      if (window.location.pathname.indexOf('/oozie/editor/workflow') > -1) {
+        if (!$(e.target).is("a") && !$(e.target).is("input") && !$(e.target).is("i") && !$(e.target).is("button")) {
+          setLastExpandedWidget(ko.dataFor($(e.target).parents(".card-widget")[0]));
+        }
       }
     });
 
     $.jHueScrollUp();
     $(".custom-popover").popover();
+
+
+    huePubSub.subscribe('cluster.config.set.config', function (clusterConfig) {
+      var interpreters = [];
+      $.each(clusterConfig['app_config']['editor']['interpreters'], function(index, interpreter) {
+        interpreters.push(interpreter.type);
+      });
+      if (clusterConfig['cluster_type'] != 'dataeng') {
+        interpreters = interpreters.concat(['subworkflow', 'fs', 'email', 'ssh', 'streaming', 'generic', 'stop']);
+      }
+      viewModel.availableActions(interpreters);
+    }, 'oozie');
+
+    huePubSub.publish('cluster.config.get.config');
   });
 
 </script>
 
+%if not is_embeddable:
 ${ commonfooter(request, messages) | n,unicode }
+%endif

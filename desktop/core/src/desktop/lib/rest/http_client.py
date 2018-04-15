@@ -17,18 +17,40 @@
 import logging
 import posixpath
 import requests
+import threading
 import urllib
+from urlparse import urlparse
 
 from django.utils.encoding import iri_to_uri, smart_str
+from django.utils.http import urlencode
+
+from desktop import conf
 
 from requests import exceptions
 from requests.auth import HTTPBasicAuth
-from requests_kerberos import HTTPKerberosAuth, OPTIONAL
+from requests_kerberos import HTTPKerberosAuth, REQUIRED, OPTIONAL, DISABLED
+from requests.packages.urllib3.contrib import pyopenssl
+
+pyopenssl.DEFAULT_SSL_CIPHER_LIST = conf.SSL_CIPHER_LIST.get()
 
 __docformat__ = "epytext"
 
 LOG = logging.getLogger(__name__)
 
+CACHE_SESSION = {}
+CACHE_SESSION_LOCK = threading.Lock()
+
+def get_request_session(url, logger):
+  global CACHE_SESSION, CACHE_SESSION_LOCK
+
+  if CACHE_SESSION.get(url) is None:
+    with CACHE_SESSION_LOCK:
+      CACHE_SESSION[url] = requests.Session()
+      logger.debug("Setting request Session")
+      CACHE_SESSION[url].mount(url, requests.adapters.HTTPAdapter(pool_connections=conf.CHERRYPY_SERVER_THREADS.get(), pool_maxsize=conf.CHERRYPY_SERVER_THREADS.get()))
+      logger.debug("Setting session adapter for %s" % url)
+
+  return CACHE_SESSION
 
 class RestException(Exception):
   """
@@ -45,7 +67,7 @@ class RestException(Exception):
     try:
       self._code = error.response.status_code
       self._headers = error.response.headers
-      self._message = self._error.response.text
+      self._message = self._message + '\n' + self._error.response.text
     except AttributeError:
       pass
 
@@ -81,11 +103,26 @@ class HttpClient(object):
     self._base_url = base_url.rstrip('/')
     self._exc_class = exc_class or RestException
     self._logger = logger or LOG
-    self._session = requests.Session()
+    self._short_url = self._extract_netloc(self._base_url)
+    self._session = get_request_session(self._short_url, self._logger).get(self._short_url)
+    self._cookies = None
+
+  def _extract_netloc(self, base_url):
+    parsed_uri = urlparse(base_url)
+    short_url = '%(scheme)s://%(netloc)s' % {'scheme': parsed_uri.scheme, 'netloc': parsed_uri.netloc}
+    return short_url
 
   def set_kerberos_auth(self):
     """Set up kerberos auth for the client, based on the current ticket."""
-    self._session.auth = HTTPKerberosAuth(mutual_authentication=OPTIONAL)
+    mutual_auth = conf.KERBEROS.MUTUAL_AUTHENTICATION.get().upper()
+    if mutual_auth == 'OPTIONAL':
+      self._session.auth = HTTPKerberosAuth(mutual_authentication=OPTIONAL)
+    elif mutual_auth == 'REQUIRED':
+      self._session.auth = HTTPKerberosAuth(mutual_authentication=REQUIRED)
+    elif mutual_auth == 'DISABLED':
+      self._session.auth = HTTPKerberosAuth(mutual_authentication=DISABLED)
+    else:
+      self._session.auth = HTTPKerberosAuth(mutual_authentication=OPTIONAL)
     return self
 
   def set_basic_auth(self, username, password):
@@ -120,7 +157,7 @@ class HttpClient(object):
     return self._session.headers.copy()
 
   def execute(self, http_method, path, params=None, data=None, headers=None, allow_redirects=False, urlencode=True,
-              files=None, clear_cookies=False):
+              files=None, clear_cookies=False, timeout=conf.REST_CONN_TIMEOUT.get()):
     """
     Submit an HTTP request.
     @param http_method: GET, POST, PUT, DELETE
@@ -144,10 +181,7 @@ class HttpClient(object):
         self.logger.warn("GET and DELETE methods do not pass any data. Path '%s'" % path)
         data = None
 
-    request_kwargs = {}
-
-    if not allow_redirects:
-      request_kwargs['allow_redirects'] = False
+    request_kwargs = {'allow_redirects': allow_redirects, 'timeout': timeout}
     if headers:
       request_kwargs['headers'] = headers
     if data:
@@ -155,15 +189,19 @@ class HttpClient(object):
     if files:
       request_kwargs['files'] = files
 
+    if self._cookies and not clear_cookies:
+      request_kwargs['cookies'] = self._cookies
+
     if clear_cookies:
       self._session.cookies.clear()
 
     try:
       resp = getattr(self._session, http_method.lower())(url, **request_kwargs)
-
       if resp.status_code >= 300:
         resp.raise_for_status()
         raise exceptions.HTTPError(response=resp)
+      # Cache request cookie for the next http_client call.
+      self._cookies = resp.cookies
       return resp
     except (exceptions.ConnectionError,
             exceptions.HTTPError,
@@ -177,6 +215,6 @@ class HttpClient(object):
     if path:
       res += posixpath.normpath('/' + path.lstrip('/'))
     if params:
-      param_str = urllib.urlencode(params)
+      param_str = urlencode(params)
       res += '?' + param_str
     return iri_to_uri(res)

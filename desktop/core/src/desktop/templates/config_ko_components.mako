@@ -23,11 +23,9 @@ from desktop.views import _ko
 
 <%def name="config()">
 
-  <link rel="stylesheet" href="${ static('desktop/ext/css/selectize.css') }">
-
   <style>
     .config-property {
-      display: inline-block;
+      display: block;
       vertical-align: top;
       margin-bottom: 20px;
       position: relative;
@@ -39,7 +37,6 @@ from desktop.views import _ko
       margin: 4px 10px;
       float:left;
       text-align: right;
-      cursor: default;
     }
 
     .config-controls {
@@ -63,17 +60,6 @@ from desktop.views import _ko
       color: #888;
     }
 
-    .selectize-wrapper {
-      display: inline-block;
-      float:left;
-      margin-right: 4px;
-    }
-
-    .selectize-input {
-      padding-top: 6px !important;
-      padding-bottom: 5px !important;
-    }
-
     .config-actions {
       display: inline-block;
       font-size: 13px;
@@ -86,6 +72,11 @@ from desktop.views import _ko
   <script type="text/html" id="property-selector-template">
     <!-- ko foreach: selectedProperties -->
     <div>
+      <div class="config-property-remove">
+        <a class="inactive-action" href="javascript:void(0)" data-bind="click: function() { $parent.removeProperty($data) }" title="${ _('Remove') }">
+          <i class="fa fa-times"></i>
+        </a>
+      </div>
       <!-- ko template: {
         name: 'property',
         data: {
@@ -97,11 +88,6 @@ from desktop.views import _ko
           visibleObservable: $parent.visibleObservable
         }
       } --><!-- /ko -->
-      <div class="config-property-remove">
-        <a class="inactive-action" href="javascript:void(0)" data-bind="click: function() { $parent.removeProperty($data) }" title="${ _('Remove') }">
-          <i class="fa fa-times"></i>
-        </a>
-      </div>
     </div>
     <!-- /ko -->
     <div class="config-property-available margin-left-10" data-bind="visible: availableProperties().length > 0">
@@ -133,199 +119,182 @@ from desktop.views import _ko
     </div>
   </script>
 
-  <script type="text/javascript" charset="utf-8">
-    (function (factory) {
-      if (typeof require === "function") {
-        require(['knockout'], factory);
-      } else {
-        factory(ko);
-      }
-    }(function (ko) {
-      (function () {
-
-        function MultiGroupAlternative(alt, params, initiallyChecked) {
-          var self = this;
-          self.altChecked = ko.observable(initiallyChecked || false);
-          self.label = params.optionsText ? alt[params.optionsText] : alt;
-          var value = params.optionsValue ? alt[params.optionsValue] : alt;
-          self.altChecked.subscribe(function (newValue) {
-            if (newValue) {
-              params.selectedOptions.push(value);
-            } else {
-              params.selectedOptions.remove(value);
-            }
-          });
-        }
-
-        function MultiGroupSelectorViewModel(params) {
-          var self = this;
-          self.width = params.width || 600;
-          self.height = params.height || 300;
-
-          var textAccessor = function (alt) {
-            if (params.optionsText) {
-              return alt[params.optionsText];
-            }
-            return alt;
-          };
-
-          self.searchQuery = ko.observable();
-
-          var addToIndexedLists = function (index, key, value) {
-            if (! index[key]) {
-              index[key] = [];
-            }
-            index[key].push(value);
-          };
-
-          self.searchResult = ko.pureComputed(function () {
-            if (self.searchQuery()) {
-              var lowerQuery = self.searchQuery().toLowerCase();
-              var result = {};
-              Object.keys(self.addressBook()).forEach(function (key) {
-                self.addressBook()[key].forEach(function (alt) {
-                  if (alt.label.toLowerCase().indexOf(lowerQuery) !== -1) {
-                    addToIndexedLists(result, key, alt);
-                  }
-                });
-              });
-              return result;
-            }
-            return self.addressBook();
-          });
-
-          var initiallyCheckedIndex = {};
-          params.selectedOptions().forEach(function (alt) {
-            initiallyCheckedIndex[alt] = true;
-          });
-
-          self.addressBook = ko.pureComputed(function () {
-            var result = {};
-            ko.unwrap(params.options).forEach(function (alt) {
-              addToIndexedLists(result, textAccessor(alt).charAt(0).toUpperCase(), new MultiGroupAlternative(alt, params, initiallyCheckedIndex[params.optionsValue ? alt[params.optionsValue] : alt]));
-            });
-            Object.keys(result).forEach(function (key) {
-              result[key].sort();
-            });
-            return result;
-          });
-
-          self.searchResultKeys = ko.pureComputed(function () {
-            return Object.keys(self.searchResult()).sort();
-          });
-
-          self.allSelected = ko.observable(false);
-
-          self.allSelected.subscribe(function (newValue) {
-            self.searchResultKeys().forEach(function (key) {
-              self.searchResult()[key].forEach(function (alt) {
-                alt.altChecked(newValue);
-              })
-            })
-          })
-        }
-
-        ko.components.register('multi-group-selector', {
-          viewModel: MultiGroupSelectorViewModel,
-          template: {element: 'multi-group-selector-template'}
-        });
-      }());
-    }));
-  </script>
-
-  <script type="text/javascript" charset="utf-8">
-    (function (factory) {
-      if (typeof require === "function") {
-        require(['knockout', 'ko.selectize'], factory);
-      } else {
-        factory(ko);
-      }
-    }(function (ko) {
-      (function () {
-
-        function PropertySelectorViewModel(params) {
-          var self = this;
-          var allProperties = params.properties;
-
-          self.selectedProperties = ko.observableArray();
-          self.availableProperties = ko.observableArray();
-          self.propertyToAdd = ko.observable(null);
-
-          var setInitialProperties = function () {
-            self.selectedProperties([]);
-            self.availableProperties([]);
-            allProperties().forEach(function (property) {
-              if (property.defaultValue && ko.mapping.toJSON(property.value) !== ko.mapping.toJSON(property.defaultValue)) {
-                self.selectedProperties.push(property);
-              } else {
-                self.availableProperties.push(property);
-              }
-            });
-            self.sort();
-          };
-
-          setInitialProperties();
-          self.visibleObservable = params.visibleObservable || ko.observable();
-
-          self.visibleObservable.subscribe(function (newValue) {
-            if (!newValue) {
-              setInitialProperties();
-            }
-          });
-        }
-
-        var niceNameSort = function (a, b) {
-          return a.nice_name().localeCompare(b.nice_name());
-        }
-
-        PropertySelectorViewModel.prototype.sort = function () {
-          var self = this;
-          self.availableProperties.sort(niceNameSort);
-          self.selectedProperties.sort(niceNameSort);
-        }
-
-        PropertySelectorViewModel.prototype.addProperty = function () {
-          var self = this;
-          if (self.propertyToAdd()) {
-            switch (self.propertyToAdd().type()) {
-              case 'csv-hdfs-files':
-                self.propertyToAdd().value('');
-                break;
-              case 'hdfs-files':
-                self.propertyToAdd().value([{ path: ko.observable(''), type: ko.observable('') }]);
-                break;
-              case 'functions':
-                self.propertyToAdd().value([{ name: ko.observable(''), class_name: ko.observable('') }]);
-                break;
-              case 'settings':
-                self.propertyToAdd().value([{ key: ko.observable(''), value: ko.observable('') }]);
-            }
-            self.selectedProperties.push(self.propertyToAdd());
-            self.availableProperties.remove(self.propertyToAdd());
-            self.propertyToAdd(null);
-            self.sort();
+  <script type="text/javascript">
+    (function () {
+      function MultiGroupAlternative(alt, params, initiallyChecked) {
+        var self = this;
+        self.altChecked = ko.observable(initiallyChecked || false);
+        self.label = params.optionsText ? alt[params.optionsText] : alt;
+        var value = params.optionsValue ? alt[params.optionsValue] : alt;
+        self.altChecked.subscribe(function (newValue) {
+          if (newValue) {
+            params.selectedOptions.push(value);
+          } else {
+            params.selectedOptions.remove(value);
           }
+        });
+      }
+
+      function MultiGroupSelectorViewModel(params) {
+        var self = this;
+        self.width = params.width || 600;
+        self.height = params.height || 300;
+
+        var textAccessor = function (alt) {
+          if (params.optionsText) {
+            return alt[params.optionsText];
+          }
+          return alt;
         };
 
-        PropertySelectorViewModel.prototype.removeProperty = function (property) {
-          var self = this;
-          property.value(property.defaultValue());
-          self.selectedProperties.remove(property);
-          self.availableProperties.push(property);
+        self.searchQuery = ko.observable();
+
+        var addToIndexedLists = function (index, key, value) {
+          if (! index[key]) {
+            index[key] = [];
+          }
+          index[key].push(value);
+        };
+
+        self.searchResult = ko.pureComputed(function () {
+          if (self.searchQuery()) {
+            var lowerQuery = self.searchQuery().toLowerCase();
+            var result = {};
+            Object.keys(self.addressBook()).forEach(function (key) {
+              self.addressBook()[key].forEach(function (alt) {
+                if (alt.label.toLowerCase().indexOf(lowerQuery) !== -1) {
+                  addToIndexedLists(result, key, alt);
+                }
+              });
+            });
+            return result;
+          }
+          return self.addressBook();
+        });
+
+        var initiallyCheckedIndex = {};
+        params.selectedOptions().forEach(function (alt) {
+          initiallyCheckedIndex[alt] = true;
+        });
+
+        self.addressBook = ko.pureComputed(function () {
+          var result = {};
+          ko.unwrap(params.options).forEach(function (alt) {
+            addToIndexedLists(result, textAccessor(alt).charAt(0).toUpperCase(), new MultiGroupAlternative(alt, params, initiallyCheckedIndex[params.optionsValue ? alt[params.optionsValue] : alt]));
+          });
+          Object.keys(result).forEach(function (key) {
+            result[key].sort();
+          });
+          return result;
+        });
+
+        self.searchResultKeys = ko.pureComputed(function () {
+          return Object.keys(self.searchResult()).sort();
+        });
+
+        self.allSelected = ko.observable(false);
+
+        self.allSelected.subscribe(function (newValue) {
+          self.searchResultKeys().forEach(function (key) {
+            self.searchResult()[key].forEach(function (alt) {
+              alt.altChecked(newValue);
+            })
+          })
+        })
+      }
+
+      ko.components.register('multi-group-selector', {
+        viewModel: MultiGroupSelectorViewModel,
+        template: {element: 'multi-group-selector-template'}
+      });
+    })();
+  </script>
+
+  <script type="text/javascript">
+    (function () {
+
+      function PropertySelectorViewModel(params) {
+        var self = this;
+        var allProperties = params.properties;
+
+        self.selectedProperties = ko.observableArray();
+        self.availableProperties = ko.observableArray();
+        self.propertyToAdd = ko.observable(null);
+
+        var setInitialProperties = function () {
+          self.selectedProperties([]);
+          self.availableProperties([]);
+          allProperties().forEach(function (property) {
+            if (property.defaultValue && ko.mapping.toJSON(property.value) !== ko.mapping.toJSON(property.defaultValue)) {
+              self.selectedProperties.push(property);
+            } else {
+              self.availableProperties.push(property);
+            }
+          });
+          self.sort();
+        };
+
+        setInitialProperties();
+        self.visibleObservable = params.visibleObservable || ko.observable();
+
+        self.visibleObservable.subscribe(function (newValue) {
+          if (!newValue) {
+            setInitialProperties();
+          }
+        });
+      }
+
+      var niceNameSort = function (a, b) {
+        return a.nice_name().localeCompare(b.nice_name());
+      }
+
+      PropertySelectorViewModel.prototype.sort = function () {
+        var self = this;
+        self.availableProperties.sort(niceNameSort);
+        self.selectedProperties.sort(niceNameSort);
+      }
+
+      PropertySelectorViewModel.prototype.addProperty = function () {
+        var self = this;
+        if (self.propertyToAdd()) {
+          switch (self.propertyToAdd().type()) {
+            case 'csv-hdfs-files':
+              self.propertyToAdd().value('');
+              break;
+            case 'hdfs-files':
+              self.propertyToAdd().value([{ path: ko.observable(''), type: ko.observable('') }]);
+              break;
+            case 'functions':
+              self.propertyToAdd().value([{ name: ko.observable(''), class_name: ko.observable('') }]);
+              break;
+            case 'settings':
+              self.propertyToAdd().value([{ key: ko.observable(''), value: ko.observable('') }]);
+          }
+          self.selectedProperties.push(self.propertyToAdd());
+          self.availableProperties.remove(self.propertyToAdd());
+          self.propertyToAdd(null);
           self.sort();
         }
+      };
 
-        ko.components.register('property-selector', {
-          viewModel: PropertySelectorViewModel,
-          template: {element: 'property-selector-template'}
-        });
-      }());
-    }));
+      PropertySelectorViewModel.prototype.removeProperty = function (property) {
+        var self = this;
+        property.value(property.defaultValue());
+        self.selectedProperties.remove(property);
+        self.availableProperties.push(property);
+        self.sort();
+      }
+
+      ko.components.register('property-selector', {
+        viewModel: PropertySelectorViewModel,
+        template: {element: 'property-selector-template'}
+      });
+    })();
   </script>
 
   <script type="text/html" id="property">
     <div class="config-property" data-bind="visibleOnHover: { selector: '.hover-actions' }">
-      <label class="config-label">
+      <label class="config-label" data-bind="click: function(data, event){ $(event.target).siblings('.config-controls').find('.config-property-add-value a').click(); }">
         <!-- ko text: label --><!-- /ko --><!-- ko if: typeof helpText !== 'undefined' --><div class="property-help" data-bind="tooltip: { title: helpText(), placement: 'bottom' }"><i class="fa fa-question-circle-o"></i></div><!-- /ko -->
       </label>
       <div class="config-controls">
@@ -377,19 +346,6 @@ from desktop.views import _ko
     <div data-bind="component: { name: 'csv-list-input', params: { value: value, inputTemplate: 'property-hdfs-file', placeholder: typeof placeholder === 'undefined' ? '' : placeholder } }"></div>
   </script>
 
-  <div id="chooseFile" class="modal hide fade">
-    <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3>${_('Choose a file')}</h3>
-    </div>
-    <div class="modal-body">
-      <div id="filechooser">
-      </div>
-    </div>
-    <div class="modal-footer">
-    </div>
-  </div>
-
   <script type="text/html" id="property-hdfs-file">
     <div class="input-append">
       <input type="text" style="min-width: 300px" class="filechooser-input" data-bind="value: value, valueUpdate:'afterkeydown', filechooser: { value: value, isAddon: true}, filechooserOptions: { skipInitialPathIfEmpty: true }" placeholder="${ _('Path to the file, e.g. hdfs://localhost:8020/user/hue') }"/>
@@ -404,56 +360,48 @@ from desktop.views import _ko
     <input type="text" class="input-small" data-bind="numericTextInput: { value: value, precision: 0, allowEmpty: true }" /> <select class="input-mini" data-bind="options: units, value: selectedUnit" />
   </script>
 
-  <script type="text/javascript" charset="utf-8">
-    (function (factory) {
-      if (typeof require === "function") {
-        require(['knockout'], factory);
-      } else {
-        factory(ko);
-      }
-    }(function (ko) {
-      (function () {
-        var JVM_MEM_PATTERN = /([0-9]+)([MG])$/;
-        var UNITS = {'MB': 'M', 'GB': 'G'};
+  <script type="text/javascript">
+    (function () {
+      var JVM_MEM_PATTERN = /([0-9]+)([MG])$/;
+      var UNITS = {'MB': 'M', 'GB': 'G'};
 
-        function JvmMemoryInputViewModel(params) {
-          this.valueObservable = params.value;
-          this.units = Object.keys(UNITS);
-          this.selectedUnit = ko.observable();
-          this.value = ko.observable('');
+      function JvmMemoryInputViewModel(params) {
+        this.valueObservable = params.value;
+        this.units = Object.keys(UNITS);
+        this.selectedUnit = ko.observable();
+        this.value = ko.observable('');
 
-          var match = JVM_MEM_PATTERN.exec(this.valueObservable());
-          if (match && match.length === 3) {
-            this.value(match[1]);
-            this.selectedUnit(match[2] === 'M' ? 'MB' : 'GB');
-          }
-
-          this.value.subscribe(this.updateValueObservable, this);
-          this.selectedUnit.subscribe(this.updateValueObservable, this);
+        var match = JVM_MEM_PATTERN.exec(this.valueObservable());
+        if (match && match.length === 3) {
+          this.value(match[1]);
+          this.selectedUnit(match[2] === 'M' ? 'MB' : 'GB');
         }
 
-        JvmMemoryInputViewModel.prototype.updateValueObservable = function () {
-          if (isNaN(this.value()) || this.value() === '') {
-            this.valueObservable(undefined);
-          } else {
-            this.valueObservable(this.value() + UNITS[this.selectedUnit()]);
-          }
-        };
+        this.value.subscribe(this.updateValueObservable, this);
+        this.selectedUnit.subscribe(this.updateValueObservable, this);
+      }
 
-        ko.components.register('jvm-memory-input', {
-          viewModel: JvmMemoryInputViewModel,
-          template: { element: 'jvm-memory-input-template' }
-        });
-      }());
-    }));
+      JvmMemoryInputViewModel.prototype.updateValueObservable = function () {
+        if (isNaN(this.value()) || this.value() === '') {
+          this.valueObservable(undefined);
+        } else {
+          this.valueObservable(this.value() + UNITS[this.selectedUnit()]);
+        }
+      };
+
+      ko.components.register('jvm-memory-input', {
+        viewModel: JvmMemoryInputViewModel,
+        template: { element: 'jvm-memory-input-template' }
+      });
+    })();
   </script>
 
   <script type="text/html" id="key-value-list-input-template">
     <ul data-bind="sortable: { data: values, options: { axis: 'y', containment: 'parent', handle: '.move-widget' }}, visible: values().length" class="unstyled">
       <li style="clear:both;">
         <!-- ko if: $parent.options.length > 0 -->
-        <div class="selectize-wrapper" style="min-width: 200px;">
-          <select placeholder="${ _('Key') }" data-bind="selectize: $parent.options, value: key, options: $parent.options, optionsText: 'value', optionsValue: 'value'"></select>
+        <div class="selectize-wrapper" style="width: 200px;">
+          <select placeholder="${ _('Key') }" data-bind="selectize: $parent.options, selectizeOptions: {create: true}, value: key, options: $parent.options, optionsText: 'value', optionsValue: 'value'"></select>
         </div>
         <!-- /ko -->
         <div class="input-append" style="margin-bottom: 4px">
@@ -466,66 +414,89 @@ from desktop.views import _ko
         </div>
       </li>
     </ul>
-    <div class="config-property-add-value" style="margin-top: 5px;">
+    <div class="config-property-add-value" style="margin-top: 5px; float: left">
       <a class="inactive-action pointer" style="padding: 3px 10px 3px 3px;;" data-bind="click: addValue">
         <i class="fa fa-plus"></i>
       </a>
     </div>
+    <div class="clearfix"></div>
   </script>
 
-  <script type="text/javascript" charset="utf-8">
-    (function (factory) {
-      if (typeof require === "function") {
-        require(['knockout'], factory);
-      } else {
-        factory(ko);
-      }
-    }(function (ko) {
-      (function () {
+  <script type="text/javascript">
+    (function () {
 
-        function KeyValueListInputViewModel(params) {
-          var self = this;
-          self.values = params.values;
-          self.options = typeof params.property.options !== 'undefined' ? $.map(params.property.options(), function (option) {
-            return { value: option }
-          }) : [];
+      function KeyValueListInputViewModel(params) {
+        var self = this;
 
-          if (self.options.length > 0) {
-            self.values().forEach(function (value) {
-              if (self.options.indexOf(value.key()) === -1) {
-                self.options.push({ value: value.key() });
-              }
-            })
-          }
-          params.visibleObservable.subscribe(function (newValue) {
-            if (!newValue) {
-              self.values($.grep(self.values(), function (value) {
-                return value.key() && value.value();
-              }))
-            }
-          });
-        }
+        self.values = ko.observableArray(params.values().filter(function (value) {
+          return value.key && value.key() && value.value && value.value();
+        }));
 
-        KeyValueListInputViewModel.prototype.addValue = function () {
-          var self = this;
-          var newValue = {
-            key: ko.observable(''),
-            value: ko.observable('')
-          };
-          self.values.push(newValue);
-        };
-
-        KeyValueListInputViewModel.prototype.removeValue = function (valueToRemove) {
-          var self = this;
-          self.values.remove(valueToRemove);
-        };
-
-        ko.components.register('key-value-list-input', {
-          viewModel: KeyValueListInputViewModel,
-          template: { element: 'key-value-list-input-template' }
+        self.values.subscribe(function (newValues) {
+          params.values(self.values().filter(function (value) {
+            return value.key && value.key() && value.value && value.value();
+          }))
         });
-      }());
-    }));
+
+        self.options = typeof params.property.options !== 'undefined' ? $.map(params.property.options(), function (option) {
+          return { value: option }
+        }) : [];
+
+        if (self.options.length > 0) {
+          self.values().forEach(function (value) {
+            if (self.options.indexOf(value.key()) === -1) {
+              self.options.push({ value: value.key() });
+            }
+          })
+        }
+        params.visibleObservable.subscribe(function (newValue) {
+          if (!newValue) {
+            self.values($.grep(self.values(), function (value) {
+              return value.key() && value.value();
+            }))
+          }
+        });
+
+        this._editorSettingsUpdate = huePubSub.subscribe('editor.settings.update', function (data) {
+          var setting;
+          for (var i = 0; i < self.values.length; i++) {
+            if (self.values().key == data.key) {
+              setting = self.values()[i];
+              break;
+            }
+          }
+          if (!setting) {
+            self.addValue();
+            setting = self.values()[self.values().length - 1];
+          }
+          setting.key(data.key);
+          setting.value(data.value);
+        });
+      }
+
+      KeyValueListInputViewModel.prototype.addValue = function () {
+        var self = this;
+        var newValue = {
+          key: ko.observable(''),
+          value: ko.observable('')
+        };
+        self.values.push(newValue);
+      };
+
+      KeyValueListInputViewModel.prototype.removeValue = function (valueToRemove) {
+        var self = this;
+        self.values.remove(valueToRemove);
+      };
+
+      KeyValueListInputViewModel.prototype.dispose = function () {
+        this._editorSettingsUpdate.remove();
+      };
+
+      ko.components.register('key-value-list-input', {
+        viewModel: KeyValueListInputViewModel,
+        template: { element: 'key-value-list-input-template' }
+      });
+    })();
   </script>
 
   <script type="text/html" id="name-value-list-input-template">
@@ -553,59 +524,51 @@ from desktop.views import _ko
     </div>
   </script>
 
-  <script type="text/javascript" charset="utf-8">
-    (function (factory) {
-      if (typeof require === "function") {
-        require(['knockout'], factory);
-      } else {
-        factory(ko);
-      }
-    }(function (ko) {
-      (function () {
+  <script type="text/javascript">
+    (function () {
 
-        function NameValueListInputViewModel(params) {
-          var self = this;
-          self.values = params.values;
-          self.options = typeof params.property.options !== 'undefined' ? $.map(params.property.options(), function (option) {
-            return { value: option }
-          }) : [];
+      function NameValueListInputViewModel(params) {
+        var self = this;
+        self.values = params.values;
+        self.options = typeof params.property.options !== 'undefined' ? $.map(params.property.options(), function (option) {
+          return { value: option }
+        }) : [];
 
-          if (self.options.length > 0) {
-            self.values().forEach(function (value) {
-              if (self.options.indexOf(value.name()) === -1) {
-                self.options.push({ value: value.name() });
-              }
-            })
-          }
-          params.visibleObservable.subscribe(function (newValue) {
-            if (!newValue) {
-              self.values($.grep(self.values(), function (value) {
-                return value.name() && value.value();
-              }))
+        if (self.options.length > 0) {
+          self.values().forEach(function (value) {
+            if (self.options.indexOf(value.name()) === -1) {
+              self.options.push({ value: value.name() });
             }
-          });
+          })
         }
-
-        NameValueListInputViewModel.prototype.addValue = function () {
-          var self = this;
-          var newValue = {
-            name: ko.observable(''),
-            value: ko.observable('')
-          };
-          self.values.push(newValue);
-        };
-
-        NameValueListInputViewModel.prototype.removeValue = function (valueToRemove) {
-          var self = this;
-          self.values.remove(valueToRemove);
-        };
-
-        ko.components.register('name-value-list-input', {
-          viewModel: NameValueListInputViewModel,
-          template: { element: 'name-value-list-input-template' }
+        params.visibleObservable.subscribe(function (newValue) {
+          if (!newValue) {
+            self.values($.grep(self.values(), function (value) {
+              return value.name() && value.value();
+            }))
+          }
         });
-      }());
-    }));
+      }
+
+      NameValueListInputViewModel.prototype.addValue = function () {
+        var self = this;
+        var newValue = {
+          name: ko.observable(''),
+          value: ko.observable('')
+        };
+        self.values.push(newValue);
+      };
+
+      NameValueListInputViewModel.prototype.removeValue = function (valueToRemove) {
+        var self = this;
+        self.values.remove(valueToRemove);
+      };
+
+      ko.components.register('name-value-list-input', {
+        viewModel: NameValueListInputViewModel,
+        template: { element: 'name-value-list-input-template' }
+      });
+    })();
   </script>
 
   <script type="text/html" id="function-list-input-template">
@@ -626,55 +589,47 @@ from desktop.views import _ko
     </div>
   </script>
 
-  <script type="text/javascript" charset="utf-8">
-    (function (factory) {
-      if (typeof require === "function") {
-        require(['knockout'], factory);
-      } else {
-        factory(ko);
-      }
-    }(function (ko) {
-      (function () {
+  <script type="text/javascript">
+    (function () {
 
-        function FunctionListInputViewModel(params) {
-          var self = this;
-          self.values = params.values;
-          params.visibleObservable.subscribe(function (newValue) {
-            if (!newValue) {
-              self.values($.grep(self.values(), function (value) {
-                return value.name() && value.class_name();
-              }))
-            }
-          });
-        }
-
-        FunctionListInputViewModel.prototype.addValue = function () {
-          var self = this;
-          var newValue = {
-            name: ko.observable(''),
-            class_name: ko.observable('')
-          };
-          self.values.push(newValue);
-        };
-
-        FunctionListInputViewModel.prototype.removeValue = function (valueToRemove) {
-          var self = this;
-          self.values.remove(valueToRemove);
-        };
-
-        ko.components.register('function-list-input', {
-          viewModel: FunctionListInputViewModel,
-          template: { element: 'function-list-input-template' }
+      function FunctionListInputViewModel(params) {
+        var self = this;
+        self.values = params.values;
+        params.visibleObservable.subscribe(function (newValue) {
+          if (!newValue) {
+            self.values($.grep(self.values(), function (value) {
+              return value.name() && value.class_name();
+            }))
+          }
         });
-      }());
-    }));
+      }
+
+      FunctionListInputViewModel.prototype.addValue = function () {
+        var self = this;
+        var newValue = {
+          name: ko.observable(''),
+          class_name: ko.observable('')
+        };
+        self.values.push(newValue);
+      };
+
+      FunctionListInputViewModel.prototype.removeValue = function (valueToRemove) {
+        var self = this;
+        self.values.remove(valueToRemove);
+      };
+
+      ko.components.register('function-list-input', {
+        viewModel: FunctionListInputViewModel,
+        template: { element: 'function-list-input-template' }
+      });
+    })();
   </script>
 
   <script type="text/html" id="hdfs-file-list-input-template">
     <ul data-bind="sortable: { data: values, options: { axis: 'y', containment: 'parent', handle: '.move-widget' }}, visible: values().length" class="unstyled">
       <li>
         <div class="input-append" style="margin-bottom: 4px">
-          <input type="text" class="filechooser-input" data-bind="value: path, valueUpdate:'afterkeydown', filechooser: { value: path, isAddon: true }, filechooserOptions: { skipInitialPathIfEmpty: true }" placeholder="${ _('Path to the file, e.g. hdfs://localhost:8020/user/hue/file.hue') }"/>
+          <input type="text" class="filechooser-input input-xxlarge" data-bind="value: path, valueUpdate:'afterkeydown', filechooser: { value: path, isAddon: true }, filechooserOptions: { skipInitialPathIfEmpty: true }" placeholder="${ _('Path to the file, e.g. hdfs://localhost:8020/user/hue/file.hue') }"/>
           <span class="add-on move-widget muted" data-bind="visible: $parent.values().length > 1"><i class="fa fa-arrows"></i></span>
           <a class="add-on muted" href="javascript: void(0);" data-bind="click: function(){ $parent.removeValue($data); }"><i class="fa fa-minus"></i></a>
         </div>
@@ -687,71 +642,63 @@ from desktop.views import _ko
     </div>
   </script>
 
-  <script type="text/javascript" charset="utf-8">
-    (function (factory) {
-      if (typeof require === "function") {
-        require(['knockout'], factory);
-      } else {
-        factory(ko);
-      }
-    }(function (ko) {
-      (function () {
+  <script type="text/javascript">
+    (function () {
 
-        var identifyType = function (path) {
-          switch (path.substr(path.lastIndexOf('.') + 1).toLowerCase()) {
-            case 'jar':
-              return 'jar';
-            case 'zip':
-            case 'tar':
-            case 'rar':
-            case 'bz2':
-            case 'gz':
-            case 'tgz':
-              return 'archive';
-          }
-          return 'file';
-        };
-
-        function HdfsFileListInputViewModel(params) {
-          var self = this;
-          self.values = params.values;
-          $.each(self.values(), function (idx, value) {
-            value.path.subscribe(function (newPath) {
-              value.type(identifyType(newPath));
-            });
-          });
-          params.visibleObservable.subscribe(function (newValue) {
-            if (!newValue) {
-              self.values($.grep(self.values(), function (value) {
-                return value.path();
-              }))
-            }
-          });
+      var identifyType = function (path) {
+        switch (path.substr(path.lastIndexOf('.') + 1).toLowerCase()) {
+          case 'jar':
+            return 'jar';
+          case 'zip':
+          case 'tar':
+          case 'rar':
+          case 'bz2':
+          case 'gz':
+          case 'tgz':
+            return 'archive';
         }
+        return 'file';
+      };
 
-        HdfsFileListInputViewModel.prototype.addValue = function () {
-          var self = this;
-          var newValue = {
-            path: ko.observable(''),
-            type: ko.observable('')
-          };
-          newValue.path.subscribe(function (newPath) {
-            newValue.type(identifyType(newPath));
+      function HdfsFileListInputViewModel(params) {
+        var self = this;
+        self.values = params.values;
+        $.each(self.values(), function (idx, value) {
+          value.path.subscribe(function (newPath) {
+            value.type(identifyType(newPath));
           });
-          self.values.push(newValue);
-        };
-
-        HdfsFileListInputViewModel.prototype.removeValue = function (valueToRemove) {
-          var self = this;
-          self.values.remove(valueToRemove);
-        };
-
-        ko.components.register('hdfs-file-list-input', {
-          viewModel: HdfsFileListInputViewModel,
-          template: { element: 'hdfs-file-list-input-template' }
         });
-      }());
-    }));
+        params.visibleObservable.subscribe(function (newValue) {
+          if (!newValue) {
+            self.values($.grep(self.values(), function (value) {
+              return value.path();
+            }))
+          }
+        });
+      }
+
+      HdfsFileListInputViewModel.prototype.addValue = function () {
+        var self = this;
+        var newValue = {
+          path: ko.observable(''),
+          type: ko.observable('')
+        };
+        newValue.path.subscribe(function (newPath) {
+          newValue.type(identifyType(newPath));
+        });
+        self.values.push(newValue);
+      };
+
+      HdfsFileListInputViewModel.prototype.removeValue = function (valueToRemove) {
+        var self = this;
+        self.values.remove(valueToRemove);
+      };
+
+      ko.components.register('hdfs-file-list-input', {
+        viewModel: HdfsFileListInputViewModel,
+        template: { element: 'hdfs-file-list-input-template' }
+      });
+    })();
   </script>
 
   <script type="text/html" id="csv-list-input-template">
@@ -774,60 +721,52 @@ from desktop.views import _ko
     </div>
   </script>
 
-  <script type="text/javascript" charset="utf-8">
-    (function (factory) {
-      if (typeof require === "function") {
-        require(['knockout'], factory);
-      } else {
-        factory(ko);
-      }
-    }(function (ko) {
-      (function () {
-        function CsvListInputViewModel(params) {
-          this.valueObservable = params.value;
-          this.isArray = $.isArray(this.valueObservable());
-          this.placeholder = params.placeholder || '';
-          this.inputTemplate = params.inputTemplate || null;
+  <script type="text/javascript">
+    (function () {
+      function CsvListInputViewModel(params) {
+        this.valueObservable = params.value;
+        this.isArray = $.isArray(this.valueObservable());
+        this.placeholder = params.placeholder || '';
+        this.inputTemplate = params.inputTemplate || null;
 
-          var initialValues;
-          if (this.isArray) {
-            initialValues = ko.mapping.toJS(this.valueObservable());
-          } else {
-            initialValues = this.valueObservable() != null ? this.valueObservable().split(",") : [];
-          }
-          for (var i = 0; i < initialValues.length; i++) {
-            initialValues[i] = {value: ko.observable(initialValues[i].trim())};
-            initialValues[i].value.subscribe(this.updateValueObservable, this);
-          }
-          this.values = ko.observableArray(initialValues);
-          this.values.subscribe(this.updateValueObservable, this);
+        var initialValues;
+        if (this.isArray) {
+          initialValues = ko.mapping.toJS(this.valueObservable());
+        } else {
+          initialValues = this.valueObservable() != null ? this.valueObservable().split(",") : [];
         }
+        for (var i = 0; i < initialValues.length; i++) {
+          initialValues[i] = {value: ko.observable(initialValues[i].trim())};
+          initialValues[i].value.subscribe(this.updateValueObservable, this);
+        }
+        this.values = ko.observableArray(initialValues);
+        this.values.subscribe(this.updateValueObservable, this);
+      }
 
-        CsvListInputViewModel.prototype.addValue = function () {
-          var newValue = {value: ko.observable('')};
-          newValue.value.subscribe(this.updateValueObservable, this);
-          this.values.push(newValue);
-        };
+      CsvListInputViewModel.prototype.addValue = function () {
+        var newValue = {value: ko.observable('')};
+        newValue.value.subscribe(this.updateValueObservable, this);
+        this.values.push(newValue);
+      };
 
-        CsvListInputViewModel.prototype.removeValue = function (valueToRemove) {
-          this.values.remove(valueToRemove);
-        };
+      CsvListInputViewModel.prototype.removeValue = function (valueToRemove) {
+        this.values.remove(valueToRemove);
+      };
 
-        CsvListInputViewModel.prototype.updateValueObservable = function () {
-          var cleanValues = $.map(this.values(), function (item) {
-            return item.value();
-          });
-          cleanValues = $.grep(cleanValues, function (value) {
-            return value;
-          });
-          this.valueObservable(this.isArray ? cleanValues : cleanValues.join(','));
-        };
-
-        ko.components.register('csv-list-input', {
-          viewModel: CsvListInputViewModel,
-          template: { element: 'csv-list-input-template' }
+      CsvListInputViewModel.prototype.updateValueObservable = function () {
+        var cleanValues = $.map(this.values(), function (item) {
+          return item.value();
         });
-      }());
-    }));
+        cleanValues = $.grep(cleanValues, function (value) {
+          return value;
+        });
+        this.valueObservable(this.isArray ? cleanValues : cleanValues.join(','));
+      };
+
+      ko.components.register('csv-list-input', {
+        viewModel: CsvListInputViewModel,
+        template: { element: 'csv-list-input-template' }
+      });
+    })();
   </script>
 </%def>

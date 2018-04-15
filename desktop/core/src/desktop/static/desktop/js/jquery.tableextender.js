@@ -24,6 +24,8 @@
     defaults = {
       fixedHeader: false,
       fixedFirstColumn: false,
+      fixedFirstColumnTopMargin: 0,
+      headerSorting: true,
       lockSelectedRow: false,
       firstColumnTooltip: false,
       classToRemove: 'resultTable',
@@ -31,6 +33,7 @@
       includeNavigator: true,
       mainScrollable: window,
       stickToTopPosition: -1,
+      app: null,
       labels: {
         GO_TO_COLUMN: "Go to column:",
         PLACEHOLDER: "column name...",
@@ -47,21 +50,8 @@
   }
 
   Plugin.prototype.setOptions = function (options) {
-    if (typeof jHueTableExtenderGlobals != 'undefined') {
-      var extendedDefaults = $.extend({}, defaults, jHueTableExtenderGlobals);
-      extendedDefaults.labels = $.extend({}, defaults.labels, jHueTableExtenderGlobals.labels);
-      this.options = $.extend({}, extendedDefaults, options);
-      if (options != null) {
-        this.options.labels = $.extend({}, extendedDefaults.labels, options.labels);
-      }
-    }
-    else {
-      this.options = $.extend({}, defaults, options);
-      if (options != null) {
-        this.options.labels = $.extend({}, defaults.labels, options.labels);
-      }
-    }
-
+    this.options = $.extend({}, defaults, options);
+    this.options.labels = $.extend({}, defaults.labels, HUE_I18n.jHueTableExtender, options ? options.labels : {});
     this._defaults = defaults;
 
     if (this.options.fixedHeader) {
@@ -92,13 +82,13 @@
     drawFirstColumn(this);
   }
 
-  Plugin.prototype.drawLockedRows = function () {
+  Plugin.prototype.drawLockedRows = function (force) {
     var _this = this;
     var $pluginElement = $(_this.element);
     if ($pluginElement.data('lockedRows')) {
       var locks = $pluginElement.data('lockedRows');
       Object.keys(locks).forEach(function (idx) {
-        drawLockedRow(_this, idx.substr(1));
+        drawLockedRow(_this, idx.substr(1), force);
       });
     }
   }
@@ -119,7 +109,7 @@
       }).appendTo(jHueTableExtenderNavigator);
       $("<label>").html(_this.options.labels.GO_TO_COLUMN + " <input type=\"text\" placeholder=\"" + _this.options.labels.PLACEHOLDER + "\" />").appendTo(jHueTableExtenderNavigator);
 
-      jHueTableExtenderNavigator.appendTo($("body"));
+      jHueTableExtenderNavigator.appendTo(HUE_CONTAINER);
 
       $(_this.element).find("tbody").click(function (event) {
         if ($.trim(getSelection()) == "") {
@@ -193,7 +183,7 @@
       drawFirstColumn(_this);
     }
 
-    $(document).on('click', '.dataTables_wrapper > table tbody tr', function () {
+    $(document).on('click dblclick', '.dataTables_wrapper > table tbody tr', function () {
       $('.dataTables_wrapper > .jHueTableExtenderClonedContainerColumn table tbody tr.selected').removeClass('selected');
       if ($(this).hasClass('selected')) {
         $(this).removeClass('selected');
@@ -203,9 +193,14 @@
         $('.dataTables_wrapper > .jHueTableExtenderClonedContainerColumn table tbody tr:eq('+($(this).index())+')').addClass('selected');
       }
     });
+    $(document).on('dblclick', '.dataTables_wrapper > table tbody tr', function () {
+      if (huePubSub){
+        huePubSub.publish('table.row.dblclick', {idx: $(this).index(), table: $(this).parents('table')});
+      }
+    });
   };
 
-  function drawLockedRow(plugin, rowNo) {
+  function drawLockedRow(plugin, rowNo, force) {
     var $pluginElement = $(plugin.element);
     var lockedRows = $pluginElement.data('lockedRows') || {};
     var $header = $("#" + $pluginElement.attr("id") + "jHueTableExtenderClonedContainer");
@@ -214,7 +209,9 @@
     $headerCounter.addClass('locked');
 
     function unlock($el) {
-      $header.find('tr.ht-visible-row-'+(($el.text()*1)-1)).remove();
+      $header.find('tr td:first-child').filter(function () {
+        return $(this).text() === rowNo + '';
+      }).closest('tr').remove();
       delete lockedRows['r' + $el.text()]
       $el.parent().remove();
       if ($header.find('tbody tr').length == 0) {
@@ -223,16 +220,23 @@
       }
     }
 
-    if (Object.keys(lockedRows).indexOf('r' + rowNo) === -1) {
-      var $clone = $pluginElement.find('tr td:first-child').filter(function() {
-        return $(this).text() === rowNo+'';
-      }).closest('tr').clone();
+    if (Object.keys(lockedRows).indexOf('r' + rowNo) === -1 || force) {
+      if (force) {
+        unlock(lockedRows['r' + rowNo].cell.find('td'));
+      }
+      var $clone = $('<tr>');
+      var tHtml = '';
+      var aoColumns = $pluginElement.data('aoColumns');
+      $pluginElement.data('data')[rowNo - 1].forEach(function(col, idx){
+        tHtml += '<td ' + (aoColumns && !aoColumns[idx].bVisible ? 'style="display: none"' : '') + '>' + col + '</td>';
+      });
+      $clone.html(tHtml);
       $clone.addClass('locked');
       $clone.appendTo($header.find('tbody'));
       $pluginElement.data('lockedRows', lockedRows);
       var $newTr = $('<tr>');
       $newTr.addClass('locked').html('<td class="pointer unlockable" title="' + plugin.options.labels.UNLOCK + '"><i class="fa fa-unlock muted"></i>' + rowNo + '</td>').appendTo($headerCounter.find('tbody'));
-      $newTr.find('td').on('click', function(){
+      $newTr.find('td').on('click', function () {
         unlock($(this));
       });
       lockedRows['r' + rowNo] = {
@@ -243,7 +247,7 @@
     else {
       lockedRows['r' + rowNo].row.appendTo($header.find('tbody'));
       lockedRows['r' + rowNo].cell.appendTo($headerCounter.find('tbody'));
-      lockedRows['r' + rowNo].cell.find('td').on('click', function(){
+      lockedRows['r' + rowNo].cell.find('td').on('click', function () {
         unlock($(this));
       });
     }
@@ -272,11 +276,14 @@
     clonedCellTHead.appendTo(clonedCell);
     var clonedCellTH = originalTh.clone();
     clonedCellTH.appendTo(clonedCellTHead);
-    clonedCellTH.width(originalTh.width()).css("background-color", "#FFFFFF");
+    clonedCellTH.width(originalTh.width()).css({
+      "background-color": "#FFFFFF",
+      "border-color": "transparent"
+    });
     clonedCellTH.click(function () {
       originalTh.click();
     });
-    $('<tbody>').appendTo(clonedCell)
+    $('<tbody>').appendTo(clonedCell);
 
     var clonedCellContainer = $("<div>").css("background-color", "#FFFFFF").width(originalTh.outerWidth());
 
@@ -328,7 +335,7 @@
         clonedTableVisibleContainer.height($pluginElement.parent().height());
         $pluginElement.parent().data("h", clonedTableVisibleContainer.height());
       }
-    }, 250);
+    }, 250, plugin.options.app);
     $pluginElement.data('firstcol_interval', firstColInt);
 
     $pluginElement.parent().resize(function () {
@@ -337,10 +344,10 @@
     });
 
     $pluginElement.parent().scroll(function () {
-      clonedTableContainer.css("marginTop", (-$pluginElement.parent().scrollTop()) + "px");
+      clonedTableContainer.css("marginTop", (-$pluginElement.parent().scrollTop() + plugin.options.fixedFirstColumnTopMargin) + "px");
     });
 
-    clonedTableContainer.css("marginTop", (-$pluginElement.parent().scrollTop()) + "px");
+    clonedTableContainer.css("marginTop", (-$pluginElement.parent().scrollTop() + plugin.options.fixedFirstColumnTopMargin) + "px");
 
     function positionClones() {
       var pos = plugin.options.stickToTopPosition;
@@ -401,7 +408,9 @@
         originalTh.removeAttr("data-bind");
         clonedTable.find("thead>tr th:eq(" + i + ")").width(originalTh.width()).css("background-color", "#FFFFFF").click(function () {
           originalTh.click();
-          clonedTable.find("thead>tr th").attr("class", "sorting");
+          if (plugin.options.headerSorting) {
+            clonedTable.find("thead>tr th").attr("class", "sorting");
+          }
           $(this).attr("class", originalTh.attr("class"));
         });
       });
@@ -463,7 +472,7 @@
             clonedTable.find("thead>tr th:eq(" + i + ")").width($(this).width()).css("background-color", "#FFFFFF");
           });
         }
-      }, 250);
+      }, 250, plugin.options.app);
       $pluginElement.data('header_interval', headerInt);
 
       $pluginElement.parent().resize(function () {
@@ -495,6 +504,7 @@
       $(mainScrollable).on('scroll', positionClones);
     }
     else {
+      $("#" + $pluginElement.attr("id") + "jHueTableExtenderClonedContainer").children('div').width($pluginElement.outerWidth());
       $pluginElement.find("thead>tr th").each(function (i) {
         var originalTh = $(this);
         $("#" + $pluginElement.attr("id") + "jHueTableExtenderClonedContainer").find("thead>tr th:eq(" + i + ")").width(originalTh.width()).attr('class', originalTh.attr('class'));

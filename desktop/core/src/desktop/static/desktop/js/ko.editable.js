@@ -63,9 +63,9 @@
         //taken directly from ko.bindingHandlers['options']
         function applyToObject(object, predicate, defaultValue) {
           var predicateType = typeof predicate;
-          if (predicateType == "function")    // Given a function; run it against the data value
+          if (predicateType === "function")    // Given a function; run it against the data value
             return predicate(object);
-          else if (predicateType == "string") // Given a string; treat it as a property name on the data value
+          else if (predicateType === "string") // Given a string; treat it as a property name on the data value
             return object[predicate];
           else                                // Given no optionsText arg; use the data value itself
             return defaultValue;
@@ -88,19 +88,140 @@
         editableOptions.toggle = 'manual';
       }
 
+      var onActionRender = undefined;
+
+      if (editableOptions.inlineEditAction) {
+        onActionRender = function ($container, overflowing) {
+          if (!overflowing) {
+            var $editAction = $('<a href="javascript:void(0);"><i class="fa fa-fw fa-pencil"></i></a>');
+            if (editableOptions.inlineEditAction.editClass) {
+              $editAction.addClass(editableOptions.inlineEditAction.editClass);
+            }
+            $editAction.on('click', function () {
+              $editable.editable('toggle');
+            });
+            $editAction.appendTo($container);
+          }
+        }
+      }
+
+      var addPlaceHolder = function ($container) {
+        if (editableOptions.placeholder) {
+          $('<div>').addClass('editable-inline-empty').text(editableOptions.placeholder).click(function () {
+            $editable.editable('toggle');
+          }).appendTo($container);
+        }
+      };
+
+      var multiLineEllipsisHandler;
+      if (editableOptions.multiLineEllipsis) {
+        editableOptions.display = function (value) {
+          if (!value) {
+            if (multiLineEllipsisHandler) {
+              multiLineEllipsisHandler.pause();
+            }
+            var $container = $(this);
+            $container.empty();
+            addPlaceHolder($container);
+            if (onActionRender) {
+              onActionRender($container);
+            }
+            return;
+          }
+
+          if (!multiLineEllipsisHandler) {
+            multiLineEllipsisHandler = new MultiLineEllipsisHandler({
+              element: this,
+              text: value,
+              overflowHeight: editableOptions.multiLineEllipsis.overflowHeight,
+              expandable: editableOptions.multiLineEllipsis,
+              expandClass: editableOptions.multiLineEllipsis.expandClass,
+              linkify: true,
+              onActionRender: onActionRender
+            });
+
+            ko.utils.domNodeDisposal.addDisposeCallback(element, function() {
+              multiLineEllipsisHandler.dispose();
+            });
+          } else {
+            multiLineEllipsisHandler.setText(value);
+            multiLineEllipsisHandler.resume();
+          }
+        }
+      } else if (onActionRender) {
+        editableOptions.display = function (value) {
+          var $container = $(this);
+          if (!value) {
+            addPlaceHolder($container);
+          } else {
+            $('<span>').html(value).appendTo($container);
+          }
+          onActionRender($container);
+        };
+
+        onActionRender = function ($container) {
+          var $editAction = $('<a href="javascript:void(0);"><i class="fa fa-fw fa-pencil"></i></a>');
+          if (editableOptions.inlineEditAction.editClass) {
+            $editAction.addClass(editableOptions.inlineEditAction.editClass);
+          }
+          $editAction.appendTo($container);
+        }
+      }
+
       //create editable
       var $editable = $element.editable(editableOptions);
+
+      if (editableOptions.multiLineEllipsis) {
+        $editable.off('.multiLine');
+        $editable.on('hidden.multiLine', function () {
+          if (multiLineEllipsisHandler && ko.unwrap(value)) {
+            multiLineEllipsisHandler.resume();
+          }
+        });
+        $editable.on('shown.multiLine', function () {
+          if (multiLineEllipsisHandler) {
+            multiLineEllipsisHandler.pause();
+          }
+        })
+      }
 
       //update observable on save
       if (ko.isObservable(value)) {
         $editable.on('save.ko', function (e, params) {
-          value(params.newValue.replace(/<(?:.|\n)*?>/gm, ''));
+          var newValue = params.newValue || '';
+          if (editableOptions.type === 'wysihtml5') {
+            if (editableOptions.skipNewLines) {
+              newValue = newValue.replace(/<br\s*[\/]?>/gi, ' ').replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+            } else {
+              newValue = newValue.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+            }
+          } else {
+            newValue = newValue.replace(/<(?:.|\n)*?>/gm, '');
+
+            if (editableOptions.type !== 'textarea') {
+              newValue = newValue.replace(/\r?\n|\r/g, ' ');
+            }
+          }
+          value(newValue);
         })
       }
-      ;
+
+      if (editableOptions.toggleElement) {
+        var $clickable = $element.parent().find(editableOptions.toggleElement);
+        if ($element.parents('.show-inactive-on-hover').length > 0) {
+          $clickable = $element.parents('.show-inactive-on-hover').find(editableOptions.toggleElement);
+        }
+        if ($clickable !== null) {
+          $clickable.on('click', function (e) {
+            e.stopPropagation();
+            e.preventDefault();
+            $editable.editable('toggle');
+          });
+        }
+      }
 
       if (editableOptions.save) {
-        $editable.on('save', editableOptions.save);
+        $editable.on('save', editableOptions.save.bind(viewModel));
       }
 
       //setup observable to fire only when editable changes, not when options change

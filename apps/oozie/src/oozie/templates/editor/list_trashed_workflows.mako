@@ -23,7 +23,7 @@
 <%namespace name="layout" file="../navigation-bar.mako" />
 <%namespace name="utils" file="../utils.inc.mako" />
 
-${ commonheader(_("Trashed Workflows"), "oozie", user) | n,unicode }
+${ commonheader(_("Trashed Workflows"), "oozie", user, request) | n,unicode }
 ${ layout.menubar(section='workflows') }
 
 
@@ -59,7 +59,7 @@ ${ layout.menubar(section='workflows') }
   <table id="workflowTable" class="table datatables">
     <thead>
       <tr>
-        <th width="1%"><div class="hueCheckbox selectAll fa" data-selectables="workflowCheck"></div></th>
+        <th width="1%"><div class="hue-checkbox selectAll fa" data-selectables="workflowCheck"></div></th>
         <th>${ _('Name') }</th>
         <th>${ _('Description') }</th>
         <th>${ _('Last Modified') }</th>
@@ -72,7 +72,7 @@ ${ layout.menubar(section='workflows') }
       % for workflow in jobs:
         <tr>
           <td data-row-selector-exclude="true">
-             <div class="hueCheckbox workflowCheck fa" data-row-selector-exclude="true" data-workflow-id="${ workflow.id }"></div>
+             <div class="hue-checkbox workflowCheck fa" data-row-selector-exclude="true" data-workflow-id="${ workflow.id }"></div>
           </td>
           <td>
             ${ workflow.name }
@@ -98,8 +98,8 @@ ${ layout.menubar(section='workflows') }
   <form id="destroyWfForm" action="${ url('oozie:delete_workflow') }?skip_trash=true" method="POST">
     ${ csrf_token(request) | n,unicode }
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3 id="destroyWfMessage">${ _('Delete the selected workflow(s)?') }</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 id="destroyWfMessage" class="modal-title">${ _('Delete the selected workflow(s)?') }</h2>
     </div>
     <div class="modal-footer">
       <a href="#" class="btn" data-dismiss="modal">${ _('No') }</a>
@@ -115,8 +115,8 @@ ${ layout.menubar(section='workflows') }
   <form id="purgeWfsForm" action="${ url('oozie:delete_workflow') }?skip_trash=true" method="POST">
     ${ csrf_token(request) | n,unicode }
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3 id="purgeWfsMessage">${ _('Delete all trashed workflow(s)?') }</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 id="purgeWfsMessage" class="modal-title">${ _('Delete all trashed workflow(s)?') }</h2>
     </div>
     <div class="modal-footer">
       <a href="#" class="btn" data-dismiss="modal">${ _('No') }</a>
@@ -132,8 +132,8 @@ ${ layout.menubar(section='workflows') }
   <form id="restoreWfForm" action="${ url('oozie:restore_workflow') }" method="POST">
     ${ csrf_token(request) | n,unicode }
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3 id="restoreWfMessage">${ _('Restore the selected workflow(s)?') }</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 id="restoreWfMessage" class="modal-title">${ _('Restore the selected workflow(s)?') }</h2>
     </div>
     <div class="modal-footer">
       <a href="#" class="btn" data-dismiss="modal">${ _('No') }</a>
@@ -147,9 +147,8 @@ ${ layout.menubar(section='workflows') }
 
 
 <script src="${ static('desktop/ext/js/datatables-paging-0.1.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/knockout.min.js') }" type="text/javascript" charset="utf-8"></script>
 
-<script type="text/javascript" charset="utf-8">
+<script type="text/javascript">
   $(document).ready(function () {
     var viewModel = {
         availableJobs : ko.observableArray(${ json_jobs | n }),
@@ -183,8 +182,8 @@ ${ layout.menubar(section='workflows') }
 
     function toggleActions() {
       $(".toolbarBtn").attr("disabled", "disabled");
-      var selector = $(".hueCheckbox.workflowCheck[checked='checked']");
-      var can_delete = $(".hueCheckbox.workflowCheck[checked='checked'][data-workflow-id]");
+      var selector = $(".hue-checkbox.workflowCheck[checked='checked']");
+      var can_delete = $(".hue-checkbox.workflowCheck[checked='checked'][data-workflow-id]");
       if (can_delete.length >= 1 && can_delete.length == selector.length) {
         $("#destroy-btn").removeAttr("disabled");
         $("#restore-btn").removeAttr("disabled");
@@ -193,7 +192,7 @@ ${ layout.menubar(section='workflows') }
 
     $("#destroy-btn").click(function (e) {
       viewModel.chosenJobs.removeAll();
-      $(".hueCheckbox[checked='checked']").each(function( index ) {
+      $(".hue-checkbox[checked='checked']").each(function( index ) {
         viewModel.chosenJobs.push($(this).data("workflow-id"));
       });
       $("#destroyWf").modal("show");
@@ -201,7 +200,7 @@ ${ layout.menubar(section='workflows') }
 
     $("#purge-btn").click(function (e) {
       viewModel.chosenJobs.removeAll();
-      $(".hueCheckbox").each(function( index ) {
+      $(".hue-checkbox").each(function( index ) {
         viewModel.chosenJobs.push($(this).data("workflow-id"));
       });
       $("#purgeWfs").modal("show");
@@ -209,7 +208,7 @@ ${ layout.menubar(section='workflows') }
 
     $("#restore-btn").click(function (e) {
       viewModel.chosenJobs.removeAll();
-      $(".hueCheckbox[checked='checked']").each(function( index ) {
+      $(".hue-checkbox[checked='checked']").each(function( index ) {
         viewModel.chosenJobs.push($(this).data("workflow-id"));
       });
       $("#restoreWf").modal("show");

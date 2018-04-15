@@ -22,8 +22,16 @@ from urlparse import urlparse
 from django.utils.translation import ugettext_lazy as _t
 
 from desktop.lib.conf import Config
+from libsolr import conf as libsolr_conf
+from libzookeeper import conf as libzookeeper_conf
+
 
 LOG = logging.getLogger(__name__)
+
+
+# Deprecated. Should be automatically guessed from Solr admin info API now.
+def get_solr_ensemble():
+  return '%s%s' % (libzookeeper_conf.ENSEMBLE.get(), libsolr_conf.SOLR_ZK_PATH.get())
 
 
 def solrctl():
@@ -49,16 +57,51 @@ def zkensemble():
     if clusters['default'].HOST_PORTS.get() != 'localhost:2181':
       return '%s/solr' % clusters['default'].HOST_PORTS.get()
   except:
-    LOG.exception('failed to get zookeeper ensemble')
+    LOG.warn('Failed to get Zookeeper ensemble')
 
   try:
     from search.conf import SOLR_URL
     parsed = urlparse(SOLR_URL.get())
     return "%s:2181/solr" % (parsed.hostname or 'localhost')
   except:
-    LOG.exception('failed to get solr url')
+    LOG.warn('Failed to get Solr url')
 
 
+ENABLE_NEW_IMPORTER = Config(
+  key="enable_new_importer",
+  help=_t("Flag to turn on the new metadata importer."),
+  type=bool,
+  default=False
+)
+
+# Deprecated as always on
+ENABLE_NEW_INDEXER = Config(
+  key="enable_new_indexer",
+  help=_t("Flag to turn on the new Solr indexer."),
+  type=bool,
+  default=True
+)
+
+ENABLE_SCALABLE_INDEXER = Config(
+  key="enable_scalable_indexer",
+  help=_t("Flag to turn on the Morphline Solr indexer."),
+  type=bool,
+  default=False
+)
+
+CONFIG_INDEXER_LIBS_PATH = Config(
+  key="config_indexer_libs_path",
+  help=_t("oozie workspace template for indexing:"),
+  type=str,
+  default='/tmp/smart_indexer_lib'
+)
+
+ENABLE_SQOOP = Config(
+  key="enable_sqoop",
+  help=_t("Flag to turn on Sqoop imports."),
+  type=bool,
+  default=False
+)
 
 # Unused
 BATCH_INDEXER_PATH = Config(
@@ -84,13 +127,6 @@ CONFIG_INDEXING_TEMPLATES_PATH = Config(
   help=_t("oozie workspace template for indexing:"),
   type=str,
   default=os.path.join(os.path.dirname(__file__), '..', 'data', 'oozie_workspace')
-  )
-
-CONFIG_INDEXER_LIBS_PATH = Config(
-  key="config_indexer_libs_path",
-  help=_t("oozie workspace template for indexing:"),
-  type=str,
-  default='/tmp/smart_indexer_lib'
   )
 
 SOLRCTL_PATH = Config(

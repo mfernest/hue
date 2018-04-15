@@ -24,17 +24,23 @@ from django.contrib.auth.models import Group
 <%namespace name="actionbar" file="actionbar.mako" />
 <%namespace name="configKoComponents" file="/config_ko_components.mako" />
 <%namespace name="layout" file="layout.mako" />
-<%namespace name="require" file="/require.mako" />
-
-${commonheader(_('Configurations'), "useradmin", user) | n,unicode}
+%if not is_embeddable:
+${commonheader(_('Configurations'), "useradmin", user, request) | n,unicode}
+%endif
 ${layout.menubar(section='configurations')}
 
+<script src="${ static('desktop/ext/js/jquery/plugins/jquery-ui-1.10.4.custom.min.js') }"></script>
+<script src="${ static('desktop/ext/js/selectize.min.js') }"></script>
+<script src="${ static('metastore/js/metastore.ko.js') }"></script>
+<script src="${ static('desktop/ext/js/knockout-sortable.min.js') }"></script>
+<script src="${ static('desktop/js/ko.selectize.js') }"></script>
+<script src="${ static('desktop/js/ko.editable.js') }"></script>
 
 <script id="app-list" type="text/html">
   <div class="card card-small">
     <h1 class="card-heading simple">${ _('Configurations') }</h1>
 
-    <table class="table table-striped table-condensed datatables margin-top-20">
+    <table class="table table-condensed datatables margin-top-20">
       <thead>
       <tr>
         <th>${ _('Application') }</th>
@@ -112,25 +118,19 @@ ${layout.menubar(section='configurations')}
   </div>
 </script>
 
-<div class="container-fluid">
+<div id="configurationsComponents" class="container-fluid">
   <!-- ko hueSpinner: { spin: loading, center: true, size: 'large' } --><!-- /ko -->
   <h4 style="width: 100%; text-align: center; display: none;" data-bind="visible: !loading() && hasErrors()">${ _('There was an error loading the configurations') }</h4>
   <!-- ko template: { if: !loading() && !hasErrors() && !selectedApp(), name: 'app-list' } --><!-- /ko -->
   <!-- ko template: { if: !loading() && !hasErrors() && selectedApp(), name: 'edit-app' } --><!-- /ko -->
 </div>
 
-${ require.config() }
+%if not is_embeddable:
 ${ configKoComponents.config() }
+%endif
 
-<script type="text/javascript" charset="utf-8">
-  require([
-    'knockout',
-    'desktop/js/apiHelper',
-    'knockout-mapping',
-    'ko.hue-bindings',
-    'knockout-sortable'
-  ], function (ko, apiHelper) {
-
+<script type="text/javascript">
+  (function () {
     var GroupOverride = function (group, allGroups) {
       var self = this;
       self.allGroups = allGroups;
@@ -155,13 +155,13 @@ ${ configKoComponents.config() }
         var groupIndex = {};
         self.allGroups().forEach(function (group) {
           groupIndex[group.id] = group.name;
-        })
+        });
 
         self.groups().forEach(function (groupOverride) {
           groupOverride.group_ids().forEach(function (id) {
             groups[groupIndex[id]] = true;
           })
-        })
+        });
         return Object.keys(groups).sort().join(', ');
       });
     };
@@ -176,7 +176,7 @@ ${ configKoComponents.config() }
 
     var ConfigurationsViewModel = function () {
       var self = this;
-      self.apiHelper = apiHelper.getInstance({
+      self.apiHelper = ApiHelper.getInstance({
         user: '${ user.username }'
       });
       self.hasErrors = ko.observable(false);
@@ -297,11 +297,12 @@ ${ configKoComponents.config() }
       });
     };
 
-    ko.applyBindings(new ConfigurationsViewModel());
+    ko.applyBindings(new ConfigurationsViewModel(), $('#configurationsComponents')[0]);
 
-  });
+  })();
 </script>
 
 ${layout.commons()}
-
+%if not is_embeddable:
 ${ commonfooter(request, messages) | n,unicode }
+%endif

@@ -28,8 +28,6 @@ from desktop.lib.exceptions import StructuredException
 from desktop.lib.i18n import force_unicode
 from desktop.models import Document
 
-from jobbrowser.views import job_single_logs
-from jobbrowser.models import LinkJobLogs
 from oozie.forms import WorkflowForm, NodeForm, design_form_by_type
 from oozie.models import Workflow, Node, Start, End, Kill,\
                          Link, Decision, Fork, DecisionEnd, Join,\
@@ -39,6 +37,13 @@ from oozie.utils import model_to_dict, format_dict_field_values, format_field_va
 
 
 LOG = logging.getLogger(__name__)
+
+
+try:
+  from jobbrowser.views import job_single_logs
+  from jobbrowser.models import LinkJobLogs
+except:
+  LOG.warn('Oozie is not enabled')
 
 
 def error_handler(view_fn):
@@ -444,18 +449,19 @@ def get_log(request, oozie_workflow, make_links=True, log_start_pattern=None, lo
             else:
               LOG.debug('Failed to find given start log pattern in logs: %s' % log_start_pattern)
 
+          if log_end_pattern:
+            re_log_end = re.compile(log_end_pattern)
+            is_really_done = re_log_end.search(action_logs) is not None or oozie_workflow.status == 'KILLED'
+            if is_really_done and not action_logs:
+              LOG.warn('Unable to scrape full logs, try increasing the jobbrowser log_offset configuration value.')
+
           if make_links:
             action_logs = LinkJobLogs._make_links(action_logs)
 
           logs[action.name] = action_logs
 
-          if log_end_pattern:
-            re_log_end = re.compile(log_end_pattern)
-            is_really_done = re_log_end.search(action_logs) is not None
-            if is_really_done and not action_logs:
-              LOG.warn('Unable to scrape full logs, try increasing the jobbrowser log_offset configuration value.')
-    except Exception, e:
-      LOG.error('An error occurred while watching the job running: %(error)s' % {'error': e})
+    except Exception:
+      LOG.exception('An error occurred while watching the job running')
       is_really_done = True
 
   workflow_actions = _get_workflow_actions(oozie_workflow, logs, is_really_done)

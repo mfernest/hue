@@ -15,7 +15,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 try:
   import oauth2 as oauth
 except:
@@ -37,11 +36,13 @@ from django.http import HttpResponseRedirect
 from django.utils.translation import ugettext as _
 
 from desktop.auth import forms as auth_forms
+from desktop.auth.forms import ImpersonationAuthenticationForm
 from desktop.lib.django_util import render
 from desktop.lib.django_util import login_notrequired
 from desktop.lib.django_util import JsonResponse
-from desktop.log.access import access_warn, last_access_map
-from desktop.conf import LDAP, OAUTH, DEMO_ENABLED
+from desktop.log.access import access_log, access_warn, last_access_map
+from desktop.conf import OAUTH
+from desktop.settings import LOAD_BALANCER_COOKIE
 
 from hadoop.fs.exceptions import WebHdfsException
 from useradmin.models import get_profile
@@ -79,25 +80,30 @@ def first_login_ever():
       return True
   return False
 
-
-def get_backend_names():
-  return get_backends and [backend.__class__.__name__ for backend in get_backends()]
-
+# We want unique method name to represent HUE-3 vs HUE-4 method call. This is required because of urlresolvers.reverse('desktop.auth.views.dt_login') below which needs uniqueness to work correctly
+@login_notrequired
+def dt_login_old(request, from_modal=False):
+  return dt_login(request, from_modal)
 
 @login_notrequired
 @watch_login
 def dt_login(request, from_modal=False):
   redirect_to = request.REQUEST.get('next', '/')
   is_first_login_ever = first_login_ever()
-  backend_names = get_backend_names()
-  is_active_directory = 'LdapBackend' in backend_names and ( bool(LDAP.NT_DOMAIN.get()) or bool(LDAP.LDAP_SERVERS.get()) )
+  backend_names = auth_forms.get_backend_names()
+  is_active_directory = auth_forms.is_active_directory()
+  is_ldap_option_selected = 'server' not in request.POST or request.POST['server'] == 'LDAP' \
+                            or request.POST['server'] in auth_forms.get_ldap_server_keys()
 
-  if is_active_directory:
+  if is_active_directory and is_ldap_option_selected:
     UserCreationForm = auth_forms.LdapUserCreationForm
     AuthenticationForm = auth_forms.LdapAuthenticationForm
   else:
     UserCreationForm = auth_forms.UserCreationForm
-    AuthenticationForm = auth_forms.AuthenticationForm
+    if 'ImpersonationBackend' in backend_names:
+      AuthenticationForm = ImpersonationAuthenticationForm
+    else:
+      AuthenticationForm = auth_forms.AuthenticationForm
 
   if request.method == 'POST':
     request.audit = {
@@ -113,8 +119,7 @@ def dt_login(request, from_modal=False):
       auth_form = AuthenticationForm(data=request.POST)
 
       if auth_form.is_valid():
-        # Must login by using the AuthenticationForm.
-        # It provides 'backends' on the User object.
+        # Must login by using the AuthenticationForm. It provides 'backends' on the User object.
         user = auth_form.get_user()
         userprofile = get_profile(user)
 
@@ -123,14 +128,10 @@ def dt_login(request, from_modal=False):
         if request.session.test_cookie_worked():
           request.session.delete_test_cookie()
 
-        auto_create_home_backends = ['AllowAllBackend', 'LdapBackend', 'SpnegoDjangoBackend']
-        if is_first_login_ever or any(backend in backend_names for backend in auto_create_home_backends):
-          # Create home directory for first user.
-          try:
-            ensure_home_directory(request.fs, user.username)
-          except (IOError, WebHdfsException), e:
-            LOG.error(_('Could not create home directory.'), exc_info=e)
-            request.error(_('Could not create home directory.'))
+        try:
+          ensure_home_directory(request.fs, user)
+        except (IOError, WebHdfsException), e:
+          LOG.error('Could not create home directory at login for %s.' % user, exc_info=e)
 
         if require_change_password(userprofile):
           return HttpResponseRedirect(urlresolvers.reverse('useradmin.views.edit_user', kwargs={'username': user.username}))
@@ -141,7 +142,7 @@ def dt_login(request, from_modal=False):
 
         msg = 'Successful login for user: %s' % user.username
         request.audit['operationText'] = msg
-        access_warn(request, msg)
+        access_log(request, msg)
         if from_modal or request.REQUEST.get('fromModal', 'false') == 'true':
           return JsonResponse({'auth': True})
         else:
@@ -157,12 +158,12 @@ def dt_login(request, from_modal=False):
   else:
     first_user_form = None
     auth_form = AuthenticationForm()
-
-  if DEMO_ENABLED.get() and not 'admin' in request.REQUEST:
-    user = authenticate(username=request.user.username, password='HueRocks')
-    login(request, user)
-    ensure_home_directory(request.fs, user.username)
-    return HttpResponseRedirect(redirect_to)
+    # SAML user is already authenticated in djangosaml2.views.login
+    if 'SAML2Backend' in backend_names and request.user.is_authenticated():
+      try:
+        ensure_home_directory(request.fs, request.user)
+      except (IOError, WebHdfsException), e:
+        LOG.error('Could not create home directory for SAML user %s.' % request.user)
 
   if not from_modal:
     request.session.set_test_cookie()
@@ -171,7 +172,7 @@ def dt_login(request, from_modal=False):
   if from_modal:
     renderable_path = 'login_modal.mako'
 
-  return render(renderable_path, request, {
+  response = render(renderable_path, request, {
     'action': urlresolvers.reverse('desktop.auth.views.dt_login'),
     'form': first_user_form or auth_form,
     'next': redirect_to,
@@ -180,6 +181,11 @@ def dt_login(request, from_modal=False):
     'backend_names': backend_names,
     'active_directory': is_active_directory
   })
+
+  if not request.user.is_authenticated():
+    response.delete_cookie(LOAD_BALANCER_COOKIE) # Note: might be re-balanced to another Hue on login.
+
+  return response
 
 
 def dt_logout(request, next_page=None):
@@ -190,15 +196,24 @@ def dt_logout(request, next_page=None):
     'operation': 'USER_LOGOUT',
     'operationText': 'Logged out user: %s' % username
   }
+
   backends = get_backends()
   if backends:
     for backend in backends:
       if hasattr(backend, 'logout'):
-        response = backend.logout(request, next_page)
-        if response:
-          return response
+        try:
+          response = backend.logout(request, next_page)
+          if response:
+            return response
+        except Exception, e:
+          LOG.warn('Potential error on logout for user: %s with exception: %s' % (username, e))
 
-  return django.contrib.auth.views.logout(request, next_page)
+  if len(filter(lambda backend: hasattr(backend, 'logout'), backends)) == len(backends):
+    LOG.warn("Failed to log out from all backends for user: %s" % (username))
+
+  response = django.contrib.auth.views.logout(request, next_page)
+  response.delete_cookie(LOAD_BALANCER_COOKIE)
+  return response
 
 
 def profile(request):

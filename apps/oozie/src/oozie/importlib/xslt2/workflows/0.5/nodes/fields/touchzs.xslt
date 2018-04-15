@@ -4,15 +4,15 @@
 
 <xsl:template name="touchzs">
 
-  "touchzs": {
+  "touchzs": [
 
     <xsl:for-each select="*[local-name()='touchz']">
-      "path<xsl:value-of select='position()'/>": "<xsl:value-of select="@path"/>"
+      {"value": "<xsl:value-of select="@path"/>"}
       <xsl:if  test="position() &lt; last()">
         ,
       </xsl:if>
     </xsl:for-each>
-  }
+  ]
 </xsl:template>
 
 </xsl:stylesheet>

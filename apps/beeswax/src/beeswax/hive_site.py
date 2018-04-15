@@ -27,6 +27,7 @@ import socket
 
 from desktop.lib import security_util
 from hadoop import confparse
+from hadoop.ssl_client_site import get_trustore_location
 
 import beeswax.conf
 
@@ -53,6 +54,8 @@ _CNF_HIVESERVER2_TRUSTSTORE_PASSWORD = 'hive.server2.truststore.password'
 _CNF_HIVESERVER2_TRANSPORT_MODE = 'hive.server2.transport.mode'
 _CNF_HIVESERVER2_THRIFT_HTTP_PORT = 'hive.server2.thrift.http.port'
 _CNF_HIVESERVER2_THRIFT_HTTP_PATH = 'hive.server2.thrift.http.path'
+
+_CNF_HIVESERVER2_THRIFT_SASL_QOP = 'hive.server2.thrift.sasl.qop'
 
 
 # Host is whatever up to the colon. Allow and ignore a trailing slash.
@@ -128,18 +131,28 @@ def get_metastore_warehouse_dir():
 def get_hiveserver2_authentication():
   return get_conf().get(_CNF_HIVESERVER2_AUTHENTICATION, 'NONE').upper() # NONE == PLAIN SASL
 
+def get_hiveserver2_thrift_sasl_qop():
+  return get_conf().get(_CNF_HIVESERVER2_THRIFT_SASL_QOP, 'NONE').lower()
+
 def hiveserver2_impersonation_enabled():
   return get_conf().get(_CNF_HIVESERVER2_IMPERSONATION, 'TRUE').upper() == 'TRUE'
 
 def hiveserver2_jdbc_url():
-  urlbase = 'jdbc:hive2://%s:%s/default' % (beeswax.conf.HIVE_SERVER_HOST.get(),
-                                            beeswax.conf.HIVE_SERVER_PORT.get())
+  urlbase = 'jdbc:hive2://%s:%s/default' % (beeswax.conf.HIVE_SERVER_HOST.get(), beeswax.conf.HIVE_SERVER_PORT.get())
+
   if get_conf().get(_CNF_HIVESERVER2_USE_SSL, 'FALSE').upper() == 'TRUE':
-    return '%s;ssl=true;sslTrustStore=%s;trustStorePassword=%s' % (urlbase,
-            get_conf().get(_CNF_HIVESERVER2_TRUSTSTORE_PATH),
-            get_conf().get(_CNF_HIVESERVER2_TRUSTSTORE_PASSWORD))
-  else:
-    return urlbase
+    urlbase += ';ssl=true'
+
+    if get_conf().get(_CNF_HIVESERVER2_TRUSTSTORE_PATH):
+      urlbase += ';sslTrustStore=%s' % get_conf().get(_CNF_HIVESERVER2_TRUSTSTORE_PATH)
+    elif get_trustore_location():
+      urlbase += ';sslTrustStore=%s' % get_trustore_location()
+
+    if get_conf().get(_CNF_HIVESERVER2_TRUSTSTORE_PASSWORD):
+      urlbase += ';trustStorePassword=%s' % get_conf().get(_CNF_HIVESERVER2_TRUSTSTORE_PASSWORD)
+
+  return urlbase
+
 
 def hiveserver2_use_ssl():
   return get_conf().get(_CNF_HIVESERVER2_USE_SSL, 'FALSE').upper() == 'TRUE'
@@ -172,3 +185,10 @@ def _parse_hive_site():
     data = ""
 
   _HIVE_SITE_DICT = confparse.ConfParse(data)
+
+def get_hive_site_content():
+  hive_site_path = os.path.join(beeswax.conf.HIVE_CONF_DIR.get(), 'hive-site.xml')
+  if not os.path.exists(hive_site_path):
+    return ''
+  else:
+    return file(hive_site_path, 'r').read()

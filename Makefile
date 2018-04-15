@@ -98,7 +98,6 @@ default:
 	@echo '  docs        : Build documentation'
 	@echo '  prod        : Generate a tar file for production distribution'
 	@echo '  locales     : Extract strings and update dictionary of each locale'
-	@echo '  theme       : Builds the Hue Bootstrap Theme'
 	@echo '  ace         : Builds the Ace Editor tool'
 # END DEV ONLY >>>>
 
@@ -222,17 +221,6 @@ locales:
 
 
 ###################################
-# Hue Bootstrap Theme
-###################################
-
-# <<<< DEV ONLY
-.PHONY: theme
-theme:
-	@cd tools/bootplus && make
-# END DEV ONLY >>>>
-
-
-###################################
 # Ace Editor
 ###################################
 
@@ -244,13 +232,41 @@ ace:
 
 
 ###################################
-# JISON Parser Generator
+# JISON Parser Generators
 ###################################
 
 # <<<< DEV ONLY
-.PHONY: jison
-jison:
-	@cd tools/jison && ./hue-jison.sh
+.PHONY: global-search-parser
+global-search-parser:
+	@cd tools/jison && ./hue-global-search.sh
+
+.PHONY: solr-all-parsers
+solr-all-parsers:
+	@cd tools/jison && ./hue-solr-query.sh && ./hue-solr-formula.sh
+
+.PHONY: solr-query-parser
+solr-query-parser:
+	@cd tools/jison && ./hue-solr-query.sh
+
+.PHONY: solr-formula-parser
+solr-formula-parser:
+	@cd tools/jison && ./hue-solr-formula.sh
+
+.PHONY: sql-all-parsers
+sql-all-parsers:
+	@cd tools/jison && ./hue-sql-autocomplete.sh && ./hue-sql-statement.sh && ./hue-sql-syntax.sh
+
+.PHONY: sql-autocomplete-parser
+sql-autocomplete-parser:
+	@cd tools/jison && ./hue-sql-autocomplete.sh
+
+.PHONY: sql-statement-parser
+sql-statement-parser:
+	@cd tools/jison && ./hue-sql-statement.sh
+
+.PHONY: sql-syntax-parser
+sql-syntax-parser:
+	@cd tools/jison && ./hue-sql-syntax.sh
 # END DEV ONLY >>>>
 
 ###################################
@@ -291,16 +307,19 @@ ext-clean:
 js-test:
 	$(ROOT)/tools/jasmine/phantomjs.runner.sh $(ROOT)/desktop/core/src/desktop/templates/jasmineRunner.html
 
-java-test:
-	mvn -f desktop/libs/hadoop/java/pom.xml test $(MAVEN_OPTIONS)
-
-test: java-test
+test:
 	DESKTOP_DEBUG=1 $(ENV_PYTHON) $(BLD_DIR_BIN)/hue test fast --with-xunit
 
-test-slow: java-test
+test-slow:
 	DESKTOP_DEBUG=1 $(ENV_PYTHON) $(BLD_DIR_BIN)/hue test all --with-xunit --with-cover
-	$(BLD_DIR_BIN)/coverage xml
+	$(BLD_DIR_BIN)/coverage xml -i
 
 start-dev:
 	DESKTOP_DEBUG=1 $(ENV_PYTHON) $(BLD_DIR_BIN)/hue runserver_plus
+
+devinstall:
+	npm run devinstall
+
+css:
+	npm run less
 # END DEV ONLY >>>>

@@ -172,6 +172,9 @@ def format_preserving_redirect(request, target, get_dict=None):
   if get_dict:
     my_get_dict.update(get_dict)
 
+  if request.GET.get('is_embeddable', False):
+    my_get_dict['is_embeddable'] = True
+
   if is_jframe_request(request):
     logging.info("JFrame redirection" +  target)
     my_get_dict['format'] = 'embed'
@@ -463,12 +466,16 @@ class JsonResponse(HttpResponse):
       ``django.core.serializers.json.DjangoJSONEncoder``.
     :param safe: Controls if only ``dict`` objects may be serialized. Defaults
       to ``True``.
+    :param json_dumps_params: A dictionary of kwargs passed to json.dumps().
     """
 
-    def __init__(self, data, encoder=DjangoJSONEncoder, safe=True, indent=None, **kwargs):
+    def __init__(self, data, encoder=DjangoJSONEncoder, safe=True,
+                 json_dumps_params=None, **kwargs):
         if safe and not isinstance(data, dict):
             raise TypeError('In order to allow non-dict objects to be '
                 'serialized set the safe parameter to False')
+        if json_dumps_params is None:
+            json_dumps_params = {}
         kwargs.setdefault('content_type', 'application/json')
-        data = json.dumps(data, cls=encoder, indent=indent)
+        data = json.dumps(data, cls=encoder, **json_dumps_params)
         super(JsonResponse, self).__init__(content=data, **kwargs)

@@ -25,20 +25,24 @@ from itertools import groupby
 
 from django.utils.translation import ugettext as _
 
+from dashboard.facet_builder import _compute_range_facet
+from dashboard.models import Collection2
 from desktop.lib.exceptions_renderable import PopupException
+from desktop.conf import SERVER_USER
 from desktop.lib.i18n import force_unicode
 from desktop.lib.rest.http_client import HttpClient, RestException
 from desktop.lib.rest import resource
-
-from search.conf import EMPTY_QUERY, SECURITY_ENABLED
-from search.api import _compute_range_facet
 
 from libsolr.conf import SSL_CERT_CA_VERIFY
 
 
 LOG = logging.getLogger(__name__)
 
-DEFAULT_USER = 'hue'
+
+try:
+  from search.conf import EMPTY_QUERY, SECURITY_ENABLED, SOLR_URL
+except ImportError, e:
+  LOG.warn('Solr Search is not enabled')
 
 
 def utf_quoter(what):
@@ -49,214 +53,30 @@ class SolrApi(object):
   """
   http://wiki.apache.org/solr/CoreAdmin#CoreAdminHandler
   """
-  def __init__(self, solr_url, user, security_enabled=SECURITY_ENABLED.get(), ssl_cert_ca_verify=SSL_CERT_CA_VERIFY.get()):
-    self._url = solr_url
-    self._user = user
-    self._client = HttpClient(self._url, logger=LOG)
-    self.security_enabled = security_enabled
+  def __init__(self, solr_url=None, user=None, security_enabled=False, ssl_cert_ca_verify=SSL_CERT_CA_VERIFY.get()):
+    if solr_url is None and hasattr(SOLR_URL, 'get'):
+      solr_url = SOLR_URL.get()
 
-    if self.security_enabled:
-      self._client.set_kerberos_auth()
+    if solr_url:
+      self._url = solr_url
+      self._user = user
+      self._client = HttpClient(self._url, logger=LOG)
+      self.security_enabled = security_enabled or SECURITY_ENABLED.get()
 
-    self._client.set_verify(ssl_cert_ca_verify)
+      if self.security_enabled:
+        self._client.set_kerberos_auth()
 
-    self._root = resource.Resource(self._client)
+      self._client.set_verify(ssl_cert_ca_verify)
 
-    # The Kerberos handshake requires two requests in order to authenticate,
-    # but if our first request is a PUT/POST, it might flat-out reject the
-    # first request if the body is too large. So, connect here in order to get
-    # a cookie so future PUT/POSTs will be pre-authenticated.
-    if self.security_enabled:
-      self._root.invoke('HEAD', '/')
+      self._root = resource.Resource(self._client)
 
-  def _get_params(self):
-    if self.security_enabled:
-      return (('doAs', self._user ),)
-    return (('user.name', DEFAULT_USER), ('doAs', self._user),)
+      # The Kerberos handshake requires two requests in order to authenticate,
+      # but if our first request is a PUT/POST, it might flat-out reject the
+      # first request if the body is too large. So, connect here in order to get
+      # a cookie so future PUT/POSTs will be pre-authenticated.
+      if self.security_enabled:
+        self._root.invoke('HEAD', '/')
 
-  def _get_q(self, query):
-    q_template = '(%s)' if len(query['qs']) >= 2 else '%s'
-    return 'OR'.join([q_template % (q['q'] or EMPTY_QUERY.get()) for q in query['qs']]).encode('utf-8')
-
-  def _get_aggregate_function(self, facet):
-    props = {
-        'field': facet['field'],
-        'aggregate': facet['properties']['aggregate'] if 'properties' in facet else facet['aggregate']
-    }
-
-    if props['aggregate'] == 'median':
-      return 'percentile(%(field)s,50)' % props
-    else:
-      return '%(aggregate)s(%(field)s)' % props
-
-  def _get_range_borders(self, collection, query):
-    props = {}
-    GAPS = {
-        '5MINUTES': {
-            'histogram-widget': {'coeff': '+3', 'unit': 'SECONDS'}, # ~100 slots
-            'bucket-widget': {'coeff': '+3', 'unit': 'SECONDS'}, # ~100 slots
-            'bar-widget': {'coeff': '+3', 'unit': 'SECONDS'}, # ~100 slots
-            'facet-widget': {'coeff': '+1', 'unit': 'MINUTES'}, # ~10 slots
-        },
-        '30MINUTES': {
-            'histogram-widget': {'coeff': '+20', 'unit': 'SECONDS'},
-            'bucket-widget': {'coeff': '+20', 'unit': 'SECONDS'},
-            'bar-widget': {'coeff': '+20', 'unit': 'SECONDS'},
-            'facet-widget': {'coeff': '+5', 'unit': 'MINUTES'},
-        },
-        '1HOURS': {
-            'histogram-widget': {'coeff': '+30', 'unit': 'SECONDS'},
-            'bucket-widget': {'coeff': '+30', 'unit': 'SECONDS'},
-            'bar-widget': {'coeff': '+30', 'unit': 'SECONDS'},
-            'facet-widget': {'coeff': '+10', 'unit': 'MINUTES'},
-        },
-        '12HOURS': {
-            'histogram-widget': {'coeff': '+7', 'unit': 'MINUTES'},
-            'bucket-widget': {'coeff': '+7', 'unit': 'MINUTES'},
-            'bar-widget': {'coeff': '+7', 'unit': 'MINUTES'},
-            'facet-widget': {'coeff': '+1', 'unit': 'HOURS'},
-        },
-        '1DAYS': {
-            'histogram-widget': {'coeff': '+15', 'unit': 'MINUTES'},
-            'bucket-widget': {'coeff': '+15', 'unit': 'MINUTES'},
-            'bar-widget': {'coeff': '+15', 'unit': 'MINUTES'},
-            'facet-widget': {'coeff': '+3', 'unit': 'HOURS'},
-        },
-        '2DAYS': {
-            'histogram-widget': {'coeff': '+30', 'unit': 'MINUTES'},
-            'bucket-widget': {'coeff': '+30', 'unit': 'MINUTES'},
-            'bar-widget': {'coeff': '+30', 'unit': 'MINUTES'},
-            'facet-widget': {'coeff': '+6', 'unit': 'HOURS'},
-        },
-        '7DAYS': {
-            'histogram-widget': {'coeff': '+3', 'unit': 'HOURS'},
-            'bucket-widget': {'coeff': '+3', 'unit': 'HOURS'},
-            'bar-widget': {'coeff': '+3', 'unit': 'HOURS'},
-            'facet-widget': {'coeff': '+1', 'unit': 'DAYS'},
-        },
-        '1MONTHS': {
-            'histogram-widget': {'coeff': '+12', 'unit': 'HOURS'},
-            'bucket-widget': {'coeff': '+12', 'unit': 'HOURS'},
-            'bar-widget': {'coeff': '+12', 'unit': 'HOURS'},
-            'facet-widget': {'coeff': '+5', 'unit': 'DAYS'},
-        },
-        '3MONTHS': {
-            'histogram-widget': {'coeff': '+1', 'unit': 'DAYS'},
-            'bucket-widget': {'coeff': '+1', 'unit': 'DAYS'},
-            'bar-widget': {'coeff': '+1', 'unit': 'DAYS'},
-            'facet-widget': {'coeff': '+30', 'unit': 'DAYS'},
-        },
-        '1YEARS': {
-            'histogram-widget': {'coeff': '+3', 'unit': 'DAYS'},
-            'bucket-widget': {'coeff': '+3', 'unit': 'DAYS'},
-            'bar-widget': {'coeff': '+3', 'unit': 'DAYS'},
-            'facet-widget': {'coeff': '+12', 'unit': 'MONTHS'},
-        },
-        '2YEARS': {
-            'histogram-widget': {'coeff': '+7', 'unit': 'DAYS'},
-            'bucket-widget': {'coeff': '+7', 'unit': 'DAYS'},
-            'bar-widget': {'coeff': '+7', 'unit': 'DAYS'},
-            'facet-widget': {'coeff': '+3', 'unit': 'MONTHS'},
-        },
-        '10YEARS': {
-            'histogram-widget': {'coeff': '+1', 'unit': 'MONTHS'},
-            'bucket-widget': {'coeff': '+1', 'unit': 'MONTHS'},
-            'bar-widget': {'coeff': '+1', 'unit': 'MONTHS'},
-            'facet-widget': {'coeff': '+1', 'unit': 'YEARS'},
-        }
-    }
-
-    time_field = collection['timeFilter'].get('field')
-
-    if time_field and (collection['timeFilter']['value'] != 'all' or collection['timeFilter']['type'] == 'fixed'):
-      # fqs overrides main time filter
-      fq_time_ids = [fq['id'] for fq in query['fqs'] if fq['field'] == time_field]
-      props['time_filter_overrides'] = fq_time_ids
-      props['time_field'] = time_field
-
-      if collection['timeFilter']['type'] == 'rolling':
-        props['field'] = collection['timeFilter']['field']
-        props['from'] = 'NOW-%s' % collection['timeFilter']['value']
-        props['to'] = 'NOW'
-        props['gap'] = GAPS.get(collection['timeFilter']['value'])
-      elif collection['timeFilter']['type'] == 'fixed':
-        props['field'] = collection['timeFilter']['field']
-        props['from'] = collection['timeFilter']['from']
-        props['to'] = collection['timeFilter']['to']
-        props['fixed'] = True
-
-    return props
-
-  def _get_time_filter_query(self, timeFilter, facet):
-    if 'fixed' in timeFilter:
-      props = {}
-      stat_facet = {'min': timeFilter['from'], 'max': timeFilter['to']}
-      _compute_range_facet(facet['widgetType'], stat_facet, props, stat_facet['min'], stat_facet['max'])
-      gap = props['gap']
-      unit = re.split('\d+', gap)[1]
-      return {
-        'start': '%(from)s/%(unit)s' % {'from': timeFilter['from'], 'unit': unit},
-        'end': '%(to)s/%(unit)s' % {'to': timeFilter['to'], 'unit': unit},
-        'gap': '%(gap)s' % props, # add a 'auto'
-      }
-    else:
-      gap = timeFilter['gap'][facet['widgetType']]
-      return {
-        'start': '%(from)s/%(unit)s' % {'from': timeFilter['from'], 'unit': gap['unit']},
-        'end': '%(to)s/%(unit)s' % {'to': timeFilter['to'], 'unit': gap['unit']},
-        'gap': '%(coeff)s%(unit)s/%(unit)s' % gap, # add a 'auto'
-      }
-
-  def _get_fq(self, collection, query):
-    params = ()
-    timeFilter = {}
-
-    if collection:
-      timeFilter = self._get_range_borders(collection, query)
-    if timeFilter and not timeFilter.get('time_filter_overrides'):
-      params += (('fq', urllib.unquote(utf_quoter('%(field)s:[%(from)s TO %(to)s]' % timeFilter))),)
-
-    # Merge facets queries on same fields
-    grouped_fqs = groupby(query['fqs'], lambda x: (x['type'], x['field']))
-    merged_fqs = []
-    for key, group in grouped_fqs:
-      field_fq = next(group)
-      for fq in group:
-        for f in fq['filter']:
-          field_fq['filter'].append(f)
-      merged_fqs.append(field_fq)
-
-    for fq in merged_fqs:
-      if fq['type'] == 'field':
-        fields = fq['field'] if type(fq['field']) == list else [fq['field']] # 2D facets support
-        for field in fields:
-          f = []
-          for _filter in fq['filter']:
-            values = _filter['value'] if type(_filter['value']) == list else [_filter['value']] # 2D facets support
-            if fields.index(field) < len(values): # Lowest common field denominator
-              value = values[fields.index(field)]
-              exclude = '-' if _filter['exclude'] else ''
-              if value is not None and ' ' in force_unicode(value):
-                value = force_unicode(value).replace('"', '\\"')
-                f.append('%s%s:"%s"' % (exclude, field, value))
-              else:
-                f.append('%s{!field f=%s}%s' % (exclude, field, value))
-          _params ='{!tag=%(id)s}' % fq + ' '.join(f)
-          params += (('fq', urllib.unquote(utf_quoter(_params))),)
-      elif fq['type'] == 'range':
-        params += (('fq', '{!tag=%(id)s}' % fq + ' '.join([urllib.unquote(
-                    utf_quoter('%s%s:[%s TO %s}' % ('-' if field['exclude'] else '', fq['field'], f['from'], f['to']))) for field, f in zip(fq['filter'], fq['properties'])])),)
-      elif fq['type'] == 'range-up':
-        params += (('fq', '{!tag=%(id)s}' % fq + ' '.join([urllib.unquote(
-                    utf_quoter('%s%s:[%s TO %s}' % ('-' if field['exclude'] else '', fq['field'], f['from'] if fq['is_up'] else '*', '*' if fq['is_up'] else f['from'])))
-                                                          for field, f in zip(fq['filter'], fq['properties'])])),)
-      elif fq['type'] == 'map':
-        _keys = fq.copy()
-        _keys.update(fq['properties'])
-        params += (('fq', '{!tag=%(id)s}' % fq + urllib.unquote(
-                    utf_quoter('%(lat)s:[%(lat_sw)s TO %(lat_ne)s} AND %(lon)s:[%(lon_sw)s TO %(lon_ne)s}' % _keys))),)
-
-    return params
 
   def query(self, collection, query):
     solr_query = {}
@@ -318,55 +138,64 @@ class SolrApi(object):
               'limit': int(facet['properties'].get('limit', 10)) + (1 if facet['widgetType'] == 'facet-widget' else 0),
               'mincount': int(facet['properties']['mincount'])
           }
+
           params += (
               ('facet.field', '{!key=%(key)s ex=%(id)s f.%(field)s.facet.limit=%(limit)s f.%(field)s.facet.mincount=%(mincount)s}%(field)s' % keys),
           )
         elif facet['type'] == 'nested':
-          _f = {
-              'field': facet['field'],
-              'limit': int(facet['properties'].get('limit', 10)) + (1 if facet['widgetType'] == 'facet-widget' else 0),
-              'mincount': int(facet['properties']['mincount'])
-          }
-
-          if 'start' in facet['properties']:
-            _f.update({
-                'type': 'range',
-                'start': facet['properties']['start'],
-                'end': facet['properties']['end'],
-                'gap': facet['properties']['gap'],
-            })
-            if timeFilter and timeFilter['time_field'] == facet['field'] and (facet['id'] not in timeFilter['time_filter_overrides'] or facet['widgetType'] != 'bucket-widget'):
-              _f.update(self._get_time_filter_query(timeFilter, facet))
-          else:
-            _f.update({
-                'type': 'terms',
-                'field': facet['field'],
-                'excludeTags': facet['id']
-            })
-
+          _f = {}
           if facet['properties']['facets']:
-            if facet['properties']['facets'][0]['aggregate'] == 'count':
-              _f['facet'] = {
-                  'd2': {
-                      'type': 'terms',
-                      'field': '%(field)s' % facet['properties']['facets'][0],
-                      'limit': int(facet['properties']['facets'][0].get('limit', 10)),
-                      'mincount': int(facet['properties']['facets'][0]['mincount'])
-                  }
-              }
-              if len(facet['properties']['facets']) > 1: # Get 3rd dimension calculation
-                _f['facet']['d2']['facet'] = {
-                    'd2': self._get_aggregate_function(facet['properties']['facets'][1])
-                }
-            else:
-              _f['facet'] = {
-                  'd2': self._get_aggregate_function(facet['properties']['facets'][0])
-              }
+            self._n_facet_dimension(facet, _f, facet['properties']['facets'], 1, timeFilter)
 
-          json_facets[facet['id']] = _f
+          if facet['properties'].get('domain'):
+            if facet['properties']['domain'].get('blockParent') or facet['properties']['domain'].get('blockChildren'):
+              _f['domain'] = {}
+              if facet['properties']['domain'].get('blockParent'):
+                _f['domain']['blockParent'] = ' OR '.join(facet['properties']['domain']['blockParent'])
+              if facet['properties']['domain'].get('blockChildren'):
+                _f['domain']['blockChildren'] = ' OR '.join(facet['properties']['domain']['blockChildren'])
+
+          if _f:
+            sort = {'count': facet['properties']['facets'][0]['sort']}
+            for i, agg in enumerate(self._get_dimension_aggregates(facet['properties']['facets'][1:])):
+              if agg['sort'] != 'default':
+                agg_function = self._get_aggregate_function(agg)
+                sort = {'agg_%02d_%02d:%s' % (1, i, agg_function): agg['sort']}
+
+            if sort.get('count') == 'default':
+              sort['count'] = 'desc'
+
+            dim_key = [key for key in _f['facet'].keys() if 'dim' in key][0]
+            _f['facet'][dim_key].update({
+                  'excludeTags': facet['id'],
+                  'offset': 0,
+                  'numBuckets': True,
+                  'allBuckets': True,
+                  'sort': sort
+                  #'prefix': '' # Forbidden on numeric fields
+              })
+            json_facets[facet['id']] = _f['facet'][dim_key]
         elif facet['type'] == 'function':
-          json_facets[facet['id']] = self._get_aggregate_function(facet)
-          json_facets['processEmpty'] = True
+          if facet['properties']['facets']:
+            json_facets[facet['id']] = self._get_aggregate_function(facet['properties']['facets'][0])
+            if facet['properties']['compare']['is_enabled']:
+              # TODO: global compare override
+              unit = re.split('\d+', facet['properties']['compare']['gap'])[1]
+              json_facets[facet['id']] = {
+                'type': 'range',
+                'field': collection['timeFilter'].get('field'),
+                'start': 'NOW/%s-%s-%s' % (unit, facet['properties']['compare']['gap'], facet['properties']['compare']['gap']),
+                'end': 'NOW/%s' % unit,
+                'gap': '+%(gap)s' % facet['properties']['compare'],
+                'facet': {facet['id']: json_facets[facet['id']]}
+              }
+            if facet['properties']['filter']['is_enabled']:
+              json_facets[facet['id']] = {
+                'type': 'query',
+                'q': facet['properties']['filter']['query'] or EMPTY_QUERY.get(),
+                'facet': {facet['id']: json_facets[facet['id']]}
+              }
+            json_facets['processEmpty'] = True
         elif facet['type'] == 'pivot':
           if facet['properties']['facets'] or facet['widgetType'] == 'map-widget':
             fields = facet['field']
@@ -395,18 +224,28 @@ class SolrApi(object):
 
     params += self._get_fq(collection, query)
 
-    if collection['template']['fieldsSelected'] and collection['template']['isGridLayout']:
-      fields = set(collection['template']['fieldsSelected'] + [collection['idField']] if collection['idField'] else [])
-      # Add field if needed
-      if collection['template']['leafletmap'].get('latitudeField'):
-        fields.add(collection['template']['leafletmap']['latitudeField'])
-      if collection['template']['leafletmap'].get('longitudeField'):
-        fields.add(collection['template']['leafletmap']['longitudeField'])
-      if collection['template']['leafletmap'].get('labelField'):
-        fields.add(collection['template']['leafletmap']['labelField'])
-      params += (('fl', urllib.unquote(utf_quoter(','.join(list(fields))))),)
-    else:
-      params += (('fl', '*'),)
+    fl = urllib.unquote(utf_quoter(','.join(Collection2.get_field_list(collection))))
+
+    nested_fields = self._get_nested_fields(collection)
+    if nested_fields:
+      fl += urllib.unquote(utf_quoter(',[child parentFilter="%s"]' % ' OR '.join(nested_fields)))
+
+    if collection['template']['moreLikeThis'] and fl != ['*']: # Potential conflict with nested documents
+      id_field = collection.get('idField', 'id')
+      params += (
+        ('mlt', 'true'),
+        ('mlt.fl', fl.replace(',%s' % id_field, '')),
+        ('mlt.mintf', 1),
+        ('mlt.mindf', 1),
+        ('mlt.maxdf', 50),
+        ('mlt.maxntp', 1000),
+        ('mlt.count', 10),
+        #('mlt.minwl', 1),
+        #('mlt.maxwl', 1),
+      )
+      fl = '*'
+
+    params += (('fl', fl),)
 
     params += (
       ('hl', 'true'),
@@ -428,6 +267,87 @@ class SolrApi(object):
         )
 
     response = self._root.get('%(collection)s/select' % solr_query, params)
+    return self._get_json(response)
+
+
+  def _n_facet_dimension(self, widget, _f, facets, dim, timeFilter):
+    facet = facets[0]
+    f_name = 'dim_%02d:%s' % (dim, facet['field'])
+
+    if facet['aggregate']['function'] == 'count':
+      if 'facet' not in _f:
+        _f['facet'] = {f_name: {}}
+      else:
+        _f['facet'][f_name] = {}
+      _f = _f['facet']
+
+      sort = {'count': facet['sort']}
+      for i, agg in enumerate(self._get_dimension_aggregates(facets)):
+        if agg['sort'] != 'default':
+          agg_function = self._get_aggregate_function(agg)
+          sort = {'agg_%02d_%02d:%s' % (dim, i, agg_function): agg['sort']}
+      if sort.get('count') == 'default':
+        sort['count'] = 'desc'
+
+      _f[f_name] = {
+          'type': 'terms',
+          'field': '%(field)s' % facet,
+          'limit': int(facet.get('limit', 10)),
+          'mincount': int(facet['mincount']),
+          'numBuckets': True,
+          'allBuckets': True,
+          'sort': sort,
+          'missing': facet.get('missing', False)
+          #'prefix': '' # Forbidden on numeric fields
+      }
+
+      if 'start' in facet and not facet.get('type') == 'field':
+        _f[f_name].update({
+            'type': 'range',
+            'start': facet['start'],
+            'end': facet['end'],
+            'gap': facet['gap']
+        })
+
+        # Only on dim 1 currently
+        if timeFilter and timeFilter['time_field'] == facet['field'] and (widget['id'] not in timeFilter['time_filter_overrides']): # or facet['widgetType'] != 'bucket-widget'):
+          facet['widgetType'] = widget['widgetType']
+          _f[f_name].update(self._get_time_filter_query(timeFilter, facet))
+
+      if widget['widgetType'] == 'tree2-widget' and facets[-1]['aggregate']['function'] != 'count':
+        _f['subcount'] = self._get_aggregate_function(facets[-1])
+
+      if len(facets) > 1: # Get n+1 dimension
+        if facets[1]['aggregate']['function'] == 'count':
+          self._n_facet_dimension(widget, _f[f_name], facets[1:], dim + 1, timeFilter)
+        else:
+          self._n_facet_dimension(widget, _f[f_name], facets[1:], dim, timeFilter)
+    else:
+      agg_function = self._get_aggregate_function(facet)
+      _f['facet'] = {
+          'agg_%02d_00:%s' % (dim, agg_function): agg_function
+      }
+      for i, _f_agg in enumerate(facets[1:], 1):
+        if _f_agg['aggregate']['function'] != 'count':
+          agg_function = self._get_aggregate_function(_f_agg)
+          _f['facet']['agg_%02d_%02d:%s' % (dim, i, agg_function)] = agg_function
+        else:
+          self._n_facet_dimension(widget, _f, facets[i:], dim + 1, timeFilter) # Get n+1 dimension
+          break
+
+
+  def select(self, collection, query=None, rows=100, start=0):
+    if query is None:
+      query = EMPTY_QUERY.get()
+
+    params = self._get_params() + (
+        ('q', query),
+        ('wt', 'json'),
+        ('rows', rows),
+        ('start', start),
+    )
+
+    response = self._root.get('%s/select' % collection, params)
     return self._get_json(response)
 
 
@@ -472,6 +392,17 @@ class SolrApi(object):
       raise PopupException(e, title=_('Error while accessing Solr'))
 
 
+  def config(self, name):
+    try:
+      params = self._get_params() + (
+          ('wt', 'json'),
+      )
+      response = self._root.get('%s/config' % name, params=params)
+      return self._get_json(response)['config']
+    except RestException, e:
+      raise PopupException(e, title=_('Error while accessing Solr'))
+
+
   def configs(self):
     try:
       params = self._get_params() + (
@@ -483,14 +414,47 @@ class SolrApi(object):
       raise PopupException(e, title=_('Error while accessing Solr'))
 
 
-  def aliases(self):
+  def create_config(self, name, base_config, immutable=False):
     try:
-      params = self._get_params() + ( # Waiting for SOLR-4968
-          ('detail', 'true'),
-          ('path', '/aliases.json'),
+      params = self._get_params() + (
+          ('action', 'CREATE'),
+          ('name', name),
+          ('baseConfigSet', base_config),
+          ('configSetProp.immutable', immutable),
+          ('wt', 'json'),
       )
-      response = self._root.get('zookeeper', params=params)
-      return json.loads(response['znode'].get('data', '{}')).get('collection', {})
+      return self._root.post('admin/configs', params=params, contenttype='application/json')
+    except RestException, e:
+      raise PopupException(e, title=_('Error while accessing Solr'))
+
+
+  def delete_config(self, name):
+    response = {'status': -1, 'message': ''}
+
+    try:
+      params = self._get_params() + (
+        ('action', 'DELETE'),
+        ('name', name),
+        ('wt', 'json')
+      )
+
+      data = self._root.get('admin/configs', params=params)
+      if data['responseHeader']['status'] == 0:
+        response['status'] = 0
+      else:
+        response['message'] = "Could not remove config: %s" % data
+    except RestException, e:
+      raise PopupException(e, title=_('Error while accessing Solr'))
+    return response
+
+
+  def list_aliases(self):
+    try:
+      params = self._get_params() + (
+          ('action', 'LISTALIASES'),
+          ('wt', 'json'),
+      )
+      return self._root.get('admin/collections', params=params)['aliases']
     except RestException, e:
       raise PopupException(e, title=_('Error while accessing Solr'))
 
@@ -509,25 +473,58 @@ class SolrApi(object):
     except Exception, e:
       raise PopupException(e, title=_('Error while accessing Solr'))
 
-  def create_collection(self, name, shards=1, replication=1):
+
+  def create_collection2(self, name, config_name=None, shards=1, replication=1, **kwargs):
     try:
       params = self._get_params() + (
         ('action', 'CREATE'),
         ('name', name),
         ('numShards', shards),
         ('replicationFactor', replication),
-        ('collection.configName', name),
         ('wt', 'json')
       )
+      if config_name:
+        params += (
+          ('collection.configName', config_name),
+        )
+      if kwargs:
+        params += tuple(((key, val) for key, val in kwargs.iteritems()))
 
       response = self._root.post('admin/collections', params=params, contenttype='application/json')
-      if 'success' in response:
-        return True
+      response_data = self._get_json(response)
+      if response_data.get('failure'):
+        raise PopupException(_('Collection could not be created: %(failure)s') % response_data)
       else:
-        LOG.error("Could not create collection. Check response:\n%s" % json.dumps(response, indent=2))
-        return False
+        return response_data
     except RestException, e:
       raise PopupException(e, title=_('Error while accessing Solr'))
+
+
+  def update_config(self, name, properties):
+    try:
+      params = self._get_params() + (
+        ('wt', 'json'),
+      )
+
+      response = self._root.post('%(collection)s/config' % {'collection': name}, params=params, data=json.dumps(properties), contenttype='application/json')
+      return self._get_json(response)
+    except RestException, e:
+      raise PopupException(e, title=_('Error while accessing Solr'))
+
+
+  def add_fields(self, name, fields):
+    try:
+      params = self._get_params() + (
+        ('wt', 'json'),
+      )
+
+      data = {'add-field': fields}
+
+      response = self._root.post('%(collection)s/schema' % {'collection': name}, params=params, data=json.dumps(data), contenttype='application/json')
+      return self._get_json(response)
+    except RestException, e:
+      raise PopupException(e, title=_('Error while accessing Solr'))
+
 
   def create_core(self, name, instance_dir, shards=1, replication=1):
     try:
@@ -551,7 +548,8 @@ class SolrApi(object):
       else:
         raise PopupException(e, title=_('Error while accessing Solr'))
 
-  def create_or_modify_alias(self, name, collections):
+
+  def create_alias(self, name, collections):
     try:
       params = self._get_params() + (
         ('action', 'CREATEALIAS'),
@@ -562,11 +560,12 @@ class SolrApi(object):
 
       response = self._root.post('admin/collections', params=params, contenttype='application/json')
       if response.get('responseHeader', {}).get('status', -1) != 0:
-        msg = _("Could not create or edit alias. Check response:\n%s") % json.dumps(response, indent=2)
-        LOG.error(msg)
-        raise PopupException(msg)
+        raise PopupException(_("Could not create or edit alias: %s") % response)
+      else:
+        return response
     except RestException, e:
-        raise PopupException(e, title=_('Error while accessing Solr'))
+      raise PopupException(e, title=_('Error while accessing Solr'))
+
 
   def delete_alias(self, name):
     try:
@@ -584,23 +583,26 @@ class SolrApi(object):
     except RestException, e:
         raise PopupException(e, title=_('Error while accessing Solr'))
 
-  def remove_collection(self, name, replication=1):
+
+  def delete_collection(self, name):
+    response = {'status': -1, 'message': ''}
+
     try:
       params = self._get_params() + (
         ('action', 'DELETE'),
         ('name', name),
-        ('replicationFactor', replication),
         ('wt', 'json')
       )
 
-      response = self._root.post('admin/collections', params=params, contenttype='application/json')
-      if 'success' in response:
-        return True
+      data = self._root.post('admin/collections', params=params, contenttype='application/json')
+      if data['responseHeader']['status'] == 0:
+        response['status'] = 0
       else:
-        LOG.error("Could not remove collection. Check response:\n%s" % json.dumps(response, indent=2))
-        return False
+        response['message'] = "Could not remove collection: %s" % data
     except RestException, e:
       raise PopupException(e, title=_('Error while accessing Solr'))
+    return response
+
 
   def remove_core(self, name):
     try:
@@ -620,12 +622,6 @@ class SolrApi(object):
     except RestException, e:
       raise PopupException(e, title=_('Error while accessing Solr'))
 
-  def add_fields(self, collection, fields):
-    try:
-      params = self._get_params()
-      return self._root.post('%s/schema/fields' % collection, params=params, data=json.dumps(fields), contenttype='application/json')
-    except RestException, e:
-      raise PopupException(e, title=_('Error while accessing Solr'))
 
   def cores(self):
     try:
@@ -646,6 +642,18 @@ class SolrApi(object):
     except RestException, e:
       raise PopupException(e, title=_('Error while accessing Solr'))
 
+
+  def get_schema(self, collection):
+    try:
+      params = self._get_params() + (
+          ('wt', 'json'),
+      )
+      response = self._root.get('%(core)s/schema' % {'core': collection}, params=params)
+      return self._get_json(response)['schema']
+    except RestException, e:
+      raise PopupException(e, title=_('Error while accessing Solr'))
+
+  # Deprecated
   def schema(self, core):
     try:
       params = self._get_params() + (
@@ -684,8 +692,17 @@ class SolrApi(object):
       params = self._get_params() + (
           ('wt', 'json'),
       )
-      response = self._root.get('%(core)s/schema/fields' % {'core': core}, params=params)
-      return self._get_json(response)
+      response = self._root.get('%(core)s/schema' % {'core': core}, params=params)
+      response_json = self._get_json(response)
+      fields = response_json['schema']['fields']
+      if response_json['schema'].get('uniqueKey'):
+        for field in fields:
+          if field['name'] == response_json['schema']['uniqueKey']:
+            field['primary_key'] = 'true'
+      return {
+        'fields': fields,
+        'responseHeader': response_json['responseHeader']
+      }
     except RestException, e:
       raise PopupException(e, title=_('Error while accessing Solr'))
 
@@ -727,6 +744,19 @@ class SolrApi(object):
     except RestException, e:
       raise PopupException(e, title=_('Error while accessing Solr'))
 
+
+  def info_system(self):
+    try:
+      params = self._get_params() + (
+        ('wt', 'json'),
+      )
+
+      response = self._root.get('admin/info/system', params=params)
+      return self._get_json(response)
+    except RestException, e:
+      raise PopupException(e, title=_('Error while accessing Solr'))
+
+
   def sql(self, collection, statement):
     try:
       if 'limit' not in statement.lower(): # rows is not supported
@@ -746,15 +776,269 @@ class SolrApi(object):
       raise PopupException(e, title=_('Error while accessing Solr'))
 
   def get(self, core, doc_id):
+    collection_name = core['name']
     try:
       params = self._get_params() + (
           ('id', doc_id),
           ('wt', 'json'),
       )
-      response = self._root.get('%(core)s/get' % {'core': core}, params=params)
+      response = self._root.get('%(core)s/get' % {'core': collection_name}, params=params)
       return self._get_json(response)
     except RestException, e:
       raise PopupException(e, title=_('Error while accessing Solr'))
+
+
+  def export(self, name, query, fl, sort, rows=100):
+    try:
+      params = self._get_params() + (
+          ('q', query),
+          ('fl', fl),
+          ('sort', sort),
+          ('rows', rows),
+          ('wt', 'json'),
+      )
+      response = self._root.get('%(name)s/export' % {'name': name}, params=params)
+      return self._get_json(response)
+    except RestException, e:
+      raise PopupException(e, title=_('Error while accessing Solr'))
+
+
+  def update(self, collection_or_core_name, data, content_type='csv', version=None, **kwargs):
+    if content_type == 'csv':
+      content_type = 'application/csv'
+    elif content_type == 'json':
+      content_type = 'application/json'
+    else:
+      LOG.error("Trying to update collection  %s with content type %s. Allowed content types: csv/json" % (collection_or_core_name, content_type))
+
+    params = self._get_params() + (
+        ('wt', 'json'),
+        ('overwrite', 'true'),
+        ('commit', 'true'),
+    )
+    if version is not None:
+      params += (
+        ('_version_', version),
+        ('versions', 'true')
+      )
+    if kwargs:
+      params += tuple(((key, val) for key, val in kwargs.iteritems()))
+
+    response = self._root.post('%s/update' % collection_or_core_name, contenttype=content_type, params=params, data=data)
+    return self._get_json(response)
+
+
+  # Deprecated
+  def aliases(self):
+    try:
+      params = self._get_params() + ( # Waiting for SOLR-4968
+          ('detail', 'true'),
+          ('path', '/aliases.json'),
+      )
+      response = self._root.get('zookeeper', params=params)
+      return json.loads(response['znode'].get('data', '{}')).get('collection', {})
+    except RestException, e:
+      raise PopupException(e, title=_('Error while accessing Solr'))
+
+
+  # Deprecated
+  def create_collection(self, name, shards=1, replication=1):
+    try:
+      params = self._get_params() + (
+        ('action', 'CREATE'),
+        ('name', name),
+        ('numShards', shards),
+        ('replicationFactor', replication),
+        ('collection.configName', name),
+        ('wt', 'json')
+      )
+
+      response = self._root.post('admin/collections', params=params, contenttype='application/json')
+      if 'success' in response:
+        return True
+      else:
+        LOG.error("Could not create collection. Check response:\n%s" % json.dumps(response, indent=2))
+        return False
+    except RestException, e:
+      raise PopupException(e, title=_('Error while accessing Solr'))
+
+
+  # Deprecated
+  def remove_collection(self, name):
+    try:
+      params = self._get_params() + (
+        ('action', 'DELETE'),
+        ('name', name),
+        ('wt', 'json')
+      )
+
+      response = self._root.post('admin/collections', params=params, contenttype='application/json')
+      if 'success' in response:
+        return True
+      else:
+        LOG.error("Could not remove collection. Check response:\n%s" % json.dumps(response, indent=2))
+        return False
+    except RestException, e:
+      raise PopupException(e, title=_('Error while accessing Solr'))
+
+
+  def _get_params(self):
+    if self.security_enabled:
+      return (('doAs', self._user ),)
+    return (('user.name', SERVER_USER.get()), ('doAs', self._user),)
+
+  def _get_q(self, query):
+    q_template = '(%s)' if len(query['qs']) >= 2 else '%s'
+    return 'OR'.join([q_template % (q['q'] or EMPTY_QUERY.get()) for q in query['qs']]).encode('utf-8')
+
+  @classmethod
+  def _get_aggregate_function(cls, facet):
+    f = facet['aggregate']
+
+    if f['function'] == 'formula':
+      return f['formula']
+    elif f['function'] == 'field':
+      return f['value']
+    else:
+      fields = [facet['field']]
+      if f['function'] == 'median':
+        f['function'] = 'percentile'
+        fields.append('50')
+      elif f['function'] == 'percentile':
+        fields.append(str(f['percentile']))
+        f['function'] = 'percentile'
+      return '%s(%s)' % (f['function'], ','.join(fields))
+
+  def _get_range_borders(self, collection, query):
+    props = {}
+
+    time_field = collection['timeFilter'].get('field')
+
+    if time_field and (collection['timeFilter']['value'] != 'all' or collection['timeFilter']['type'] == 'fixed'):
+      # fqs overrides main time filter
+      fq_time_ids = [fq['id'] for fq in query['fqs'] if fq['field'] == time_field]
+      props['time_filter_overrides'] = fq_time_ids
+      props['time_field'] = time_field
+
+      if collection['timeFilter']['type'] == 'rolling':
+        props['field'] = collection['timeFilter']['field']
+        props['from'] = 'NOW-%s' % collection['timeFilter']['value']
+        props['to'] = 'NOW'
+        props['gap'] = GAPS.get(collection['timeFilter']['value'])
+      elif collection['timeFilter']['type'] == 'fixed':
+        props['field'] = collection['timeFilter']['field']
+        props['from'] = collection['timeFilter'].get('from', 'NOW-7DAYS')
+        props['to'] = collection['timeFilter'].get('to', 'NOW')
+        props['fixed'] = True
+
+    return props
+
+  def _get_time_filter_query(self, timeFilter, facet):
+    if 'fixed' in timeFilter:
+      props = {}
+      stat_facet = {'min': timeFilter['from'], 'max': timeFilter['to']}
+      _compute_range_facet(facet['widgetType'], stat_facet, props, stat_facet['min'], stat_facet['max'])
+      gap = props['gap']
+      unit = re.split('\d+', gap)[1]
+      return {
+        'start': '%(from)s/%(unit)s' % {'from': timeFilter['from'], 'unit': unit},
+        'end': '%(to)s/%(unit)s' % {'to': timeFilter['to'], 'unit': unit},
+        'gap': '%(gap)s' % props, # add a 'auto'
+      }
+    else:
+      gap = timeFilter['gap'][facet['widgetType']]
+      return {
+        'start': '%(from)s/%(unit)s' % {'from': timeFilter['from'], 'unit': gap['unit']},
+        'end': '%(to)s/%(unit)s' % {'to': timeFilter['to'], 'unit': gap['unit']},
+        'gap': '%(coeff)s%(unit)s/%(unit)s' % gap, # add a 'auto'
+      }
+
+  def _get_fq(self, collection, query):
+    params = ()
+    timeFilter = {}
+
+    if collection:
+      timeFilter = self._get_range_borders(collection, query)
+    if timeFilter and not timeFilter.get('time_filter_overrides'):
+      params += (('fq', urllib.unquote(utf_quoter('%(field)s:[%(from)s TO %(to)s]' % timeFilter))),)
+
+    # Merge facets queries on same fields
+    grouped_fqs = groupby(query['fqs'], lambda x: (x['type'], x['field']))
+    merged_fqs = []
+    for key, group in grouped_fqs:
+      field_fq = next(group)
+      for fq in group:
+        for f in fq['filter']:
+          field_fq['filter'].append(f)
+      merged_fqs.append(field_fq)
+
+    for fq in merged_fqs:
+      if fq['type'] == 'field':
+        fields = fq['field'] if type(fq['field']) == list else [fq['field']] # 2D facets support
+        for field in fields:
+          f = []
+          for _filter in fq['filter']:
+            values = _filter['value'] if type(_filter['value']) == list else [_filter['value']] # 2D facets support
+            if fields.index(field) < len(values): # Lowest common field denominator
+              value = values[fields.index(field)]
+              if value or value is False:
+                exclude = '-' if _filter['exclude'] else ''
+                if value is not None and ' ' in force_unicode(value):
+                  value = force_unicode(value).replace('"', '\\"')
+                  f.append('%s%s:"%s"' % (exclude, field, value))
+                else:
+                  f.append('%s{!field f=%s}%s' % (exclude, field, value))
+              else: # Handle empty value selection that are returned using solr facet.missing
+                value = "*"
+                exclude = '-'
+                f.append('%s%s:%s' % (exclude, field, value))
+          _params ='{!tag=%(id)s}' % fq + ' '.join(f)
+          params += (('fq', urllib.unquote(utf_quoter(_params))),)
+      elif fq['type'] == 'range':
+        params += (('fq', '{!tag=%(id)s}' % fq + ' '.join([urllib.unquote(
+                    utf_quoter('%s%s:[%s TO %s}' % ('-' if field['exclude'] else '', fq['field'], f['from'], f['to']))) for field, f in zip(fq['filter'], fq['properties'])])),)
+      elif fq['type'] == 'range-up':
+        params += (('fq', '{!tag=%(id)s}' % fq + ' '.join([urllib.unquote(
+                    utf_quoter('%s%s:[%s TO %s}' % ('-' if field['exclude'] else '', fq['field'], f['from'] if fq['is_up'] else '*', '*' if fq['is_up'] else f['from'])))
+                                                          for field, f in zip(fq['filter'], fq['properties'])])),)
+      elif fq['type'] == 'map':
+        _keys = fq.copy()
+        _keys.update(fq['properties'])
+        params += (('fq', '{!tag=%(id)s}' % fq + urllib.unquote(
+                    utf_quoter('%(lat)s:[%(lat_sw)s TO %(lat_ne)s} AND %(lon)s:[%(lon_sw)s TO %(lon_ne)s}' % _keys))),)
+
+    nested_fields = self._get_nested_fields(collection)
+    if nested_fields:
+      params += (('fq', urllib.unquote(utf_quoter(' OR '.join(nested_fields)))),)
+
+    return params
+
+
+  def _get_dimension_aggregates(self, facets):
+    aggregates = []
+    for agg in facets:
+      if agg['aggregate']['function'] != 'count':
+        aggregates.append(agg)
+      else:
+        return aggregates
+    return aggregates
+
+
+  def _get_nested_fields(self, collection):
+    if collection and collection.get('nested') and collection['nested']['enabled']:
+      return [field['filter'] for field in self._flatten_schema(collection['nested']['schema']) if field['selected']]
+    else:
+      return []
+
+
+  def _flatten_schema(self, level):
+    fields = []
+    for field in level:
+      fields.append(field)
+      if field['values']:
+        fields.extend(self._flatten_schema(field['values']))
+    return fields
+
 
   @classmethod
   def _get_json(cls, response):
@@ -768,6 +1052,7 @@ class SolrApi(object):
         response = json.loads(response.replace('\x00', ''))
     return response
 
+
   def uniquekey(self, collection):
     try:
       params = self._get_params() + (
@@ -778,22 +1063,90 @@ class SolrApi(object):
     except RestException, e:
       raise PopupException(e, title=_('Error while accessing Solr'))
 
-  def update(self, collection_or_core_name, data, content_type='csv', version=None):
-    if content_type == 'csv':
-      content_type = 'application/csv'
-    elif content_type == 'json':
-      content_type = 'application/json'
-    else:
-      LOG.error("Trying to update collection  %s with content type %s. Allowed content types: csv/json" % (collection_or_core_name, content_type))
 
-    params = self._get_params() + (
-        ('wt', 'json'),
-        ('overwrite', 'true'),
-    )
-    if version is not None:
-      params += (
-        ('_version_', version),
-        ('versions', 'true')
-      )
-    response = self._root.post('%s/update' % collection_or_core_name, contenttype=content_type, params=params, data=data)
-    return self._get_json(response)
+GAPS = {
+    '5MINUTES': {
+        'histogram-widget': {'coeff': '+3', 'unit': 'SECONDS'}, # ~100 slots
+        'timeline-widget': {'coeff': '+3', 'unit': 'SECONDS'}, # ~100 slots
+        'bucket-widget': {'coeff': '+3', 'unit': 'SECONDS'}, # ~100 slots
+        'bar-widget': {'coeff': '+3', 'unit': 'SECONDS'}, # ~100 slots
+        'facet-widget': {'coeff': '+1', 'unit': 'MINUTES'}, # ~10 slots
+    },
+    '30MINUTES': {
+        'histogram-widget': {'coeff': '+20', 'unit': 'SECONDS'},
+        'timeline-widget': {'coeff': '+20', 'unit': 'SECONDS'},
+        'bucket-widget': {'coeff': '+20', 'unit': 'SECONDS'},
+        'bar-widget': {'coeff': '+20', 'unit': 'SECONDS'},
+        'facet-widget': {'coeff': '+5', 'unit': 'MINUTES'},
+    },
+    '1HOURS': {
+        'histogram-widget': {'coeff': '+30', 'unit': 'SECONDS'},
+        'timeline-widget': {'coeff': '+30', 'unit': 'SECONDS'},
+        'bucket-widget': {'coeff': '+30', 'unit': 'SECONDS'},
+        'bar-widget': {'coeff': '+30', 'unit': 'SECONDS'},
+        'facet-widget': {'coeff': '+10', 'unit': 'MINUTES'},
+    },
+    '12HOURS': {
+        'histogram-widget': {'coeff': '+7', 'unit': 'MINUTES'},
+        'timeline-widget': {'coeff': '+7', 'unit': 'MINUTES'},
+        'bucket-widget': {'coeff': '+7', 'unit': 'MINUTES'},
+        'bar-widget': {'coeff': '+7', 'unit': 'MINUTES'},
+        'facet-widget': {'coeff': '+1', 'unit': 'HOURS'},
+    },
+    '1DAYS': {
+        'histogram-widget': {'coeff': '+15', 'unit': 'MINUTES'},
+        'timeline-widget': {'coeff': '+15', 'unit': 'MINUTES'},
+        'bucket-widget': {'coeff': '+15', 'unit': 'MINUTES'},
+        'bar-widget': {'coeff': '+15', 'unit': 'MINUTES'},
+        'facet-widget': {'coeff': '+3', 'unit': 'HOURS'},
+    },
+    '2DAYS': {
+        'histogram-widget': {'coeff': '+30', 'unit': 'MINUTES'},
+        'timeline-widget': {'coeff': '+30', 'unit': 'MINUTES'},
+        'bucket-widget': {'coeff': '+30', 'unit': 'MINUTES'},
+        'bar-widget': {'coeff': '+30', 'unit': 'MINUTES'},
+        'facet-widget': {'coeff': '+6', 'unit': 'HOURS'},
+    },
+    '7DAYS': {
+        'histogram-widget': {'coeff': '+3', 'unit': 'HOURS'},
+        'timeline-widget': {'coeff': '+3', 'unit': 'HOURS'},
+        'bucket-widget': {'coeff': '+3', 'unit': 'HOURS'},
+        'bar-widget': {'coeff': '+3', 'unit': 'HOURS'},
+        'facet-widget': {'coeff': '+1', 'unit': 'DAYS'},
+    },
+    '1MONTHS': {
+        'histogram-widget': {'coeff': '+12', 'unit': 'HOURS'},
+        'timeline-widget': {'coeff': '+12', 'unit': 'HOURS'},
+        'bucket-widget': {'coeff': '+12', 'unit': 'HOURS'},
+        'bar-widget': {'coeff': '+12', 'unit': 'HOURS'},
+        'facet-widget': {'coeff': '+5', 'unit': 'DAYS'},
+    },
+    '3MONTHS': {
+        'histogram-widget': {'coeff': '+1', 'unit': 'DAYS'},
+        'timeline-widget': {'coeff': '+1', 'unit': 'DAYS'},
+        'bucket-widget': {'coeff': '+1', 'unit': 'DAYS'},
+        'bar-widget': {'coeff': '+1', 'unit': 'DAYS'},
+        'facet-widget': {'coeff': '+30', 'unit': 'DAYS'},
+    },
+    '1YEARS': {
+        'histogram-widget': {'coeff': '+3', 'unit': 'DAYS'},
+        'timeline-widget': {'coeff': '+3', 'unit': 'DAYS'},
+        'bucket-widget': {'coeff': '+3', 'unit': 'DAYS'},
+        'bar-widget': {'coeff': '+3', 'unit': 'DAYS'},
+        'facet-widget': {'coeff': '+12', 'unit': 'MONTHS'},
+    },
+    '2YEARS': {
+        'histogram-widget': {'coeff': '+7', 'unit': 'DAYS'},
+        'timeline-widget': {'coeff': '+7', 'unit': 'DAYS'},
+        'bucket-widget': {'coeff': '+7', 'unit': 'DAYS'},
+        'bar-widget': {'coeff': '+7', 'unit': 'DAYS'},
+        'facet-widget': {'coeff': '+3', 'unit': 'MONTHS'},
+    },
+    '10YEARS': {
+        'histogram-widget': {'coeff': '+1', 'unit': 'MONTHS'},
+        'timeline-widget': {'coeff': '+1', 'unit': 'MONTHS'},
+        'bucket-widget': {'coeff': '+1', 'unit': 'MONTHS'},
+        'bar-widget': {'coeff': '+1', 'unit': 'MONTHS'},
+        'facet-widget': {'coeff': '+1', 'unit': 'YEARS'},
+    }
+}

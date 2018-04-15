@@ -18,21 +18,22 @@
 
 import json
 import logging
+import numbers
 import os
 import shutil
 
 from django.utils.translation import ugettext as _
+import tablib
 
 from desktop.lib.exceptions_renderable import PopupException
+from dashboard.models import Collection2
 from libsolr.api import SolrApi
-from libsolr.conf import SOLR_ZK_PATH
-from libzookeeper.conf import ENSEMBLE
 from libzookeeper.models import ZookeeperClient
 from search.conf import SOLR_URL, SECURITY_ENABLED
-from search.models import Collection2
 
 from indexer.conf import CORE_INSTANCE_DIR
 from indexer.utils import copy_configs, field_values_from_log, field_values_from_separated_file
+from indexer.solr_client import SolrClient
 
 
 LOG = logging.getLogger(__name__)
@@ -40,10 +41,6 @@ MAX_UPLOAD_SIZE = 100 * 1024 * 1024 # 100 MB
 ALLOWED_FIELD_ATTRIBUTES = set(['name', 'type', 'indexed', 'stored'])
 FLAGS = [('I', 'indexed'), ('T', 'tokenized'), ('S', 'stored')]
 ZK_SOLR_CONFIG_NAMESPACE = 'configs'
-
-
-def get_solr_ensemble():
-  return '%s%s' % (ENSEMBLE.get(), SOLR_ZK_PATH.get())
 
 
 class CollectionManagerController(object):
@@ -61,15 +58,8 @@ class CollectionManagerController(object):
     return fields
 
   def is_solr_cloud_mode(self):
-    api = SolrApi(SOLR_URL.get(), self.user, SECURITY_ENABLED.get())
-    if not hasattr(self, '_solr_cloud_mode'):
-      try:
-        api.collections()
-        setattr(self, '_solr_cloud_mode', True)
-      except Exception, e:
-        LOG.info('Non SolrCloud server: %s' % e)
-        setattr(self, '_solr_cloud_mode', False)
-    return getattr(self, '_solr_cloud_mode')
+    client = SolrClient(self.user)
+    return client.is_solr_cloud_mode()
 
   def collection_exists(self, collection):
     return collection in self.get_collections()
@@ -86,16 +76,14 @@ class CollectionManagerController(object):
         solr_collections = api.collections()
         for name in solr_collections:
           solr_collections[name]['isCoreOnly'] = False
-      else:
-        solr_collections = {}
 
-      solr_aliases = api.aliases()
-      for name in solr_aliases:
-        solr_aliases[name] = {
-            'isCoreOnly': False,
-            'isAlias': True,
-            'collections': solr_aliases[name]
-        }
+        solr_aliases = api.aliases()
+        for name in solr_aliases:
+          solr_aliases[name] = {
+              'isCoreOnly': False,
+              'isAlias': True,
+              'collections': solr_aliases[name]
+          }
 
       solr_cores = api.cores()
       for name in solr_cores:
@@ -153,10 +141,19 @@ class CollectionManagerController(object):
       self._create_non_solr_cloud_collection(name, fields, unique_key_field, df)
 
   def _create_solr_cloud_collection(self, name, fields, unique_key_field, df):
-    with ZookeeperClient(hosts=get_solr_ensemble(), read_only=False) as zc:
+    client = SolrClient(self.user)
+
+    with ZookeeperClient(hosts=client.get_zookeeper_host(), read_only=False) as zc:
       root_node = '%s/%s' % (ZK_SOLR_CONFIG_NAMESPACE, name)
 
-      tmp_path, solr_config_path = copy_configs(fields, unique_key_field, df, True)
+      tmp_path, solr_config_path = copy_configs(
+          fields=fields,
+          unique_key_field=unique_key_field,
+          df=df,
+          solr_cloud_mode=client.is_solr_cloud_mode(),
+          is_solr_six_or_more=client.is_solr_six_or_more(),
+          is_solr_hdfs_mode=client.is_solr_with_hdfs()
+      )
       try:
         config_root_path = '%s/%s' % (solr_config_path, 'conf')
         try:
@@ -164,7 +161,7 @@ class CollectionManagerController(object):
 
         except Exception, e:
           zc.delete_path(root_node)
-          raise PopupException(_('Error in copying Solr configurations.'), detail=e)
+          raise PopupException(_('Error in copying Solr configurations: %s') % e)
       finally:
         # Don't want directories laying around
         shutil.rmtree(tmp_path)
@@ -203,6 +200,8 @@ class CollectionManagerController(object):
     Delete solr collection/core and instance dir
     """
     api = SolrApi(SOLR_URL.get(), self.user, SECURITY_ENABLED.get())
+    client = SolrClient(self.user)
+
     if core:
       raise PopupException(_('Cannot remove Solr cores.'))
 
@@ -210,7 +209,7 @@ class CollectionManagerController(object):
       # Delete instance directory.
       try:
         root_node = '%s/%s' % (ZK_SOLR_CONFIG_NAMESPACE, name)
-        with ZookeeperClient(hosts=get_solr_ensemble(), read_only=False) as zc:
+        with ZookeeperClient(hosts=client.get_zookeeper_host(), read_only=False) as zc:
           zc.delete_path(root_node)
       except Exception, e:
         # Re-create collection so that we don't have an orphan config
@@ -263,42 +262,39 @@ class CollectionManagerController(object):
         else:
           raise PopupException(_('Could not update index. Unknown type %s') % data_type)
         fh.close()
+
       if not api.update(collection_or_core_name, data, content_type=content_type):
         raise PopupException(_('Could not update index. Check error logs for more info.'))
     else:
       raise PopupException(_('Could not update index. Indexing strategy %s not supported.') % indexing_strategy)
 
-  def update_data_from_hive(self, db, collection_or_core_name, database, table, columns, indexing_strategy='upload'):
-    """
-    Add hdfs path contents to index
-    """
-    # Run a custom hive query and post data to collection
-    from beeswax.server import dbms
-    import tablib
+  def update_data_from_hive(self, collection_or_core_name, columns, fetch_handle, indexing_options=None):
+    MAX_ROWS = 10000
+    FETCH_BATCH = 1000
 
-    api = SolrApi(SOLR_URL.get(), self.user, SECURITY_ENABLED.get())
-    if indexing_strategy == 'upload':
-      table = db.get_table(database, table)
-      hql = "SELECT %s FROM `%s.%s` %s" % (','.join(columns), database, table.name, db._get_browse_limit_clause(table))
-      query = dbms.hql_query(hql)
+    row_count = 0
+    has_more = True
+    if indexing_options is None:
+      indexing_options = {}
 
-      try:
-        handle = db.execute_and_wait(query)
+    client = SolrClient(self.user)
 
-        if handle:
-          result = db.fetch(handle, rows=100)
-          db.close(handle)
+    try:
+      while row_count < MAX_ROWS and has_more:
+        result = fetch_handle(FETCH_BATCH, row_count == 0)
+        has_more = result['has_more']
 
+        if result['data']:
           dataset = tablib.Dataset()
           dataset.append(columns)
-          for row in result.rows():
-            dataset.append(row)
+          for i, row in enumerate(result['data']):
+            dataset.append([cell if cell else (0 if isinstance(cell, numbers.Number) else '') for cell in row])
 
-          if not api.update(collection_or_core_name, dataset.csv, content_type='csv'):
-            raise PopupException(_('Could not update index. Check error logs for more info.'))
-        else:
-          raise PopupException(_('Could not update index. Could not fetch any data from Hive.'))
-      except Exception, e:
-        raise PopupException(_('Could not update index.'), detail=e)
-    else:
-      raise PopupException(_('Could not update index. Indexing strategy %s not supported.') % indexing_strategy)
+          if not client.index(name=collection_or_core_name, data=dataset.csv, **indexing_options):
+            raise PopupException(_('Could not index the data. Check error logs for more info.'))
+
+        row_count += len(dataset)
+    except Exception, e:
+      raise PopupException(_('Could not update index: %s') % e)
+
+    return row_count

@@ -557,6 +557,7 @@ qq.FileUploader = function(o){
     this._button = this._createUploadButton(this._find(this._element, 'button'));
 
     this._bindCancelEvent();
+    this._bindCancelAllEvent();
     this._setupDragDrop();
 };
 
@@ -696,6 +697,15 @@ qq.extend(qq.FileUploader.prototype, {
                 qq.remove(item);
             }
         });
+    },
+    _bindCancelAllEvent: function() {
+      var self = this,
+        list = this._listElement;
+      $('#uploadFileModal').on('hidden', function () {
+        for (var i = 0, l = list && list.childNodes.length; i < l; i++) {
+          self._handler.cancel(list.childNodes[i].qqFileId);
+        }
+      });
     }
 });
 
@@ -1017,7 +1027,9 @@ qq.extend(qq.UploadHandlerForm.prototype, {
         return this._inputs[id].value.replace(/.*(\/|\\)/, "");
     },
     _cancel: function(id){
-        this._options.onCancel(id, this.getName(id));
+        if (this._inputs[id]) {
+          this._options.onCancel(id, this.getName(id));
+        }
 
         delete this._inputs[id];
 
@@ -1054,7 +1066,7 @@ qq.extend(qq.UploadHandlerForm.prototype, {
         var csrfmiddlewaretoken = document.createElement('input');
         csrfmiddlewaretoken.type = 'hidden';
         csrfmiddlewaretoken.name = 'csrfmiddlewaretoken';
-        csrfmiddlewaretoken.value = $.cookie('csrftoken');
+        csrfmiddlewaretoken.value = "${request and request.COOKIES.get('csrftoken', '')}";
         form.appendChild(csrfmiddlewaretoken);
 
         var self = this;
@@ -1206,11 +1218,11 @@ qq.extend(qq.UploadHandlerXhr.prototype, {
     getName: function(id){
         var file = this._files[id];
         // fix missing name in Safari 4
-        return file.fileName != null ? file.fileName : file.name;
+        return file && (file.fileName || file.name);
     },
     getSize: function(id){
         var file = this._files[id];
-        return file.fileSize != null ? file.fileSize : file.size;
+        return file && (file.fileSize || file.size);
     },
     /**
      * Returns uploaded bytes for file identified by id
@@ -1285,7 +1297,9 @@ qq.extend(qq.UploadHandlerXhr.prototype, {
         this._dequeue(id);
     },
     _cancel: function(id){
-        this._options.onCancel(id, this.getName(id));
+        if (this._files[id]) {
+          this._options.onCancel(id, this.getName(id));
+        }
 
         this._files[id] = null;
 

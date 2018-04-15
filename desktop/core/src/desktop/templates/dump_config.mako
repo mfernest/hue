@@ -15,14 +15,19 @@
 ## limitations under the License.
 
 <%!
+import logging
+
 from desktop.lib.conf import BoundContainer, is_anonymous
 from desktop.views import commonheader, commonfooter
 from django.utils.translation import ugettext as _
+
+LOG = logging.getLogger(__name__)
 %>
 
 <%namespace name="layout" file="about_layout.mako" />
-
-${ commonheader(_('Configuration'), "about", user, "70px") | n,unicode }
+%if not is_embeddable:
+${ commonheader(_('Configuration'), "about", user, request, "70px") | n,unicode }
+%endif
 ${ layout.menubar(section='dump_config') }
 
 <style type="text/css">
@@ -37,7 +42,7 @@ ${ layout.menubar(section='dump_config') }
     <div class="card card-home">
       <h2 class="card-heading simple">
         <div class="pull-right muted">
-          ${_('Configuration files located in')} <code style="color: #338BB8">${conf_dir}</code>
+          ${_('Configuration files located in')} <code style="color: #0B7FAD">${conf_dir}</code>
         </div>
         ${_('Configuration Sections and Variables')}
       </h2>
@@ -96,7 +101,7 @@ ${ layout.menubar(section='dump_config') }
   </%def>
 
     <%def name="recurseList(config_obj, depth=0)">
-      <table class="table table-striped recurse">
+      <table class="table table-condensed recurse">
       % for v in config_obj:
         <%
           # Don't recurse into private variables.
@@ -136,7 +141,14 @@ ${ layout.menubar(section='dump_config') }
             % else:
               ${ str(config_obj.get_raw()).decode('utf-8', 'replace') }
             % endif
-              %if str(config_obj.get_raw()).decode('utf-8', 'replace') == '':
+              <%
+                config_str = None
+                try:
+                  config_str = str(config_obj.get_raw()).decode('utf-8', 'replace')
+                except:
+                  LOG.exception("Potential misconfiguration. Error value of key '%s' in configuration." % config_obj.grab_key)
+              %>
+              %if config_str == '':
               &nbsp;
               %endif
             </code><br/>
@@ -151,4 +163,6 @@ ${ layout.menubar(section='dump_config') }
 
 </div>
 
+%if not is_embeddable:
 ${ commonfooter(request, messages) | n,unicode }
+%endif

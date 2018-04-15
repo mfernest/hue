@@ -14,17 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-(function (root, factory) {
-  if(typeof define === "function" && define.amd) {
-    define([
-      'desktop/js/sqlAutocompleter',
-      'desktop/js/sqlAutocompleter2',
-      'desktop/js/hdfsAutocompleter'
-    ], factory);
-  } else {
-    root.Autocompleter = factory(SqlAutocompleter, SqlAutocompleter2, HdfsAutocompleter);
-  }
-}(this, function (SqlAutocompleter, SqlAutocompleter2, HdfsAutocompleter) {
+var Autocompleter = (function () {
 
   /**
    * @param {Object} options {object}
@@ -32,7 +22,6 @@
    * @param options.user
    * @param options.optEnabled
    * @param {Number} options.timeout
-   * @param options.useNewSqlAutocompleter {boolean}
    * @constructor
    */
   function Autocompleter(options) {
@@ -43,28 +32,17 @@
     self.topTables = {};
 
     var initializeAutocompleter = function () {
-      if (self.snippet.isSqlDialect() && options.useNewAutocompleter) {
+      if (self.snippet.isSqlDialect()) {
         self.autocompleter = new SqlAutocompleter2({
           snippet: self.snippet,
           timeout: self.timeout
         });
       } else {
-        var hdfsAutocompleter = new HdfsAutocompleter({
+        self.autocompleter = new HdfsAutocompleter({
           user: options.user,
           snippet: options.snippet,
           timeout: options.timeout
         });
-        if (self.snippet.isSqlDialect()) {
-          self.autocompleter = new SqlAutocompleter({
-            hdfsAutocompleter: hdfsAutocompleter,
-            snippet: options.snippet,
-            oldEditor: options.oldEditor,
-            optEnabled: options.optEnabled,
-            timeout: self.timeout
-          })
-        } else {
-          self.autocompleter = hdfsAutocompleter;
-        }
       }
     };
     self.snippet.type.subscribe(function () {
@@ -88,9 +66,13 @@
     var before = editor.getTextBeforeCursor();
     var after = editor.getTextAfterCursor(";");
 
-    self.autocomplete(before, after, function(result) {
-      callback(null, result);
-    }, editor);
+    try {
+      self.autocomplete(before, after, function(result) {
+        callback(null, result);
+      }, editor);
+    } catch (err) {
+      editor.hideSpinner();
+    }
   };
 
   Autocompleter.prototype.getDocTooltip = function (item) {
@@ -107,4 +89,4 @@
   };
 
   return Autocompleter;
-}));
+})();

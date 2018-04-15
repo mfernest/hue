@@ -23,7 +23,7 @@ from django.contrib.auth.models import User, Group
 from django.forms import FileField, CharField, BooleanField, Textarea
 from django.forms.formsets import formset_factory, BaseFormSet
 
-from aws.s3 import S3_ROOT, normpath as s3_normpath
+from aws.s3 import S3A_ROOT, normpath as s3_normpath
 from desktop.lib import i18n
 from hadoop.fs import normpath
 from filebrowser.lib import rwx
@@ -62,7 +62,7 @@ class PathField(CharField):
 
   def clean(self, value):
     cleaned_path = CharField.clean(self, value)
-    if value.lower().startswith(S3_ROOT):
+    if value.lower().startswith(S3A_ROOT):
       cleaned_path = s3_normpath(cleaned_path)
     else:
       cleaned_path = normpath(cleaned_path)
@@ -106,11 +106,17 @@ class BaseCopyFormSet(FormSet):
 
 CopyFormSet = formset_factory(CopyForm, formset=BaseCopyFormSet, extra=0)
 
+class SetReplicationFactorForm(forms.Form):
+  op = "setreplication"
+  src_path = CharField(label=_("File to set replication factor"), help_text=_("The file to set replication factor."))
+  replication_factor = CharField(label=_("Value of replication factor"), help_text=_("The value of replication factor."))
+
 class UploadFileForm(forms.Form):
   op = "upload"
   # The "hdfs" prefix in "hdfs_file" triggers the HDFSfileUploadHandler
   hdfs_file = FileField(forms.Form, label=_("File to Upload"))
   dest = PathField(label=_("Destination Path"), help_text=_("Filename or directory to upload to."))
+  extract_archive = BooleanField(required=False)
 
 class UploadArchiveForm(forms.Form):
   op = "upload"

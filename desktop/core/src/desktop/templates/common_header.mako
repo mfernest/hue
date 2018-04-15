@@ -13,38 +13,42 @@
 ## WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 ## See the License for the specific language governing permissions and
 ## limitations under the License.
-
 <%!
-from aws.conf import is_enabled as is_s3_enabled
-from desktop import conf
-from desktop.lib.i18n import smart_unicode
 from django.utils.translation import ugettext as _
 
-home_url = url('desktop.views.home')
+from desktop import conf
 from desktop.conf import USE_NEW_EDITOR
+from desktop.lib.i18n import smart_unicode
+
+from metadata.conf import has_optimizer, OPTIMIZER
+
+home_url = url('desktop.views.home')
 if USE_NEW_EDITOR.get():
   home_url = url('desktop.views.home2')
 %>
 
+<%namespace name="charting" file="/charting.mako" />
+<%namespace name="commonHeaderFooterComponents" file="/common_header_footer_components.mako" />
+<%namespace name="hueAceAutocompleter" file="/hue_ace_autocompleter.mako" />
+<%namespace name="hueIcons" file="/hue_icons.mako" />
+<%namespace name="koComponents" file="/ko_components.mako" />
+
+<!DOCTYPE html>
 <%def name="is_selected(selected)">
   %if selected:
     class="active"
   %endif
 </%def>
-
 <%def name="get_nice_name(app, section)">
   % if app and section == app.display_name:
     - ${app.nice_name}
   % endif
 </%def>
-
 <%def name="get_title(title)">
   % if title:
     - ${smart_unicode(title)}
   % endif
 </%def>
-
-<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
@@ -56,19 +60,23 @@ if USE_NEW_EDITOR.get():
   <meta name="author" content="">
 
   <link href="${ static('desktop/css/roboto.css') }" rel="stylesheet">
-  <link href="${ static('desktop/ext/css/bootplus.css') }" rel="stylesheet">
+  <link href="${ static('desktop/ext/css/cui/cui.css') }" rel="stylesheet">
+  <link href="${ static('desktop/ext/css/cui/bootstrap2.css') }" rel="stylesheet">
+  <link href="${ static('desktop/ext/css/cui/bootstrap-responsive2.css') }" rel="stylesheet">
+
   <link href="${ static('desktop/ext/css/font-awesome.min.css') }" rel="stylesheet">
   <link href="${ static('desktop/css/hue3.css') }" rel="stylesheet">
+  <link href="${ static('desktop/css/hue3-extra.css') }" rel="stylesheet">
 
   <style type="text/css">
-    % if conf.CUSTOM.BANNER_TOP_HTML.get():
+    % if banner_message or conf.CUSTOM.BANNER_TOP_HTML.get():
       body {
         display: none;
         visibility: hidden;
         padding-top: ${str(int(padding[:-2]) + 30) + 'px'};
       }
       .banner {
-        height: 40px;
+        height: 30px;
         width: 100%;
         padding: 0;
         position: fixed;
@@ -76,10 +84,13 @@ if USE_NEW_EDITOR.get():
         background-color: #F9F9F9;
         z-index: 1033;
       }
+      .main-content {
+        top: 106px!important;
+      }
       .navigator {
         top: 30px!important;
       }
-      .navbar-fixed-top {
+      .hue-title-bar {
         top: 58px!important;
       }
       % if current_app == "sqoop":
@@ -106,84 +117,25 @@ if USE_NEW_EDITOR.get():
     % endif
   </style>
 
-  <script type="text/javascript" charset="utf-8">
-
-    var LOGGED_USERNAME = '${ user.username }';
-
-    // jHue plugins global configuration
-    jHueFileChooserGlobals = {
-      labels: {
-        BACK: "${_('Back')}",
-        SELECT_FOLDER: "${_('Select this folder')}",
-        CREATE_FOLDER: "${_('Create folder')}",
-        FOLDER_NAME: "${_('Folder name')}",
-        CANCEL: "${_('Cancel')}",
-        FILE_NOT_FOUND: "${_('The file has not been found')}",
-        UPLOAD_FILE: "${_('Upload a file')}",
-        FAILED: "${_('Failed')}"
-      },
-      user: "${ user.username }"
-    };
-
-    jHueHdfsTreeGlobals = {
-      labels: {
-        CREATE_FOLDER: "${_('Create folder')}",
-        FOLDER_NAME: "${_('Folder name')}",
-        CANCEL: "${_('Cancel')}"
-      }
-    };
-
-    jHueTableExtenderGlobals = {
-      labels: {
-        GO_TO_COLUMN: "${_('Go to column:')}",
-        PLACEHOLDER: "${_('column name...')}",
-        LOCK: "${_('Click to lock this row')}",
-        UNLOCK: "${_('Click to unlock this row')}"
-      }
-    };
-
-    jHueTourGlobals = {
-      labels: {
-        AVAILABLE_TOURS: "${_('Available tours')}",
-        NO_AVAILABLE_TOURS: "${_('None for this page.')}",
-        MORE_INFO: "${_('Read more about it...')}",
-        TOOLTIP_TITLE: "${_('Demo tutorials')}"
-      }
-    };
-
-    LeafletGlobals = {
-      layer: '${ leaflet['layer'] |n,unicode }',
-      attribution: '${ leaflet['attribution'] |n,unicode }'
-    };
-
-  </script>
-
-  <!--[if lt IE 9]>
   <script type="text/javascript">
-    if (document.documentMode && document.documentMode < 9){
-      location.href = "${ url('desktop.views.unsupported') }";
-    }
+    var IS_HUE_4 = false;
   </script>
-  <![endif]-->
 
-  <script type="text/javascript">
-    // check if it's a Firefox < 7
-    var _UA = navigator.userAgent.toLowerCase();
-    for (var i = 1; i < 7; i++) {
-      if (_UA.indexOf("firefox/" + i + ".") > -1) {
-        location.href = "${ url('desktop.views.unsupported') }";
-      }
-    }
+  ${ commonHeaderFooterComponents.header_i18n_redirection() }
 
-    // check for IE document modes
-    if (document.documentMode && document.documentMode < 9){
-      location.href = "${ url('desktop.views.unsupported') }";
-    }
-  </script>
+  % if user.is_authenticated():
+  <script src="/desktop/globalJsConstants.js"></script>
+  % endif
+
+  % if not conf.DEV.get():
+  <script src="${ static('desktop/js/hue.errorcatcher.js') }"></script>
+  % endif
 
   <script src="${ static('desktop/js/hue.utils.js') }"></script>
-  <script src="${ static('desktop/ext/js/jquery/jquery-2.1.1.min.js') }"></script>
+  <script src="${ static('desktop/ext/js/jquery/jquery-2.2.4.min.js') }"></script>
   <script src="${ static('desktop/js/jquery.migration.js') }"></script>
+  <script src="${ static('desktop/js/jquery.hiveautocomplete.js') }"></script>
+  <script src="${ static('desktop/js/jquery.hdfsautocomplete.js') }"></script>
   <script src="${ static('desktop/js/jquery.filechooser.js') }"></script>
   <script src="${ static('desktop/js/jquery.selector.js') }"></script>
   <script src="${ static('desktop/js/jquery.delayedinput.js') }"></script>
@@ -193,216 +145,111 @@ if USE_NEW_EDITOR.get():
   <script src="${ static('desktop/js/jquery.horizontalscrollbar.js') }"></script>
   <script src="${ static('desktop/js/jquery.tablescroller.js') }"></script>
   <script src="${ static('desktop/js/jquery.tableextender.js') }"></script>
+  <script src="${ static('desktop/js/jquery.tableextender2.js') }"></script>
+  <script src="${ static('desktop/js/jquery.scrollleft.js') }"></script>
   <script src="${ static('desktop/js/jquery.scrollup.js') }"></script>
-  <script src="${ static('desktop/js/jquery.tour.js') }"></script>
   <script src="${ static('desktop/ext/js/jquery/plugins/jquery.cookie.js') }"></script>
   <script src="${ static('desktop/ext/js/jquery/plugins/jquery.total-storage.min.js') }"></script>
-  <script src="${ static('desktop/ext/js/jquery/plugins/jquery.placeholder.min.js') }"></script>
   <script src="${ static('desktop/ext/js/jquery/plugins/jquery.dataTables.1.8.2.min.js') }"></script>
-  <script src="${ static('desktop/js/jquery.nicescroll.js') }"></script>
+  <script src="${ static('desktop/ext/js/jquery/plugins/jquery.form.js') }"></script>
+  <script src="${ static('desktop/js/jquery.huedatatable.js') }"></script>
   <script src="${ static('desktop/js/jquery.datatables.sorting.js') }"></script>
+  <script src="${ static('desktop/ext/js/d3.v3.js') }"></script>
+  <script src="${ static('desktop/ext/js/d3.v4.js') }"></script>
   <script src="${ static('desktop/ext/js/bootstrap.min.js') }"></script>
+  <script src="${ static('desktop/js/bootstrap-tooltip.js') }"></script>
+  <script src="${ static('desktop/js/bootstrap-typeahead-touchscreen.js') }"></script>
   <script src="${ static('desktop/ext/js/bootstrap-better-typeahead.min.js') }"></script>
+  <script src="${ static('desktop/js/hue.colors.js') }"></script>
   <script src="${ static('desktop/ext/js/fileuploader.js') }"></script>
   <script src="${ static('desktop/ext/js/filesize.min.js') }"></script>
   <script src="${ static('desktop/js/popover-extra-placements.js') }"></script>
-  <script src="${ static('desktop/ext/js/moment-with-locales.min.js') }" type="text/javascript" charset="utf-8"></script>
+  <script src="${ static('desktop/ext/js/moment-with-locales.min.js') }"></script>
+  <script src="${ static('desktop/ext/js/moment-timezone-with-data.min.js') }" type="text/javascript" charset="utf-8"></script>
+  <script src="${ static('desktop/ext/js/tzdetect.js') }" type="text/javascript" charset="utf-8"></script>
+  <script src="${ static('desktop/ext/js/knockout.min.js') }"></script>
+  <script src="${ static('desktop/ext/js/knockout-mapping.min.js') }"></script>
+  <script src="${ static('desktop/ext/js/knockout.validation.min.js') }"></script>
+  <script src="${ static('desktop/js/ko.switch-case.js') }"></script>
+  <script src="${ static('desktop/js/ko.hue-bindings.js') }"></script>
+  <script src="${ static('desktop/ext/js/dropzone.min.js') }"></script>
 
-  <script type="text/javascript" charset="utf-8">
+% if user.is_authenticated():
 
-    moment.locale(window.navigator.userLanguage || window.navigator.language);
-    localeFormat = function (time) {
-      var mTime = time;
-      if (typeof ko !== 'undefined' && ko.isObservable(time)) {
-        mTime = time();
-      }
-      if (moment(mTime).isValid()) {
-        return moment.utc(mTime).format("L LT");
-      }
-      return mTime;
-    }
+  <script src="${ static('desktop/js/sqlUtils.js') }"></script>
+  <script src="${ static('desktop/js/ace/ace.js') }"></script>
+  <script src="${ static('desktop/js/ace/mode-impala.js') }"></script>
+  <script src="${ static('desktop/js/ace/mode-hive.js') }"></script>
+  <script src="${ static('desktop/js/ace/ext-language_tools.js') }"></script>
+  <script src="${ static('desktop/js/ace.extended.js') }"></script>
+  <script src="${ static('desktop/js/autocomplete/sqlParseSupport.js') }"></script>
+  <script src="${ static('desktop/js/autocomplete/sqlStatementsParser.js') }"></script>
+  <script src="${ static('desktop/js/autocomplete/sqlAutocompleteParser.js') }"></script>
+  <script src="${ static('desktop/js/autocomplete/solrQueryParser.js') }"></script>
+  <script src="${ static('desktop/js/autocomplete/solrFormulaParser.js') }"></script>
+  <script src="${ static('desktop/js/autocomplete/globalSearchParser.js') }"></script>
+  <script src="${ static('desktop/js/sqlAutocompleter2.js') }"></script>
+  <script src="${ static('desktop/js/sqlAutocompleter3.js') }"></script>
+  <script src="${ static('desktop/js/hdfsAutocompleter.js') }"></script>
+  <script src="${ static('desktop/js/autocompleter.js') }"></script>
 
-    //Add CSRF Token to all XHR Requests
-    var xrhsend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.send = function (data) {
-      this.setRequestHeader('X-CSRFToken', $.cookie('csrftoken'));
-      return xrhsend.apply(this, arguments);
-    }
+  <script>
+    ace.config.set("basePath", "/static/desktop/js/ace");
+  </script>
 
-    $.fn.dataTableExt.sErrMode = "throw";
+  <script src="${ static('metastore/js/metastore.model.js') }"></script>
 
-    // sets global apiHelper TTL
-    $.totalStorage('hue.cacheable.ttl', ${conf.CUSTOM.CACHEABLE_TTL.get()});
+  ${ charting.import_charts() }
+  ${ koComponents.all() }
+  ${ hueAceAutocompleter.hueAceAutocompleter() }
+%endif
 
-    var IDLE_SESSION_TIMEOUT = -1;
+  ${ commonHeaderFooterComponents.header_pollers(user, is_s3_enabled, apps) }
 
+% if user.is_authenticated():
+  <script src="${ static('desktop/ext/js/localforage.min.js') }"></script>
+  <script src="${ static('desktop/js/dataCatalog.js') }"></script>
+  <script src="${ static('desktop/js/apiHelper.js') }"></script>
+  <script src="${ static('desktop/js/clusterConfig.js') }"></script>
+
+  <script type="text/javascript">
     $(document).ready(function () {
-      // forces IE's ajax calls not to cache
-      if ($.browser.msie) {
-        $.ajaxSetup({ cache: false });
-      }
+      localforage.config({
+        version: 1.0,
+        storeName: 'hue_store',
+      });
 
-      // prevents framebusting and clickjacking
-      if (self == top){
-        $("body").css({
-          'display': 'block',
-          'visibility': 'visible'
-        });
-      }
-      else {
-        top.location = self.location;
-      }
-
-      %if conf.AUTH.IDLE_SESSION_TIMEOUT.get() > -1 and not skip_idle_timeout:
-      IDLE_SESSION_TIMEOUT = ${conf.AUTH.IDLE_SESSION_TIMEOUT.get()};
-      var idleTimer;
-      function resetIdleTimer() {
-        clearTimeout(idleTimer);
-        idleTimer = setTimeout(function () {
-          // Check if logged out
-          $.get('/desktop/debug/is_idle');
-        }, (IDLE_SESSION_TIMEOUT * 1000) + 1000);
-      }
-
-      $(document).on('mousemove', resetIdleTimer);
-      $(document).on('keydown', resetIdleTimer);
-      $(document).on('click', resetIdleTimer);
-      resetIdleTimer();
-      %endif
-
-      $("input, textarea").placeholder();
-      $(".submitter").keydown(function (e) {
-        if (e.keyCode == 13) {
-          $(this).closest("form").submit();
+      huePubSub.subscribe('get.current.app.name', function () {
+        var appName = '';
+        if ('${ 'metastore' in apps }' === 'True' && location.href.indexOf('${"metastore" in apps and apps["metastore"].display_name}') !== -1) {
+          appName = 'metastore';
+        } else if (location.href.indexOf('editor') !== -1) {
+          appName = 'editor'
         }
-      }).change(function () {
-          $(this).closest("form").submit();
+        huePubSub.publish('set.current.app.name', appName);
       });
 
-      $(".navbar .nav-tooltip").tooltip({
-        delay: 0,
-        placement: "bottom"
-      });
-
-      $("[rel='tooltip']").tooltip({
-        delay: 0,
-        placement: "bottom"
-      });
-
-      $("[rel='navigator-tooltip']").tooltip({
-        delay: 0,
-        placement: "bottom"
-      });
-
-      % if 'jobbrowser' in apps:
-      var JB_CHECK_INTERVAL_IN_MILLIS = 30000;
-      var checkJobBrowserStatusIdx = window.setTimeout(checkJobBrowserStatus, 10);
-
-      function checkJobBrowserStatus(){
-        $.post("/jobbrowser/jobs/", {
-            "format": "json",
-            "state": "running",
-            "user": "${user.username}"
-          },
-          function(data) {
-            if (data != null && data.jobs != null) {
-              huePubSub.publish('jobbrowser.data', data.jobs);
-              if (data.jobs.length > 0){
-                $("#jobBrowserCount").removeClass("hide").text(data.jobs.length);
-              }
-              else {
-                $("#jobBrowserCount").addClass("hide");
-              }
-            }
-          checkJobBrowserStatusIdx = window.setTimeout(checkJobBrowserStatus, JB_CHECK_INTERVAL_IN_MILLIS);
-        }).fail(function () {
-          window.clearTimeout(checkJobBrowserStatusIdx);
-        });
-      }
-      huePubSub.subscribe('check.job.browser', checkJobBrowserStatus);
-      % endif
-
-      function openDropdown(which, timeout){
-        var _this = which;
-        var _timeout = timeout!=null?timeout:800;
-        if ($(".navigator").find("ul.dropdown-menu:visible").length > 0) {
-          _timeout = 10;
-        }
-        window.clearTimeout(closeTimeout);
-        openTimeout = window.setTimeout(function () {
-          $(".navigator li.open").removeClass("open");
-          $(".navigator .nav-pills li.dropdown > ul.dropdown-menu").hide();
-          $("[rel='navigator-tooltip']").tooltip("hide");
-          _this.find("ul.dropdown-menu:eq(0)").show();
-        }, _timeout);
-      }
-
-      var openTimeout, closeTimeout;
-      $(".navigator ul.nav li.dropdown").on("click", function(){
-        openDropdown($(this), 10);
-      });
-      $(".navigator ul.nav li.dropdown").hover(function () {
-        openDropdown($(this));
-      },
-      function () {
-        window.clearTimeout(openTimeout);
-        closeTimeout = window.setTimeout(function () {
-          $(".navigator li.open").removeClass("open");
-          $(".navigator li a:focus").blur();
-          $(".navigator").find("ul.dropdown-menu").hide();
-        }, 1000);
-      });
-
-      function showSubmenu(menuElement) {
-        $(".tooltip").remove();
-        menuElement.data("lastShown", (new Date()).getTime())
-        menuElement.show();
-      }
-
-      $(".navigator ul.nav li.dropdown-submenu a").on("mouseenter", function () {
-        showSubmenu($(this).siblings(".dropdown-menu"));
-      });
-
-      $(".navigator ul.nav li.dropdown-submenu a img").on("mouseenter", function () {
-        showSubmenu($(this).parent().siblings(".dropdown-menu"));
-      });
-
-      $(".navigator ul.nav li.dropdown-submenu").on("mouseenter", function () {
-        $(this).siblings().find(".dropdown-menu").hide();
-        showSubmenu($(this).find(".dropdown-menu"));
-      });
-
-      $(".navigator ul.nav li.dropdown-submenu").on("mouseleave", function () {
-        var _lastShown = $(this).find(".dropdown-menu").data("lastShown");
-        if (_lastShown == null || (new Date()).getTime() - _lastShown > 300) {
-          var _el = $(this);
-          _el.hideTimeout = window.setTimeout(function () {
-            window.clearTimeout(_el.hideTimeout);
-            _el.find(".dropdown-menu").hide();
-          }, 50);
-        }
-      });
-
-      var _skew = -1;
-      $("[data-hover]").on("mouseover", function(){
-        var _this = $(this);
-        _skew = window.setTimeout(function(){
-          _this.attr("src", _this.data("hover"));
-        }, 3000);
-      });
-
-      $("[data-hover]").on("mouseout", function(){
-        $(this).attr("src", $(this).data("orig"));
-        window.clearTimeout(_skew);
+      huePubSub.subscribe('open.link', function (href) {
+        location.href = href;
       });
     });
   </script>
+%endif
+
 </head>
 <body>
 
-% if conf.CUSTOM.BANNER_TOP_HTML.get():
-  <div id="banner-top" class="banner">
-    ${ conf.CUSTOM.BANNER_TOP_HTML.get() | n,unicode }
+${ hueIcons.symbols() }
+
+% if conf.DISABLE_HUE_3.get() and conf.IS_HUE_4.get() and request.environ.get("PATH_INFO").find("/hue/") < 0:
+  <script>
+    window.location.replace("/");
+  </script>
+% endif
+
+% if banner_message or conf.CUSTOM.BANNER_TOP_HTML.get():
+  <div class="banner">
+    ${ banner_message or conf.CUSTOM.BANNER_TOP_HTML.get() | n,unicode }
   </div>
 % endif
 
@@ -424,130 +271,170 @@ if USE_NEW_EDITOR.get():
   <ul class="nav nav-pills">
     <li class="divider-vertical"></li>
     % if 'filebrowser' in apps:
-      % if not is_s3_enabled():
+      % if not is_s3_enabled and not is_adls_enabled:
       <li class="hide1380">
-        <a title="${_('Manage HDFS')}" rel="navigator-tooltip" href="/${apps['filebrowser'].display_name}">
+        <a title="${_('Manage HDFS')}" data-rel="navigator-tooltip" href="/${apps['filebrowser'].display_name}">
           <i class="fa fa-file"></i>&nbsp;${_('File Browser')}&nbsp;
         </a>
       </li>
       % else:
         <li class="dropdown hide1380">
-          <a title="${_('File Browsers')}" rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle">
+          <a title="${_('File Browsers')}" data-rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle">
             <i class="fa fa-file"></i>&nbsp;${_('File Browsers')} <b class="caret"></b>
           </a>
           <ul role="menu" class="dropdown-menu">
             <li><a href="/${apps['filebrowser'].display_name}">
               <i class="fa fa-fw fa-file" style="vertical-align: middle"></i>${_('HDFS Browser')}</a>
             </li>
-            <li><a href="/${apps['filebrowser'].display_name}/view=S3://">
-              <i class="fa fa-fw fa-cloud" style="vertical-align: middle"></i>${_('S3 Browser')}</a>
+            % if is_s3_enabled:
+            <li><a href="/${apps['filebrowser'].display_name}/view=S3A://">
+              <i class="fa fa-fw fa-cubes" style="vertical-align: middle"></i>${_('S3 Browser')}</a>
             </li>
+            % endif
+            % if is_adls_enabled:
+            <li><a href="/${apps['filebrowser'].display_name}/view=adl:/">
+              <span class="fa fa-fw" style="font-size:20px;vertical-align: middle;"><svg class="hi"><use xlink:href='#hi-adls'></use></svg></span>${_('ADLS Browser')}</a>
+            </li>
+            % endif
           </ul>
         </li>
       % endif
       <li class="hideMoreThan1380">
-        <a title="${_('HDFS Browser')}" rel="navigator-tooltip" href="/${apps['filebrowser'].display_name}">
+        <a title="${_('HDFS Browser')}" data-rel="navigator-tooltip" href="/${apps['filebrowser'].display_name}">
           <i class="fa fa-file"></i>
         </a>
       </li>
       <li class="hideMoreThan1380">
-        % if is_s3_enabled():
-          <a title="${_('S3 Browser')}" rel="navigator-tooltip" href="/${apps['filebrowser'].display_name}/view=S3://">
-            <i class="fa fa-cloud"></i>
+        % if is_s3_enabled:
+          <a title="${_('S3 Browser')}" data-rel="navigator-tooltip" href="/${apps['filebrowser'].display_name}/view=S3A://">
+            <i class="fa fa-cubes"></i>
+          </a>
+        % endif
+      </li>
+      <li class="hideMoreThan1380">
+        % if is_adls_enabled:
+          <a title="${_('ADLS Browser')}" data-rel="navigator-tooltip" href="/${apps['filebrowser'].display_name}/view=adl:/">
+            <span style="font-size:15px;vertical-align: middle;"><svg class="hi"><use xlink:href='#hi-adls'></use></svg></span>
           </a>
         % endif
       </li>
     % endif
     % if 'jobbrowser' in apps:
-    <li class="hide1380"><a title="${_('Manage jobs')}" rel="navigator-tooltip" href="/${apps['jobbrowser'].display_name}"><i class="fa fa-list-alt"></i>&nbsp;${_('Job Browser')}&nbsp;<span id="jobBrowserCount" class="badge badge-warning hide" style="padding-top:0;padding-bottom: 0"></span></a></li>
-    <li class="hideMoreThan1380"><a title="${_('Job Browser')}" rel="navigator-tooltip" href="/${apps['jobbrowser'].display_name}"><i class="fa fa-list-alt"></i></a></li>
+      <% from jobbrowser.conf import ENABLE_V2 %>
+      % if not ENABLE_V2.get():
+        <li class="hide1380"><a title="${_('Manage jobs')}" data-rel="navigator-tooltip" href="/${apps['jobbrowser'].display_name}"><i class="fa fa-list-alt"></i>&nbsp;${_('Job Browser')}&nbsp;<span id="jobBrowserCount" class="badge badge-warning hide" style="padding-top:0;padding-bottom: 0"></span></a></li>
+        <li class="hideMoreThan1380"><a title="${_('Job Browser')}" data-rel="navigator-tooltip" href="/${apps['jobbrowser'].display_name}"><i class="fa fa-list-alt"></i></a></li>
+      % else:
+        <li class="hide1380"><a title="${_('Manage jobs')}" data-rel="navigator-tooltip" href="/jobbrowser/apps">
+          <i class="fa fa-list-alt"></i>&nbsp;${_('Job Browser')}&nbsp;<span id="jobBrowserCount" class="badge badge-warning hide" style="padding-top:0;padding-bottom: 0"></span></a>
+        </li>
+        <li class="hideMoreThan1380"><a title="${_('Job Browser')}" data-rel="navigator-tooltip" href="/jobbrowser/apps"><i class="fa fa-list-alt"></i></a></li>
+      % endif
     % endif
     <%
       view_profile = user.has_hue_permission(action="access_view:useradmin:edit_user", app="useradmin") or user.is_superuser
     %>
+    % if view_profile or conf.IS_HUE_4.get():
     <li class="dropdown">
-      <a title="${ _('Administration') if view_profile else '' }" href="index.html#" rel="navigator-tooltip" data-toggle="dropdown" class="dropdown-toggle">
-        <i class="fa fa-cogs"></i>&nbsp;<span class="hideable">${user.username}&nbsp;</span>
-        % if view_profile:
-          <b class="caret"></b>
-        % endif
+      <a title="${'Administration' if view_profile else ''}" href="#" data-rel="navigator-tooltip" data-toggle="dropdown" class="dropdown-toggle">
+        <i class="fa fa-cogs"></i>&nbsp;${user.username}&nbsp;
+        <b class="caret"></b>
       </a>
-      % if view_profile:
       <ul class="dropdown-menu pull-right">
-        <li>
-          <a href="${ url('useradmin.views.edit_user', username=user.username) }"><i class="fa fa-key"></i>&nbsp;&nbsp;
-            % if is_ldap_setup:
-              ${_('View Profile')}
-            % else:
-              ${_('Edit Profile')}
-            % endif
-          </a>
-        </li>
+      % if view_profile:
+      <li>
+        <a href="${ url('useradmin.views.edit_user', username=user.username) }"><i class="fa fa-fw fa-key"></i>
+          % if is_ldap_setup:
+            ${_('View Profile')}
+          % else:
+            ${_('Edit Profile')}
+          % endif
+        </a>
+      </li>
         % if user.is_superuser:
-          <li><a href="${ url('useradmin.views.list_users') }"><i class="fa fa-group"></i>&nbsp;&nbsp;${_('Manage Users')}</a></li>
+          <li><a href="${ url('useradmin.views.list_users') }"><i class="fa fa-fw fa-group"></i> ${_('Manage Users')}</a></li>
         % endif
+      % endif
+      % if conf.IS_HUE_4.get():
+      <li><a href="javascript:void(0)" onclick="huePubSub.publish('set.hue.version', 4)"><i class="fa fa-fw fa-exchange"></i> ${_('Switch to Hue 4')}</a></li>
+      % endif
       </ul>
-    % endif
     </li>
-    % if 'help' in apps:
-    <li><a title="${_('Documentation')}" rel="navigator-tooltip" href="/help"><i class="fa fa-question-circle"></i></a></li>
+    % else:
+      <li><a title="" data-rel="navigator-tooltip" href="#"><i class="fa fa-fw fa-user"></i>&nbsp;${user.username}</a></li>
     % endif
-    <li id="jHueTourFlagPlaceholder"></li>
-    <li><a title="${_('Sign out')}" rel="navigator-tooltip" href="/accounts/logout/"><i class="fa fa-sign-out"></i></a></li>
-  </ul>
-  % else:
-  <ul class="nav nav-pills" style="margin-right: 40px">
-    <li id="jHueTourFlagPlaceholder"></li>
+    % if 'help' in apps:
+    <li><a title="${_('Documentation')}" data-rel="navigator-tooltip" href="/help"><i class="fa fa-question-circle"></i></a></li>
+    % endif
+    <li><a title="${_('Sign out')}" data-rel="navigator-tooltip" href="/accounts/logout/"><i class="fa fa-sign-out"></i></a></li>
   </ul>
   % endif
 
   </div>
-    <a class="brand nav-tooltip pull-left" title="${_('About Hue')}" rel="navigator-tooltip" href="/about"><img src="${ static('desktop/art/hue-logo-mini-white.png') }" data-orig="${ static('desktop/art/hue-logo-mini-white.png') }" data-hover="${ static('desktop/art/hue-logo-mini-white-hover.png') }" /></a>
+    <a class="brand nav-tooltip pull-left" title="${_('About Hue')}" data-rel="navigator-tooltip" href="/about">
+      <svg style="margin-top: 2px; margin-left:8px;width: 60px;height: 16px;display: inline-block;">
+        <use xlink:href="#hi-logo"></use>
+      </svg>
+    </a>
     % if user.is_authenticated() and section != 'login':
      <ul class="nav nav-pills pull-left">
-       <li><a title="${_('My documents')}" rel="navigator-tooltip" href="${ home_url }" style="padding-bottom:2px!important"><i class="fa fa-home" style="font-size: 19px"></i></a></li>
+       <li><a title="${_('My documents')}" data-rel="navigator-tooltip" href="${ home_url }" style="padding-bottom:2px!important"><i class="fa fa-home" style="font-size: 19px"></i></a></li>
        <%
          query_apps = count_apps(apps, ['beeswax', 'impala', 'rdbms', 'pig', 'jobsub', 'spark']);
        %>
        % if query_apps[1] > 1:
        <li class="dropdown oozie">
-         <a title="${_('Query data')}" rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle">Query Editors <b class="caret"></b></a>
+         <a title="${_('Query data')}" data-rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle"><i class="fa fa-terminal inline-block hideMoreThan950"></i><span class="hide950">Query Editors</span> <b class="caret"></b></a>
          <ul role="menu" class="dropdown-menu">
            % if 'beeswax' in apps:
              % if USE_NEW_EDITOR.get():
-             <li><a href="${ url('notebook:editor') }?type=hive"><img src="${ static(apps['beeswax'].icon_path) }" class="app-icon"/> ${_('Hive')}</a></li>
+             <li><a href="${ url('notebook:editor') }?type=hive"><svg class="svg-app-icon"><use xlink:href="#hi-hive"></use></svg> ${_('Hive')}</a></li>
              % else:
-             <li><a href="/${apps['beeswax'].display_name}"><img src="${ static(apps['beeswax'].icon_path) }" class="app-icon"/> ${_('Hive')}</a></li>
+             <li><a href="/${apps['beeswax'].display_name}"><svg class="svg-app-icon"><use xlink:href="#hi-hive"></use></svg> ${_('Hive')}</a></li>
              % endif
            % endif
            % if 'impala' in apps:
              % if USE_NEW_EDITOR.get(): ## impala requires beeswax anyway
-             <li><a href="${ url('notebook:editor') }?type=impala"><img src="${ static(apps['impala'].icon_path) }" class="app-icon"/> ${_('Impala')}</a></li>
+             <li><a href="${ url('notebook:editor') }?type=impala"><svg class="svg-app-icon"><use xlink:href="#hi-impala"></use></svg> ${_('Impala')}</a></li>
              % else:
-             <li><a href="/${apps['impala'].display_name}"><img src="${ static(apps['impala'].icon_path) }" class="app-icon"/> ${_('Impala')}</a></li>
+             <li><a href="/${apps['impala'].display_name}"><svg class="svg-app-icon"><use xlink:href="#hi-impala"></use></svg> ${_('Impala')}</a></li>
              % endif
            % endif
            % if 'rdbms' in apps:
              % if USE_NEW_EDITOR.get():
-             <li><a href="/${apps['rdbms'].display_name}"><img src="${ static(apps['rdbms'].icon_path) }" class="app-icon"/> ${_('DB Query')}</a></li>
+             <li><a href="/${apps['rdbms'].display_name}"><img src="${ static(apps['rdbms'].icon_path) }" class="app-icon" alt="${ _('DBQuery icon') }"/> ${_('DB Query')}</a></li>
              % else:
-             <li><a href="/${apps['rdbms'].display_name}"><img src="${ static(apps['rdbms'].icon_path) }" class="app-icon"/> ${_('DB Query')}</a></li>
+             <li><a href="/${apps['rdbms'].display_name}"><img src="${ static(apps['rdbms'].icon_path) }" class="app-icon" alt="${ _('DBQuery icon') }"/> ${_('DB Query')}</a></li>
              % endif
            % endif
            % if 'pig' in apps:
              % if USE_NEW_EDITOR.get() and False:
-             <li><a href="${ url('notebook:editor') }?type=pig"><img src="${ static(apps['pig'].icon_path) }" class="app-icon"/> ${_('Pig')}</a></li>
+             <li><a href="${ url('notebook:editor') }?type=pig"><svg class="svg-app-icon"><use xlink:href="#hi-pig"></use></svg> ${_('Pig')}</a></li>
              % else:
-             <li><a href="/${apps['pig'].display_name}"><img src="${ static(apps['pig'].icon_path) }" class="app-icon"/> ${_('Pig')}</a></li>
+             <li><a href="/${apps['pig'].display_name}"><svg class="svg-app-icon"><use xlink:href="#hi-pig"></use></svg> ${_('Pig')}</a></li>
              % endif
            % endif
            % if 'jobsub' in apps:
-             <li><a href="/${apps['jobsub'].display_name}"><img src="${ static(apps['jobsub'].icon_path) }" class="app-icon"/> ${_('Job Designer')}</a></li>
+             <li><a href="/${apps['jobsub'].display_name}"><svg class="svg-app-icon"><use xlink:href="#hi-job-designer"></use></svg> ${_('Job Designer')}</a></li>
            % endif
          </ul>
        </li>
        % elif query_apps[1] == 1:
-          <li><a href="/${apps[query_apps[0]].display_name}">${apps[query_apps[0]].nice_name}</a></li>
+           % if 'beeswax' in apps:
+             % if USE_NEW_EDITOR.get():
+             <li><a href="${ url('notebook:editor') }?type=hive"><svg class="svg-app-icon"><use xlink:href="#hi-hive"></use></svg> ${_('Hive')}</a></li>
+             % else:
+             <li><a href="/${apps['beeswax'].display_name}"><svg class="svg-app-icon"><use xlink:href="#hi-hive"></use></svg> ${_('Hive')}</a></li>
+             % endif
+           % elif 'impala' in apps:
+             % if USE_NEW_EDITOR.get(): ## impala requires beeswax anyway
+             <li><a href="${ url('notebook:editor') }?type=impala"><svg class="svg-app-icon"><use xlink:href="#hi-impala"></use></svg> ${_('Impala')}</a></li>
+             % else:
+             <li><a href="/${apps['impala'].display_name}"><svg class="svg-app-icon"><use xlink:href="#hi-impala"></use></svg> ${_('Impala')}</a></li>
+             % endif
+           % else:
+           <li><a href="/${apps[query_apps[0]].display_name}"><i class="fa fa-terminal hideMoreThan950"></i><span class="hide950">${apps[query_apps[0]].nice_name}</span></a></li>
+           % endif
        % endif
        % if 'beeswax' in apps:
         <%
@@ -558,21 +445,21 @@ if USE_NEW_EDITOR.get():
          <% notebooks = [d.content_object.to_dict() for d in Document.objects.get_docs(user, Document2, extra='notebook') if not d.content_object.is_history] %>
          % if not notebooks:
            <li>
-             <a title="${_('Notebook')}" rel="navigator-tooltip" href="${ url('notebook:new') }">${_('Notebooks')}</a>
+             <a title="${_('Notebook')}" data-rel="navigator-tooltip" href="${ url('notebook:new') }"><i class="fa fa-files-o hideMoreThan950"></i><span class="hide950">${_('Notebooks')}</span></a>
            </li>
          % else:
            <li class="dropdown">
-             <a title="${_('Notebook')}" rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle">
-               ${_('Notebooks')} <b class="caret"></b>
+             <a title="${_('Notebook')}" data-rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle">
+               <i class="fa fa-files-o inline-block hideMoreThan950"></i><span class="hide950">${_('Notebooks')}</span> <b class="caret"></b>
              </a>
              <ul role="menu" class="dropdown-menu">
                <li><a href="${ url('notebook:new') }"><i class="fa fa-fw fa-plus" style="vertical-align: middle"></i>${_('Notebook')}</a></li>
-               <li><a href="${ url('notebook:notebooks') }"><i class="fa fa-fw fa-tags" style="vertical-align: middle"></i>${_('Notebooks')}</a></li>
+               <li><a href="${ url('notebook:notebooks') }"><i class="fa fa-fw fa-list" style="vertical-align: middle"></i>${_('Notebooks')}</a></li>
                <li class="divider"></li>
                % for notebook in notebooks:
                  <li>
                    <a href="${ url('notebook:notebook') }?notebook=${ notebook['id'] }">
-                     <i class="fa fa-file-text-o" style="vertical-align: middle"></i> ${ notebook['name'] |n }
+                     <i class="fa fa-fw fa-file-text-o" style="vertical-align: middle"></i> ${ notebook['name'] |n }
                    </a>
                  </li>
                % endfor
@@ -586,19 +473,19 @@ if USE_NEW_EDITOR.get():
        %>
        % if data_apps[1] > 1:
        <li class="dropdown">
-         <a title="${_('Manage data')}" rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle">Data Browsers <b class="caret"></b></a>
+         <a title="${_('Manage data')}" data-rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle"><i class="fa fa-database inline-block hideMoreThan950"></i><span class="hide950">Data Browsers</span> <b class="caret"></b></a>
          <ul role="menu" class="dropdown-menu">
            % if 'metastore' in apps:
-             <li><a href="/${apps['metastore'].display_name}"><img src="${ static(apps['metastore'].icon_path) }" class="app-icon"/> ${_('Metastore Tables')}</a></li>
+             <li><a href="/${apps['metastore'].display_name}"><img src="${ static(apps['metastore'].icon_path) }" class="app-icon" alt="${ _('Metastore icon') }"/> ${_('Metastore Tables')}</a></li>
            % endif
            % if 'hbase' in apps:
-             <li><a href="/${apps['hbase'].display_name}"><img src="${ static(apps['hbase'].icon_path) }" class="app-icon"/> ${_('HBase')}</a></li>
+             <li><a href="/${apps['hbase'].display_name}"><img src="${ static(apps['hbase'].icon_path) }" class="app-icon" alt="${ _('HBase icon') }"/> ${_('HBase')}</a></li>
            % endif
            % if 'sqoop' in apps:
-             <li><a href="/${apps['sqoop'].display_name}"><img src="${ static(apps['sqoop'].icon_path) }" class="app-icon"/> ${_('Sqoop Transfer')}</a></li>
+             <li><a href="/${apps['sqoop'].display_name}"><img src="${ static(apps['sqoop'].icon_path) }" class="app-icon" alt="${ _('Sqoop icon') }"/> ${_('Sqoop Transfer')}</a></li>
            % endif
            % if 'zookeeper' in apps:
-             <li><a href="/${apps['zookeeper'].display_name}"><img src="${ static(apps['zookeeper'].icon_path) }" class="app-icon"/> ${_('ZooKeeper')}</a></li>
+             <li><a href="/${apps['zookeeper'].display_name}"><img src="${ static(apps['zookeeper'].icon_path) }" class="app-icon" alt="${ _('ZooKeeper icon') }"/> ${_('ZooKeeper')}</a></li>
            % endif
          </ul>
        </li>
@@ -607,34 +494,34 @@ if USE_NEW_EDITOR.get():
        % endif
        % if 'oozie' in apps:
        <li class="dropdown oozie">
-         <a title="${_('Schedule with Oozie')}" rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle">Workflows <b class="caret"></b></a>
+         <a title="${_('Schedule with Oozie')}" data-rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle"><i class="fa fa-random inline-block hideMoreThan950"></i><span class="hide950">Workflows</span> <b class="caret"></b></a>
          <ul role="menu" class="dropdown-menu">
            <li class="dropdown-submenu">
-             <a href="${ url('oozie:index') }"><img src="${ static('oozie/art/icon_oozie_dashboard_48.png') }" class="app-icon" /> ${_('Dashboards')}</a>
+             <a href="${ url('oozie:index') }"><img src="${ static('oozie/art/icon_oozie_dashboard_48.png') }" class="app-icon"  alt="${ _('Oozie dashboard icon') }"/> ${_('Dashboards')}</a>
              <ul class="dropdown-menu">
-               <li><a href="${url('oozie:list_oozie_workflows')}"><img src="${ static('oozie/art/icon_oozie_workflow_48.png') }" class="app-icon"/> ${_('Workflows')}</a></li>
-               <li><a href="${url('oozie:list_oozie_coordinators')}"><img src="${ static('oozie/art/icon_oozie_coordinator_48.png') }" class="app-icon" /> ${_('Coordinators')}</a></li>
-               <li><a href="${url('oozie:list_oozie_bundles')}"><img src="${ static('oozie/art/icon_oozie_bundle_48.png') }" class="app-icon" /> ${_('Bundles')}</a></li>
+               <li><a href="${url('oozie:list_oozie_workflows')}"><img src="${ static('oozie/art/icon_oozie_workflow_48.png') }" class="app-icon" alt="${ _('Oozie workflow icon') }"/> ${_('Workflows')}</a></li>
+               <li><a href="${url('oozie:list_oozie_coordinators')}"><img src="${ static('oozie/art/icon_oozie_coordinator_48.png') }" class="app-icon" alt="${ _('Oozie coordinator icon') }"/> ${_('Coordinators')}</a></li>
+               <li><a href="${url('oozie:list_oozie_bundles')}"><img src="${ static('oozie/art/icon_oozie_bundle_48.png') }" class="app-icon" alt="${ _('Oozie bundles icon') }" /> ${_('Bundles')}</a></li>
              </ul>
            </li>
            % if not user.has_hue_permission(action="disable_editor_access", app="oozie") or user.is_superuser:
            <% from oozie.conf import ENABLE_V2 %>
            % if not ENABLE_V2.get():
            <li class="dropdown-submenu">
-             <a href="${ url('oozie:list_workflows') }"><img src="${ static('oozie/art/icon_oozie_editor_48.png') }" class="app-icon" /> ${_('Editors')}</a>
+             <a href="${ url('oozie:list_workflows') }"><img src="${ static('oozie/art/icon_oozie_editor_48.png') }" class="app-icon" alt="${ _('Oozie editor icon') }" /> ${_('Editors')}</a>
              <ul class="dropdown-menu">
-               <li><a href="${url('oozie:list_workflows')}"><img src="${ static('oozie/art/icon_oozie_workflow_48.png') }" class="app-icon"/> ${_('Workflows')}</a></li>
-               <li><a href="${url('oozie:list_coordinators')}"><img src="${ static('oozie/art/icon_oozie_coordinator_48.png') }" class="app-icon" /> ${_('Coordinators')}</a></li>
-               <li><a href="${url('oozie:list_bundles')}"><img src="${ static('oozie/art/icon_oozie_bundle_48.png') }" class="app-icon" /> ${_('Bundles')}</a></li>
+               <li><a href="${url('oozie:list_workflows')}"><img src="${ static('oozie/art/icon_oozie_workflow_48.png') }" class="app-icon" alt="${ _('Oozie workflow icon') }"/> ${_('Workflows')}</a></li>
+               <li><a href="${url('oozie:list_coordinators')}"><img src="${ static('oozie/art/icon_oozie_coordinator_48.png') }" class="app-icon" alt="${ _('Oozie coordinator icon') }" /> ${_('Coordinators')}</a></li>
+               <li><a href="${url('oozie:list_bundles')}"><img src="${ static('oozie/art/icon_oozie_bundle_48.png') }" class="app-icon" alt="${ _('Oozie bundle icon') }" /> ${_('Bundles')}</a></li>
              </ul>
            </li>
            % else:
            <li class="dropdown-submenu">
-             <a href="${ url('oozie:list_editor_workflows') }"><img src="${ static('oozie/art/icon_oozie_editor_48.png') }" class="app-icon" /> ${_('Editors')}</a>
+             <a href="${ url('oozie:list_editor_workflows') }"><img src="${ static('oozie/art/icon_oozie_editor_48.png') }" class="app-icon" alt="${ _('Oozie editor icon') }" /> ${_('Editors')}</a>
              <ul class="dropdown-menu">
-               <li><a href="${url('oozie:list_editor_workflows')}"><img src="${ static('oozie/art/icon_oozie_workflow_48.png') }" class="app-icon"/> ${_('Workflows')}</a></li>
-               <li><a href="${url('oozie:list_editor_coordinators')}"><img src="${ static('oozie/art/icon_oozie_coordinator_48.png') }" class="app-icon" /> ${_('Coordinators')}</a></li>
-               <li><a href="${url('oozie:list_editor_bundles')}"><img src="${ static('oozie/art/icon_oozie_bundle_48.png') }" class="app-icon" /> ${_('Bundles')}</a></li>
+               <li><a href="${url('oozie:list_editor_workflows')}"><img src="${ static('oozie/art/icon_oozie_workflow_48.png') }" class="app-icon" alt="${ _('Oozie workflow icon') }"/> ${_('Workflows')}</a></li>
+               <li><a href="${url('oozie:list_editor_coordinators')}"><img src="${ static('oozie/art/icon_oozie_coordinator_48.png') }" class="app-icon" alt="${ _('Oozie coordinator icon') }" /> ${_('Coordinators')}</a></li>
+               <li><a href="${url('oozie:list_editor_bundles')}"><img src="${ static('oozie/art/icon_oozie_bundle_48.png') }" class="app-icon" alt="${ _('Oozie bundle icon') }" /> ${_('Bundles')}</a></li>
              </ul>
            </li>
            % endif
@@ -643,33 +530,35 @@ if USE_NEW_EDITOR.get():
        </li>
        % endif
        % if 'search' in apps:
-         <% from search.search_controller import SearchController %>
-         <% controller = SearchController(user) %>
+         <% from dashboard.controller import DashboardController %>
+         <% controller = DashboardController(user) %>
          <% collections = controller.get_shared_search_collections() %>
          % if not collections:
            <li>
-             <a title="${_('Solr Search')}" rel="navigator-tooltip" href="${ url('search:index') }">${_('Search')}</a>
+             <a title="${_('Solr Search')}" data-rel="navigator-tooltip" href="${ url('search:index') }">${_('Search')}</a>
            </li>
          % else:
            <li class="dropdown">
-             <a title="${_('Solr Search')}" rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle">
-               ${_('Search')} <b class="caret"></b>
+             <a title="${_('Solr Search')}" data-rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle">
+               <i class="fa fa-search inline-block hideMoreThan950"></i><span class="hide950">${_('Search')}</span> <b class="caret"></b>
              </a>
              <ul role="menu" class="dropdown-menu">
-               % if 'indexer' in apps or 'search' in apps:
-                 % if 'search' in apps:
-                 <li><a href="${ url('search:new_search') }" style="height: 24px; line-height: 24px!important;"><i class="fa fa-plus" style="vertical-align: middle"></i> ${ _('Dashboard') }</a></li>
-                 <li><a href="${ url('search:admin_collections') }" style="height: 24px; line-height: 24px!important;"><i class="fa fa-tags" style="vertical-align: middle"></i>${ _('Dashboards') }</a></li>
-                 % endif
-                 % if 'indexer' in apps:
+               <li><a href="${ url('search:new_search') }" style="height: 24px; line-height: 24px!important;"><i class="fa fa-plus" style="vertical-align: middle"></i> ${ _('Dashboard') }</a></li>
+               <li><a href="${ url('search:admin_collections') }" style="height: 24px; line-height: 24px!important;"><i class="fa fa-list" style="vertical-align: middle"></i>${ _('Dashboards') }</a></li>
+               <%!
+                 from indexer.conf import ENABLE_NEW_INDEXER
+               %>
+               % if ENABLE_NEW_INDEXER.get():
+                 <li><a href="${ url('indexer:indexes') }" style="height: 24px; line-height: 24px!important;"><i class="fa fa-database" style="vertical-align: middle"></i> ${ _('Indexes') }</a></li>
+                 <li><a href="${ url('indexer:indexes') }" style="height: 24px; line-height: 24px!important;"><i class="fa fa-plus" style="vertical-align: middle"></i> ${ _('Index') }</a></li>
+               % else:
                  <li><a href="${ url('indexer:collections') }" style="height: 24px; line-height: 24px!important;"><i class="fa fa-database" style="vertical-align: middle"></i> ${ _('Indexes') }</a></li>
-                 % endif
-                 <li class="divider"></li>
                % endif
+               <li class="divider"></li>
                % for collection in collections:
                  <li>
                    <a href="${ url('search:index') }?collection=${ collection.id }">
-                     <img src="${ static(controller.get_icon(collection.name)) }" class="app-icon"/> ${ collection.name }
+                     <img src="${ static(controller.get_icon(collection.name)) }" class="app-icon" alt="${ _('Collection icon') }"/> ${ collection.name }
                    </a>
                  </li>
                % endfor
@@ -680,27 +569,27 @@ if USE_NEW_EDITOR.get():
        % if 'security' in apps:
          <% from security.conf import HIVE_V1, HIVE_V2, SOLR_V2 %>
          <li class="dropdown">
-           <a title="${_('Hadoop Security')}" rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle">Security <b class="caret"></b></a>
+           <a title="${_('Hadoop Security')}" data-rel="navigator-tooltip" href="#" data-toggle="dropdown" class="dropdown-toggle"><i class="fa fa-unlock inline-block hideMoreThan950"></i><span class="hide950">Security</span> <b class="caret"></b></a>
            <ul role="menu" class="dropdown-menu">
              % if HIVE_V1.get():
-             <li><a href="${ url('security:hive') }">&nbsp;<img src="/static/metastore/art/icon_metastore_48.png" class="app-icon"></img>&nbsp;&nbsp;${_('Hive Tables')}</a></li>
+             <li><a href="${ url('security:hive') }">&nbsp;<img src="/static/metastore/art/icon_metastore_48.png" class="app-icon" alt="${ _('Metastore icon') }"> ${_('Hive Tables')}</a></li>
              % endif
              % if HIVE_V2.get():
-             <li><a href="${ url('security:hive2') }">&nbsp;<img src="/static/metastore/art/icon_metastore_48.png" class="app-icon"></img>&nbsp;&nbsp;${_('Hive Tables v2')}</a></li>
+             <li><a href="${ url('security:hive2') }">&nbsp;<img src="/static/metastore/art/icon_metastore_48.png" class="app-icon" alt="${ _('Metastore icon') }"> ${_('Hive Tables v2')}</a></li>
              % endif
              % if SOLR_V2.get():
-             <li><a href="${ url('security:solr') }">&nbsp;<i class="fa fa-database"></i>&nbsp;&nbsp;${_('Solr Collections')}</a></li>
+             <li><a href="${ url('security:solr') }">&nbsp;<i class="fa fa-database"></i>&nbsp;${_('Solr Collections')}</a></li>
              % endif
-             <li><a href="${ url('security:hdfs') }">&nbsp;<i class="fa fa-file"></i>&nbsp;&nbsp;${_('File ACLs')}</a></li>
+             <li><a href="${ url('security:hdfs') }">&nbsp;<i class="fa fa-file"></i>&nbsp;${_('File ACLs')}</a></li>
            </ul>
          </li>
        % endif
        % if other_apps:
        <li class="dropdown">
-         <a href="#" data-toggle="dropdown" class="dropdown-toggle">${_('Other apps')} <b class="caret"></b></a>
+         <a href="#" data-toggle="dropdown" class="dropdown-toggle"><i class="fa fa-tasks inline-block hideMoreThan950"></i><span class="hide950">${_('Other apps')}</span> <b class="caret"></b></a>
          <ul role="menu" class="dropdown-menu">
            % for other in other_apps:
-             <li><a href="/${ other.display_name }"><img src="${ static(other.icon_path) }" class="app-icon"/> ${ other.nice_name }</a></li>
+             <li><a href="/${ other.display_name }"><img src="${ static(other.icon_path) }" class="app-icon" alt="${ _('App icon') }"/> ${ other.nice_name }</a></li>
            % endfor
          </ul>
        </li>
@@ -731,7 +620,10 @@ if USE_NEW_EDITOR.get():
   </script>
 % endif
 
-<div id="jHueNotify" class="alert hide">
-    <button class="close">&times;</button>
-    <div class="message"></div>
+<div id="jHueNotify" class="alert alert-dismissible alert-warning hide">
+  <button type="button" class="close" data-dismiss="alert">
+    <span aria-hidden="true">&times;</span>
+    <span class="sr-only">${ _('Close') }</span>
+  </button>
+  <p class="message"></p>
 </div>

@@ -38,3 +38,24 @@ LOG_OFFSET = Config(
   type=int,
   help=_('Offset in bytes where a negative offset will fetch the last N bytes for the given log file (default 1MB).')
 )
+
+ENABLE_V2 = Config(
+    key="enable_v2",
+    help=_("Show the version 2 of app which unifies all the past browsers into one."),
+    type=coerce_bool,
+    default=True
+)
+
+MAX_JOB_FETCH = Config(
+  key='max_job_fetch',
+  default=500,
+  type=int,
+  help=_('Maximum number of jobs to fetch and display when pagination is not supported for the type.')
+)
+
+ENABLE_QUERY_BROWSER = Config(
+    key="enable_query_browser",
+    help=_("Show the query section for listing and showing more troubleshooting information."),
+    type=coerce_bool,
+    default=True
+)

@@ -20,10 +20,10 @@ from django.utils.translation import ugettext as _
 
 <%namespace name="layout" file="layout.mako" />
 
-${ commonheader(_('Hue Users'), "useradmin", user) | n,unicode }
+${ commonheader(_('Hue Users'), "useradmin", user, request) | n,unicode }
 ${ layout.menubar(section='users') }
 
-<div class="container-fluid">
+<div class="useradmin container-fluid">
   <div class="card card-small">
     <h1 class="card-heading simple">${ _('User: %(username)s') % {'username': instance.username} }</h1>
 

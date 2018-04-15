@@ -20,7 +20,7 @@ import logging
 from django.utils.translation import ugettext as _
 
 from desktop.lib.exceptions_renderable import PopupException
-from desktop.lib.i18n import force_unicode
+from desktop.lib.i18n import force_unicode, smart_str
 from librdbms.jdbc import Jdbc, query_and_fetch
 
 from notebook.connectors.base import Api, QueryError, AuthenticationRequired
@@ -40,9 +40,11 @@ def query_error_handler(func):
     except AuthenticationRequired, e:
       raise e
     except Exception, e:
-      message = force_unicode(str(e))
+      message = force_unicode(smart_str(e))
       if 'error occurred while trying to connect to the Java server' in message:
         raise QueryError(_('%s: is the DB Proxy server running?') % message)
+      elif 'Access denied' in message:
+        raise AuthenticationRequired()
       else:
         raise QueryError(message)
   return decorator
@@ -70,11 +72,12 @@ class JdbcApi(Api):
     properties = dict([(p['name'], p['value']) for p in properties]) if properties is not None else {}
     props['properties'] = {} # We don't store passwords
 
-    if self.db is None:
+    if self.db is None or not self.db.test_connection(throw_exception='password' not in properties):
       if 'password' in properties:
         user = properties.get('user') or self.options.get('user')
         props['properties'] = {'user': user}
         self.db = API_CACHE[self.cache_key] = Jdbc(self.options['driver'], self.options['url'], user, properties.pop('password'))
+        self.db.test_connection(throw_exception=True)
 
     if self.db is None:
       raise AuthenticationRequired()
@@ -141,6 +144,7 @@ class JdbcApi(Api):
       response['databases'] = assist.get_databases()
     elif table is None:
       response['tables'] = assist.get_tables(database)
+      response['tables_meta'] = response['tables']
     else:
       columns = assist.get_columns(database, table)
       response['columns'] = [col[0] for col in columns]
@@ -154,7 +158,7 @@ class JdbcApi(Api):
     return response
 
   @query_error_handler
-  def get_sample_data(self, snippet, database=None, table=None, column=None):
+  def get_sample_data(self, snippet, database=None, table=None, column=None, async=False):
     if self.db is None:
       raise AuthenticationRequired()
 
@@ -183,17 +187,26 @@ class Assist():
     self.db = db
 
   def get_databases(self):
-    databases, description = query_and_fetch(self.db, 'SHOW DATABASES')
-    return databases
+    dbs, description = query_and_fetch(self.db, 'SELECT DatabaseName FROM DBC.Databases')
+    return [db[0] and db[0].strip() for db in dbs]
 
   def get_tables(self, database, table_names=[]):
-    tables, description = query_and_fetch(self.db, 'SHOW TABLES')
-    return tables
+    tables, description = query_and_fetch(self.db, "SELECT * FROM dbc.tables WHERE tablekind = 'T' and databasename='%s'" % database)
+    return [{"comment": table[7] and table[7].strip(), "type": "Table", "name": table[1] and table[1].strip()} for table in tables]
 
   def get_columns(self, database, table):
-    columns, description = query_and_fetch(self.db, 'SHOW COLUMNS FROM %s.%s' % (database, table))
-    return columns
+    columns, description = query_and_fetch(self.db, "SELECT ColumnName, ColumnType, CommentString FROM DBC.Columns WHERE DatabaseName='%s' AND TableName='%s'" % (database, table))
+    return [[col[0] and col[0].strip(), self._type_converter(col[1]), '', '', col[2], ''] for col in columns]
 
   def get_sample_data(self, database, table, column=None):
     column = column or '*'
     return query_and_fetch(self.db, 'SELECT %s FROM %s.%s' % (column, database, table))
+
+  def _type_converter(self, name):
+    return {
+        "I": "INT_TYPE",
+        "I2": "SMALLINT_TYPE",
+        "CF": "STRING_TYPE",
+        "CV": "CHAR_TYPE",
+        "DA": "DATE_TYPE",
+      }.get(name, 'STRING_TYPE')

@@ -22,6 +22,8 @@ This assumes a single-threaded server.
 
 import logging
 import re
+import resource
+import sys
 import threading
 import time
 
@@ -59,6 +61,7 @@ last_access_map = { }
 # Max number of records per user per view to keep
 _USER_ACCESS_HISTORY_SIZE = desktop.conf.USER_ACCESS_HISTORY_SIZE.get()
 
+
 class AccessInfo(dict):
   """
   Represents details on a user access.
@@ -70,22 +73,39 @@ class AccessInfo(dict):
   """
   def __init__(self, request):
     self['username'] = request.user.username or '-anon-'
-    self['remote_ip'] = request.META.get('REMOTE_ADDR', '-')
+    if request.META.has_key('HTTP_X_FORWARDED_FOR'):
+      self['remote_ip'] = request.META.get('HTTP_X_FORWARDED_FOR', '-')
+    else:
+      self['remote_ip'] = request.META.get('REMOTE_ADDR', '-')
     self['method'] = request.method
     self['path'] = request.path
     self['proto'] = request.META.get('SERVER_PROTOCOL', '-')
     self['agent'] = request.META.get('HTTP_USER_AGENT', '-')
     self['time'] = time.time()
+    self['duration'] = None
+    self['memory'] = None
 
-  def log(self, level, msg=None):
+  def memory_usage_resource(self):
+    """
+      This is a lightweight way to get the total peak memory as
+       doing the diffing before/after request with guppy was too inconsistent and memory intensive.
+      """
+    rusage_denom = 1024
+    if sys.platform == 'darwin':
+      rusage_denom = rusage_denom * 1024
+    # get peak memory usage, bytes on OSX, Kilobytes on Linux
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / rusage_denom
+
+  def log(self, level, msg=None, start_time=None):
+    is_instrumentation = desktop.conf.INSTRUMENTATION.get()
+    self['duration'] = ' returned in %dms' % ((time.time() - start_time) * 1000) if start_time is not None and is_instrumentation else ''
+    self['memory'] = ' (mem: %dmb)' % self.memory_usage_resource() if is_instrumentation else ''
+
     if msg is not None:
       self['msg'] = msg
-      ACCESS_LOG.log(level,
-                     '%(remote_ip)s %(username)s - "%(method)s %(path)s %(proto)s" -- %(msg)s' %
-                     self)
+      ACCESS_LOG.log(level, '%(remote_ip)s %(username)s - "%(method)s %(path)s %(proto)s"%(duration)s%(memory)s-- %(msg)s' % self)
     else:
-      ACCESS_LOG.log(level,
-                     '%(remote_ip)s %(username)s - "%(method)s %(path)s %(proto)s"' % self)
+      ACCESS_LOG.log(level, '%(remote_ip)s %(username)s - "%(method)s %(path)s %(proto)s"%(duration)s%(memory)s' % self)
 
   def add_to_access_history(self, app):
     """Record this user access to the recent access map"""
@@ -127,24 +147,25 @@ class AccessInfo(dict):
         view_access_list.pop()
 
       # Update the IP address and last access time of the user
-      last_access_map[user] = {'ip':self['remote_ip'],
-                               'time':self['time']}
+      last_access_map[user] = {'ip': self['remote_ip'], 'time': self['time']}
     finally:
       user_lk.release()
 
 
 _MODULE_RE = re.compile('[^.]*')
 
-def log_page_hit(request, view_func, level=None):
+def log_page_hit(request, view_func, level=None, start_time=None):
   """Log the request to the access log"""
   if level is None:
     level = logging.INFO
   ai = AccessInfo(request)
-  ai.log(level)
+  ai.log(level, start_time=start_time)
+
+  # Disabled for now as not used
   # Find the app
-  app_re_match = _MODULE_RE.match(view_func.__module__)
-  app = app_re_match and app_re_match.group(0) or '-'
-  ai.add_to_access_history(app)
+#   app_re_match = _MODULE_RE.match(view_func.__module__)
+#   app = app_re_match and app_re_match.group(0) or '-'
+#   ai.add_to_access_history(app)
 
 
 def access_log(request, msg=None, level=None):

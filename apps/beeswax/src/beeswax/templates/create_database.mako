@@ -19,25 +19,28 @@ from desktop.views import commonheader, commonfooter
 from django.utils.translation import ugettext as _
 %>
 
+<%namespace name="assist" file="/assist.mako" />
 <%namespace name="comps" file="beeswax_components.mako" />
 <%namespace name="layout" file="layout.mako" />
-<%namespace name="assist" file="/assist.mako" />
-<%namespace name="tableStats" file="/table_stats.mako" />
-<%namespace name="require" file="/require.mako" />
 
+${ commonheader(_("Create database"), 'metastore', user, request) | n,unicode }
 
-${ commonheader(_("Create database"), 'metastore', user) | n,unicode }
+<span class="notebook">
+
 ${layout.metastore_menubar()}
 
-${ require.config() }
+<script src="${ static('desktop/ext/js/jquery/plugins/jquery-ui-1.10.4.custom.min.js') }"></script>
+<script src="${ static('desktop/js/hue.routie.js') }" type="text/javascript" charset="utf-8"></script>
+<script src="${ static('desktop/ext/js/selectize.min.js') }"></script>
+<script src="${ static('metastore/js/metastore.ko.js') }"></script>
+<script src="${ static('desktop/ext/js/knockout-sortable.min.js') }"></script>
+<script src="${ static('desktop/js/ko.editable.js') }"></script>
 
-${ tableStats.tableStats() }
-${ assist.assistPanel() }
-
-<script src="${ static('desktop/ext/js/d3.v3.js') }" type="text/javascript" charset="utf-8"></script>
+${ assist.assistJSModels() }
 
 <link rel="stylesheet" href="${ static('metastore/css/metastore.css') }" type="text/css">
 <link rel="stylesheet" href="${ static('notebook/css/notebook.css') }">
+<link rel="stylesheet" href="${ static('notebook/css/notebook-layout.css') }">
 <style type="text/css">
 % if conf.CUSTOM.BANNER_TOP_HTML.get():
   .show-assist {
@@ -48,6 +51,8 @@ ${ assist.assistPanel() }
   }
 % endif
 </style>
+
+${ assist.assistPanel() }
 
 <a title="${_('Toggle Assist')}" class="pointer show-assist" data-bind="visible: !$root.isLeftPanelVisible() && $root.assistAvailable(), click: function() { $root.isLeftPanelVisible(true); }">
   <i class="fa fa-chevron-right"></i>
@@ -67,10 +72,6 @@ ${ assist.assistPanel() }
               params: {
                 user: '${user.username}',
                 sql : {
-                  sourceTypes: [{
-                    name: 'hive',
-                    type: 'hive'
-                  }],
                   navigationSettings: {
                     openItem: false,
                     showStats: true
@@ -82,7 +83,7 @@ ${ assist.assistPanel() }
         </div>
         <div class="resizer" data-bind="visible: $root.isLeftPanelVisible() && $root.assistAvailable(), splitDraggable : { appName: 'notebook', leftPanelVisible: $root.isLeftPanelVisible }"><div class="resize-bar">&nbsp;</div></div>
 
-        <div class="right-panel">
+        <div class="content-panel">
 
           <div class="metastore-main">
 
@@ -183,19 +184,6 @@ ${ assist.assistPanel() }
 
 
 
-<div id="chooseFile" class="modal hide fade">
-    <div class="modal-header">
-        <a href="#" class="close" data-dismiss="modal">&times;</a>
-        <h3>${_('Choose a file')}</h3>
-    </div>
-    <div class="modal-body">
-        <div id="filechooser">
-        </div>
-    </div>
-    <div class="modal-footer">
-    </div>
-</div>
-
 <style type="text/css">
   #filechooser {
     min-height: 100px;
@@ -230,33 +218,21 @@ ${ assist.assistPanel() }
 
 </div>
 
+<script type="text/javascript">
 
-<script src="${ static('desktop/ext/js/routie-0.3.0.min.js') }" type="text/javascript" charset="utf-8"></script>
+  (function () {
 
-<script type="text/javascript" charset="utf-8">
+    if (ko.options) {
+      ko.options.deferUpdates = true;
+    }
 
-  require([
-    "knockout",
-    "ko.charts",
-    "desktop/js/apiHelper",
-    "assistPanel",
-    "tableStats",
-    "knockout-mapping",
-    "knockout-sortable",
-    "ko.editable",
-    "ko.hue-bindings"
-  ], function (ko, charts, ApiHelper) {
-
-    ko.options.deferUpdates = true;
-
-    function MetastoreViewModel(options) {
+    function CreateDatabaseViewModel() {
       var self = this;
-      self.apiHelper = ApiHelper.getInstance(options);
+      self.apiHelper = ApiHelper.getInstance();
 
       self.assistAvailable = ko.observable(true);
       self.isLeftPanelVisible = ko.observable();
       self.apiHelper.withTotalStorage('assist', 'assist_panel_visible', self.isLeftPanelVisible, true);
-
 
       huePubSub.subscribe("assist.table.selected", function (tableDef) {
         location.href = '/metastore/table/' + tableDef.database + '/' + tableDef.name;
@@ -268,16 +244,7 @@ ${ assist.assistPanel() }
     }
 
     $(document).ready(function () {
-
-      var options = {
-        user: '${ user.username }',
-        i18n: {
-          errorLoadingDatabases: "${ _('There was a problem loading the databases') }",
-          errorLoadingTablePreview: "${ _('There was a problem loading the table preview.') }"
-        }
-      };
-
-      var viewModel = new MetastoreViewModel(options);
+      var viewModel = new CreateDatabaseViewModel();
 
       ko.applyBindings(viewModel);
 
@@ -394,12 +361,11 @@ ${ assist.assistPanel() }
           field.nextAll(".error-inline").addClass("hide");
         }
       }
-
-
     });
-
-  });
-
+  })();
 </script>
+
+
+</span>
 
 ${ commonfooter(request, messages) | n,unicode }

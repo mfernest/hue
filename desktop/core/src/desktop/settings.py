@@ -20,6 +20,7 @@
 # Local customizations are done by symlinking a file
 # as local_settings.py.
 
+import gc
 import logging
 import os
 import pkg_resources
@@ -33,7 +34,7 @@ import desktop.redaction
 from desktop.lib.paths import get_desktop_root
 from desktop.lib.python_util import force_dict_to_strings
 
-from aws.conf import is_default_configured as is_s3_enabled
+from aws.conf import is_enabled as is_s3_enabled
 
 
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
@@ -129,6 +130,7 @@ STATIC_URL = '/static/'
 
 STATIC_ROOT = os.path.join(BASE_DIR, 'build', 'static')
 
+
 # List of callables that know how to import templates from various sources.
 TEMPLATE_LOADERS = (
   'django.template.loaders.filesystem.Loader',
@@ -162,6 +164,7 @@ MIDDLEWARE_CLASSES = [
 
     'django.middleware.http.ConditionalGetMiddleware',
     'axes.middleware.FailedLoginMiddleware',
+    'desktop.middleware.MimeTypeJSFileFixStreamingMiddleware',
 ]
 
 # if os.environ.get(ENV_DESKTOP_DEBUG):
@@ -320,6 +323,7 @@ else:
     "ENGINE" : desktop.conf.DATABASE.ENGINE.get(),
     "NAME" : desktop.conf.DATABASE.NAME.get(),
     "USER" : desktop.conf.DATABASE.USER.get(),
+    "SCHEMA" : desktop.conf.DATABASE.SCHEMA.get(),
     "PASSWORD" : desktop.conf.get_database_password(),
     "HOST" : desktop.conf.DATABASE.HOST.get(),
     "PORT" : str(desktop.conf.DATABASE.PORT.get()),
@@ -329,6 +333,7 @@ else:
     "TEST_USER" : test_user,
     # Wrap each request in a transaction.
     "ATOMIC_REQUESTS" : True,
+    "CONN_MAX_AGE" : desktop.conf.DATABASE.CONN_MAX_AGE.get(),
   }
 
 DATABASES = {
@@ -343,6 +348,7 @@ CACHES = {
 }
 
 # Configure sessions
+SESSION_COOKIE_NAME = desktop.conf.SESSION.COOKIE_NAME.get()
 SESSION_COOKIE_AGE = desktop.conf.SESSION.TTL.get()
 SESSION_COOKIE_SECURE = desktop.conf.SESSION.SECURE.get()
 SESSION_EXPIRE_AT_BROWSER_CLOSE = desktop.conf.SESSION.EXPIRE_AT_BROWSER_CLOSE.get()
@@ -351,6 +357,8 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = desktop.conf.SESSION.EXPIRE_AT_BROWSER_CLOSE.g
 SESSION_COOKIE_HTTPONLY = desktop.conf.SESSION.HTTP_ONLY.get()
 
 CSRF_COOKIE_SECURE = desktop.conf.SESSION.SECURE.get()
+CSRF_COOKIE_HTTPONLY = desktop.conf.SESSION.HTTP_ONLY.get()
+CSRF_COOKIE_NAME='csrftoken'
 
 SECURE_HSTS_SECONDS = desktop.conf.SECURE_HSTS_SECONDS.get()
 SECURE_HSTS_INCLUDE_SUBDOMAINS = desktop.conf.SECURE_HSTS_INCLUDE_SUBDOMAINS.get()
@@ -377,6 +385,8 @@ TIME_ZONE = desktop.conf.TIME_ZONE.get()
 
 if desktop.conf.DEMO_ENABLED.get():
   AUTHENTICATION_BACKENDS = ('desktop.auth.backend.DemoBackend',)
+elif desktop.conf.IS_EMBEDDED.get():
+  AUTHENTICATION_BACKENDS = ('desktop.auth.backend.ImpersonationBackend',)
 else:
   AUTHENTICATION_BACKENDS = tuple(desktop.conf.AUTH.BACKEND.get())
 
@@ -398,9 +408,17 @@ else:
 # Axes
 AXES_LOGIN_FAILURE_LIMIT = desktop.conf.AUTH.LOGIN_FAILURE_LIMIT.get()
 AXES_LOCK_OUT_AT_FAILURE = desktop.conf.AUTH.LOGIN_LOCK_OUT_AT_FAILURE.get()
-AXES_COOLOFF_TIME = desktop.conf.AUTH.LOGIN_COOLOFF_TIME.get()
+AXES_COOLOFF_TIME = None
+if desktop.conf.AUTH.LOGIN_COOLOFF_TIME.get() and desktop.conf.AUTH.LOGIN_COOLOFF_TIME.get() != 0:
+  AXES_COOLOFF_TIME = desktop.conf.AUTH.LOGIN_COOLOFF_TIME.get()
 AXES_USE_USER_AGENT = desktop.conf.AUTH.LOGIN_LOCK_OUT_USE_USER_AGENT.get()
 AXES_LOCK_OUT_BY_COMBINATION_USER_AND_IP = desktop.conf.AUTH.LOGIN_LOCK_OUT_BY_COMBINATION_USER_AND_IP.get()
+AXES_BEHIND_REVERSE_PROXY = desktop.conf.AUTH.BEHIND_REVERSE_PROXY.get()
+AXES_REVERSE_PROXY_HEADER = desktop.conf.AUTH.REVERSE_PROXY_HEADER.get()
+
+
+LOGIN_URL = '/hue/accounts/login'
+
 
 # SAML
 SAML_AUTHENTICATION = 'libsaml.backend.SAML2Backend' in AUTHENTICATION_BACKENDS
@@ -443,6 +461,11 @@ if desktop.conf.SECURE_PROXY_SSL_HEADER.get():
 # Add last activity tracking and idle session timeout
 if 'useradmin' in [app.name for app in appmanager.DESKTOP_APPS]:
   MIDDLEWARE_CLASSES.append('useradmin.middleware.LastActivityMiddleware')
+
+if desktop.conf.SESSION.CONCURRENT_USER_SESSION_LIMIT.get():
+  MIDDLEWARE_CLASSES.append('useradmin.middleware.ConcurrentUserSessionMiddleware')
+
+LOAD_BALANCER_COOKIE = 'ROUTEID'
 
 ################################################################
 # Register file upload handlers
@@ -487,6 +510,9 @@ if desktop.conf.MEMORY_PROFILER.get():
   MEMORY_PROFILER = hpy()
   MEMORY_PROFILER.setrelheap()
 
+# Instrumentation
+if desktop.conf.INSTRUMENTATION.get():
+  gc.set_debug(gc.DEBUG_UNCOLLECTABLE | gc.DEBUG_OBJECTS)
 
 if not desktop.conf.DATABASE_LOGGING.get():
   def disable_database_logging():
@@ -496,3 +522,13 @@ if not desktop.conf.DATABASE_LOGGING.get():
     BaseDatabaseWrapper.make_debug_cursor = lambda self, cursor: CursorWrapper(cursor, self)
 
   disable_database_logging()
+
+############################################################
+# Searching saved documents in Oracle returns following error:
+#   DatabaseError: ORA-06502: PL/SQL: numeric or value error: character string buffer too small
+# This is caused by DBMS_LOB.SUBSTR(%s, 4000) in Django framework django/db/backends/oracle/base.py
+# Django has a ticket for this issue but unfixed: https://code.djangoproject.com/ticket/11580.
+# Buffer size 4000 limit the length of field equals or less than 2000 characters.
+#
+# For performance reasons and to avoid searching in huge fields, we also truncate to a max length
+DOCUMENT2_SEARCH_MAX_LENGTH = 2000

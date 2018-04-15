@@ -34,7 +34,8 @@ import pam
 
 import django.contrib.auth.backends
 from django.contrib.auth.models import User
-from django.core.exceptions import ImproperlyConfigured
+from django.core.exceptions import ImproperlyConfigured, PermissionDenied
+from django.forms import ValidationError
 from django.utils.importlib import import_module
 
 from django_auth_ldap.backend import LDAPBackend
@@ -45,6 +46,7 @@ from desktop import metrics
 from liboauth.metrics import oauth_authentication_time
 
 from useradmin import ldap_access
+from useradmin.forms import validate_username
 from useradmin.models import get_profile, get_default_user_group, UserProfile
 from useradmin.views import import_ldap_users
 
@@ -115,21 +117,21 @@ def find_user(username):
     user = None
   return user
 
-def create_user(username, password):
+def create_user(username, password, is_superuser=True):
   LOG.info("Materializing user %s in the database" % username)
   user = User(username=username)
   if password is None:
     user.set_unusable_password()
   else:
     user.set_password(password)
-  user.is_superuser = True
+  user.is_superuser = is_superuser
   user.save()
   return user
 
-def find_or_create_user(username, password=None):
+def find_or_create_user(username, password=None, is_superuser=True):
   user = find_user(username)
   if user is None:
-    user = create_user(username, password)
+    user = create_user(username, password, is_superuser)
   return user
 
 def ensure_has_a_group(user):
@@ -214,6 +216,31 @@ class AllowFirstUserDjangoBackend(django.contrib.auth.backends.ModelBackend):
     return User.objects.count() == 0
 
 
+class ImpersonationBackend(django.contrib.auth.backends.ModelBackend):
+  """
+  Authenticate with a proxy user username/password but then login as another user.
+  Does not support a multiple backends setup.
+  """
+  def authenticate(self, username=None, password=None, login_as=None):
+    if not login_as:
+      return
+
+    authenticated = super(ImpersonationBackend, self).authenticate(username, password)
+
+    if not authenticated:
+      raise PermissionDenied()
+
+    user = find_or_create_user(login_as, password=None, is_superuser=False)
+    ensure_has_a_group(user)
+
+    return rewrite_user(user)
+
+  def get_user(self, user_id):
+    user = super(ImpersonationBackend, self).get_user(user_id)
+    user = rewrite_user(user)
+    return user
+
+
 class OAuthBackend(DesktopBackendBase):
   """
   Deprecated, use liboauth.backend.OAuthBackend instead
@@ -269,41 +296,6 @@ class AllowAllBackend(DesktopBackendBase):
     return True
 
 
-class DemoBackend(django.contrib.auth.backends.ModelBackend):
-  """
-  Log automatically users without a session with a new user account.
-  """
-  def authenticate(self, username, password):
-    username = force_username_case(username)
-    user = super(DemoBackend, self).authenticate(username, password)
-
-    if not user:
-      username = self._random_name()
-
-      user = find_or_create_user(username, 'HueRocks')
-
-      user.is_superuser = False
-      user.save()
-
-      ensure_has_a_group(user)
-
-    user = rewrite_user(user)
-
-    return user
-
-  def get_user(self, user_id):
-    user = super(DemoBackend, self).get_user(user_id)
-    user = rewrite_user(user)
-    return user
-
-  def _random_name(self):
-    import string
-    import random
-
-    N = 7
-    return ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(N))
-
-
 class PamBackend(DesktopBackendBase):
   """
   Authentication backend that uses PAM to authenticate logins. The first user to
@@ -357,22 +349,31 @@ class LdapBackend(object):
       def get_or_create_user(self, username, ldap_user):
         username = force_username_case(username)
 
-        if desktop.conf.LDAP.IGNORE_USERNAME_CASE.get():
-          try:
-            return User.objects.get(username__iexact=username), False
-          except User.DoesNotExist:
+        try:
+          validate_username(username)
+
+          if desktop.conf.LDAP.IGNORE_USERNAME_CASE.get():
+            try:
+              return User.objects.get(username__iexact=username), False
+            except User.DoesNotExist:
+              return User.objects.get_or_create(username=username)
+          else:
             return User.objects.get_or_create(username=username)
-        else:
-          return User.objects.get_or_create(username=username)
+        except ValidationError, e:
+          LOG.exception("LDAP username is invalid: %s" % username)
 
     self._backend = _LDAPBackend()
 
   def add_ldap_config(self, ldap_config):
-    if ldap_config.LDAP_URL.get() is None:
+    ldap_url = ldap_config.LDAP_URL.get()
+    if ldap_url is None:
       LOG.warn("Could not find LDAP URL required for authentication.")
       return None
     else:
       setattr(self._backend.settings, 'SERVER_URI', ldap_config.LDAP_URL.get())
+
+    if ldap_url.lower().startswith('ldaps') and ldap_config.USE_START_TLS.get():
+      LOG.warn("Cannot configure LDAP with SSL and enable STARTTLS.")
 
     if ldap_config.SEARCH_BIND_AUTHENTICATION.get():
       # New Search/Bind Auth
@@ -453,6 +454,7 @@ class LdapBackend(object):
       if existing_profile.creation_method == str(UserProfile.CreationMethod.EXTERNAL):
         is_super = User.objects.get(**username_filter_kwargs).is_superuser
     elif not desktop.conf.LDAP.CREATE_USERS_ON_LOGIN.get():
+      LOG.warn("Create users when they login with their LDAP credentials is turned off")
       return None
 
     try:

@@ -21,7 +21,9 @@ import sys
 import logging
 
 import aws
-from aws.conf import is_default_configured as is_s3_enabled
+import azure.client
+from azure.conf import is_adls_enabled
+from aws.conf import is_enabled as is_s3_enabled
 
 from desktop.lib.fs import ProxyFS
 from hadoop import cluster
@@ -32,8 +34,8 @@ DEFAULT_SCHEMA = 'hdfs'
 
 FS_GETTERS = {
   "hdfs": cluster.get_hdfs,
-  "s3": aws.get_s3fs if is_s3_enabled() else None,
-  "s3a": aws.get_s3fs if is_s3_enabled() else None
+  "s3a": aws.get_s3fs if is_s3_enabled() else None,
+  "adl": azure.client.get_client if is_adls_enabled() else None
 }
 
 
@@ -64,7 +66,7 @@ def _make_fs(name):
       else:
         logging.warn('Can not get filesystem called "%s" for "%s" schema' % (name, schema))
     except Exception, e:
-      logging.warn(e)
+      logging.error('Failed to get filesystem called "%s" for "%s" schema: %s' % (name, schema, e))
   return ProxyFS(fs_dict, DEFAULT_SCHEMA)
 
 

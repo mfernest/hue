@@ -24,7 +24,7 @@ function UUID() {
   return s4() + s4() + '-' + s4() + '-' + s4() + '-' + s4() + '-' + s4() + s4() + s4();
 }
 
-var Column = function (size, rows) {
+var Column = function (size, rows, vm) {
   var self = this;
 
   self.rowPrototype = Row;
@@ -42,7 +42,7 @@ var Column = function (size, rows) {
   };
   self.addRow = function (row, atBeginning, atIndex) {
     if (typeof row == "undefined" || row == null) {
-      row = new self.rowPrototype([], viewModel); // Hacky but needed when a new row is deleted
+      row = new self.rowPrototype([], vm); // Hacky but needed when a new row is deleted
     }
 
     if (typeof atIndex != "undefined" && atIndex != null) {
@@ -58,6 +58,70 @@ var Column = function (size, rows) {
     }
     return row;
   };
+
+  self.moveLeft = function (idx) {
+    vm.columns().move(idx, (idx > 0 ? idx - 1 : 0));
+    vm.columns.valueHasMutated();
+  }
+
+  self.moveRight = function (idx) {
+    vm.columns().move(idx, (idx == vm.columns().length ? 0 : idx + 1));
+    vm.columns.valueHasMutated();
+  }
+
+  self.shrinkColumn = function () {
+    if (self.size() > 1) {
+      self.size(self.size() - 1);
+      vm.columns().forEach(function (col) {
+        if (col.id() !== self.id()) {
+          col.size(col.size() + 1);
+        }
+      });
+    }
+  }
+
+  self.expandColumn = function () {
+    if (self.size() < 12) {
+      self.size(self.size() + 1);
+      vm.columns().forEach(function (col) {
+        if (col.id() !== self.id()) {
+          col.size(col.size() - 1);
+        }
+      });
+    }
+  }
+
+  self.addColumn = function (toTheRight) {
+    var col = new Column(0, [], vm);
+    if (toTheRight) {
+      vm.columns.push(col);
+    }
+    else {
+      vm.columns.unshift(col);
+    }
+    col.expandColumn();
+    col.expandColumn(); // Twice
+  }
+
+  self.addColumnRight = function () {
+    self.addColumn(true);
+  }
+
+  self.addColumnLeft = function () {
+    self.addColumn();
+  }
+
+  self.removeColumn = function () {
+    vm.columns().forEach(function (col) {
+      if (col.id() !== self.id()) {
+        self.rows().forEach(function (row) {
+          col.rows.push(row);
+        });
+        col.size(col.size() + self.size());
+      }
+    });
+    vm.columns.remove(self);
+  }
 }
 
 var Row = function (widgets, vm, columns) {
@@ -69,7 +133,7 @@ var Row = function (widgets, vm, columns) {
   self.columns = ko.observableArray(columns ? columns : []);
   self.columns.subscribe(function (val) {
     self.columns().forEach(function (col) {
-      col.percWidth((100 - self.columns().length * 0.5) / self.columns().length);
+      col.percWidth(Math.max(3, (100 - self.columns().length * hueUtils.bootstrapRatios.margin()) / self.columns().length));
     });
   });
 
@@ -94,7 +158,7 @@ var Row = function (widgets, vm, columns) {
   self.addColumn = function (column, atBeginning) {
     if (typeof column == "undefined" || column == null) {
       var _size = Math.max(1, Math.floor(12 / (self.columns().length + 1)));
-      column = new self.columnPrototype(_size, []); // Hacky but needed when a new row is deleted
+      column = new self.columnPrototype(_size, [], vm); // Hacky but needed when a new row is deleted
       self.columns().forEach(function (col) {
         col.size(_size);
       });
@@ -165,13 +229,14 @@ var Widget = function (params) {
   }
 
   self.size = ko.observable(params.size).extend({ numeric: 0 });
+  self.gridsterHeight = ko.observable(params.gridsterHeight).extend({ numeric: 0 });
 
   self.name = ko.observable(params.name);
   self.id = ko.observable(params.id);
   self.widgetType = ko.observable(typeof params.widgetType != "undefined" && params.widgetType != null ? params.widgetType : "empty-widget");
   self.properties = ko.observable(typeof params.properties != "undefined" && params.properties != null ? params.properties : {});
   self.offset = ko.observable(typeof params.offset != "undefined" && params.offset != null ? params.offset : 0).extend({ numeric: 0 });
-  self.isLoading = ko.observable(typeof params.loading != "undefined" && params.loading != null ? params.loading : false);
+  self.isLoading = ko.observable(typeof params.isLoading != "undefined" && params.isLoading != null ? params.isLoading : false);
 
   self.klass = ko.computed(function () {
     return "card card-widget span" + self.size() + (self.offset() * 1 > 0 ? " offset" + self.offset() : "");
@@ -264,7 +329,7 @@ function setLayout(colSizes, vm) {
     size: -1
   };
   $(colSizes).each(function (cnt, size) {
-    _cols.push(new Column(size, []));
+    _cols.push(new Column(size, [], vm));
     if (size > _highestCol.size) {
       _highestCol.idx = cnt;
       _highestCol.size = size;
@@ -282,10 +347,11 @@ function setLayout(colSizes, vm) {
 
   vm.columns(_cols);
 
+  huePubSub.publish('dashboard.set.layout');
   $(document).trigger("setLayout");
 }
 
-function ChangeTracker(objectToTrack, ko) {
+function ChangeTracker(objectToTrack, ko, mappingOptions) {
   var hashFunction = typeof ko.mapping !== 'undefined' ? ko.mapping.toJSON : ko.toJSON;
   var lastCleanState = ko.observable(hashFunction(objectToTrack));
 
@@ -294,6 +360,10 @@ function ChangeTracker(objectToTrack, ko) {
       "isDirty"
     ]
   };
+
+  if (mappingOptions && mappingOptions.ignore) {
+    MAPPING.ignore = MAPPING.ignore.concat(mappingOptions.ignore);
+  }
 
   var result = {
     somethingHasChanged: ko.dependentObservable(function () {

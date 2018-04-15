@@ -50,7 +50,7 @@ nv.models.growingMultiBarChart = function() {
     , state = { stacked: false }
     , defaultState = null
     , noData = "No Data Available."
-    , dispatch = d3.dispatch('tooltipShow', 'tooltipHide', 'stateChange', 'changeState')
+    , dispatch = d3v3.dispatch('tooltipShow', 'tooltipHide', 'stateChange', 'changeState')
     , controlWidth = function() { return showControls ? 180 : 0 }
     , transitionDuration = 250
     , selectBars = null
@@ -69,7 +69,7 @@ nv.models.growingMultiBarChart = function() {
     ;
   yAxis
     .orient((rightAlignYAxis) ? 'right' : 'left')
-    .tickFormat(d3.format(',.1f'))
+    .tickFormat(d3v3.format(',.1f'))
     ;
 
   controls.updateState(false);
@@ -85,7 +85,7 @@ nv.models.growingMultiBarChart = function() {
         top = e.pos[1] + ( offsetElement.offsetTop || 0),
         x = xAxis.tickFormat()(multibar.x()(e.point, e.pointIndex)),
         y = yAxis.tickFormat()(multibar.y()(e.point, e.pointIndex)),
-        content = tooltip(e.series.key, x, y, e, chart);
+        content = tooltip(e.point.seriesKey, x, y, e, chart);
 
     nv.tooltip.show([left, top], content, e.value < 0 ? 'n' : 's', null, offsetElement);
   };
@@ -95,7 +95,7 @@ nv.models.growingMultiBarChart = function() {
 
   function chart(selection) {
     selection.each(function(data) {
-      var container = d3.select(this),
+      var container = d3v3.select(this),
           that = this;
 
       var availableWidth = (width  || parseInt(container.style('width')) || 960)
@@ -180,17 +180,23 @@ nv.models.growingMultiBarChart = function() {
 
         if (multibar.barColor())
           data.forEach(function(series,i) {
-            series.color = d3.rgb('#ccc').darker(i * 1.5).toString();
+            series.color = d3v3.rgb('#ccc').darker(i * 1.5).toString();
           })
 
         g.select('.nv-legendWrap')
             .datum(data)
             .call(legend);
 
-        if ( margin.top != legend.height()) {
-          margin.top = legend.height();
-          availableHeight = (height || parseInt(container.style('height')) || 400)
-                             - margin.top - margin.bottom;
+        if (legend.height() > 50) {
+          g.select('.nv-legendWrap').style('visibility', 'hidden');
+        }
+        else {
+          g.select('.nv-legendWrap').style('visibility', 'visible');
+          if (margin.top != legend.height()) {
+            margin.top = legend.height();
+            availableHeight = (height || parseInt(container.style('height')) || 400)
+              - margin.top - margin.bottom;
+          }
         }
 
         g.select('.nv-legendWrap')
@@ -281,7 +287,7 @@ nv.models.growingMultiBarChart = function() {
                     return  getTranslate(0, (j % 2 == 0 ? staggerUp : staggerDown));
                   });
 
-              var totalInBetweenTicks = d3.selectAll(".nv-x.nv-axis .nv-wrap g g text")[0].length;
+              var totalInBetweenTicks = d3v3.selectAll(".nv-x.nv-axis .nv-wrap g g text")[0].length;
               g.selectAll(".nv-x.nv-axis .nv-axisMaxMin text")
                 .attr("transform", function(d,i) {
                     return getTranslate(0, (i === 0 || totalInBetweenTicks % 2 !== 0) ? staggerDown : staggerUp);
@@ -420,7 +426,7 @@ nv.models.growingMultiBarChart = function() {
   chart.xAxis = xAxis;
   chart.yAxis = yAxis;
 
-  d3.rebind(chart, multibar, 'x', 'y', 'xDomain', 'yDomain', 'xRange', 'yRange', 'forceX', 'forceY', 'clipEdge',
+  d3v3.rebind(chart, multibar, 'x', 'y', 'xDomain', 'yDomain', 'xRange', 'yRange', 'forceX', 'forceY', 'clipEdge',
    'id', 'stacked', 'stackOffset', 'delay', 'barColor','groupSpacing');
 
   chart.options = nv.utils.optionsFunc.bind(chart);

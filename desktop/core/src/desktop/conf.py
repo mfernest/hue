@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+## -*- coding: utf-8 -*-
 # Licensed to Cloudera, Inc. under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -16,21 +17,37 @@
 # limitations under the License.
 
 import datetime
+import glob
 import logging
 import os
 import socket
 import stat
 
+try:
+  from collections import OrderedDict
+except ImportError:
+  from ordereddict import OrderedDict # Python 2.6
+
+from django.db import connection
 from django.utils.translation import ugettext_lazy as _
 
+from metadata.metadata_sites import get_navigator_audit_log_dir, get_navigator_audit_max_file_size
+
+from desktop import appmanager
 from desktop.redaction.engine import parse_redaction_policy_from_file
 from desktop.lib.conf import Config, ConfigSection, UnspecifiedConfigSection,\
                              coerce_bool, coerce_csv, coerce_json_dict,\
                              validate_path, list_of_compiled_res, coerce_str_lowercase, \
-                             coerce_password_from_script
+                             coerce_password_from_script, coerce_string
 from desktop.lib.i18n import force_unicode
 from desktop.lib.paths import get_desktop_root
 
+LOG = logging.getLogger(__name__)
+
+
+def is_oozie_enabled():
+  """Oozie needs to be available as it is the backend."""
+  return len([app for app in appmanager.DESKTOP_MODULES if app.name == 'oozie']) > 0 and is_hue4()
 
 def coerce_database(database):
   if database == 'mysql':
@@ -50,7 +67,7 @@ def coerce_port(port):
     port = int(port)
     if port == 0:
       port = ''
-  except ValueError, e:
+  except ValueError:
     port = ''
   return port
 
@@ -64,6 +81,28 @@ def coerce_file(path):
 def coerce_timedelta(value):
   return datetime.timedelta(seconds=int(value))
 
+def get_dn(fqdn=None):
+  """This function returns fqdn(if possible)"""
+  val = []
+  LOG = logging.getLogger(__name__)
+  try:
+    if fqdn is None:
+      fqdn = socket.getfqdn()
+
+    if '.' in fqdn:
+      tups = fqdn.split('.')
+      if len(tups) > 2:
+        val.append(".%s" % ('.'.join(tups[-2:])))
+      else:
+        LOG.warning("allowed_hosts value to '*'. It is a security risk")
+        val.append('*')
+    else:
+      LOG.warning("allowed_hosts value to '*'. It is a security risk")
+      val.append('*')
+  except:
+    LOG.warning("allowed_hosts value to '*'. It is a security risk")
+    val.append('*')
+  return val
 
 def coerce_positive_integer(integer):
   integer = int(integer)
@@ -73,9 +112,39 @@ def coerce_positive_integer(integer):
 
   return integer
 
+def is_lb_enabled():
+  """Check for Hue Load Balancer is available"""
+  return bool(HUE_LOAD_BALANCER.get())
+
+def coerce_zero_or_positive_integer(integer):
+  integer = int(integer)
+
+  if integer < 0:
+    raise Exception('integer is negative')
+
+  return integer
+
 def is_https_enabled():
   """Hue is configured for HTTPS."""
   return bool(SSL_CERTIFICATE.get() and SSL_PRIVATE_KEY.get())
+
+USE_CHERRYPY_SERVER = Config(
+  key="use_cherrypy_server",
+  help=_("If set to true, CherryPy will be used. Otherwise, Gunicorn will be used as the webserver."),
+  type=coerce_bool,
+  default=True)
+
+GUNICORN_WORKER_CLASS = Config(
+  key="gunicorn_work_class",
+  help=_("Gunicorn work class: gevent or evenlet, gthread or sync."),
+  type=str,
+  default="eventlet")
+
+GUNICORN_NUMBER_OF_WORKERS = Config(
+  key="gunicorn_number_of_workers",
+  help=_("The number of Gunicorn worker processes. If not specified, it uses: (number of CPU * 2) + 1."),
+  type=int,
+  default=None)
 
 HTTP_HOST = Config(
   key="http_host",
@@ -95,6 +164,13 @@ HTTP_ALLOWED_METHODS = Config(
   type=coerce_csv,
   private=True,
   default=['OPTIONS', 'GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'CONNECT'])
+
+HUE_LOAD_BALANCER = Config(
+  key="hue_load_balancer",
+  help=_("A comma-separated list of available Hue load balancers."),
+  type=coerce_csv,
+  default=[]
+)
 
 X_FRAME_OPTIONS = Config(
   key="http_x_frame_options",
@@ -193,11 +269,12 @@ SECURE_CONTENT_SECURITY_POLICY = Config(
   key="secure_content_security_policy",
   help=_('X-Content-Type-Options: nosniff This is a HTTP response header feature that helps prevent attacks based on MIME-type confusion.'),
   type=str,
-  default="script-src 'self' 'unsafe-inline' 'unsafe-eval' *.google-analytics.com *.doubleclick.net *.mathjax.org data:;"+
-          "img-src 'self' *.google-analytics.com *.doubleclick.net data:;"+
-          "style-src 'self' 'unsafe-inline';"+
+  default="script-src 'self' 'unsafe-inline' 'unsafe-eval' *.google-analytics.com *.doubleclick.net data:;"+
+          "img-src 'self' *.google-analytics.com *.doubleclick.net http://*.tile.osm.org *.tile.osm.org *.gstatic.com data:;"+
+          "style-src 'self' 'unsafe-inline' fonts.googleapis.com;"+
           "connect-src 'self';"+
-          "child-src 'none';"+
+          "frame-src *;"+
+          "child-src 'self' data: *.vimeo.com;"+
           "object-src 'none'")
 
 SECURE_SSL_REDIRECT = Config(
@@ -293,7 +370,7 @@ CHERRYPY_SERVER_THREADS = Config(
   key="cherrypy_server_threads",
   help=_("Number of threads used by the CherryPy web server."),
   type=int,
-  default=40)
+  default=50)
 
 SECRET_KEY = Config(
   key="secret_key",
@@ -322,15 +399,26 @@ COLLECT_USAGE = Config(
 
 LEAFLET_TILE_LAYER = Config(
   key="leaflet_tile_layer",
-  help=_("Tile layer server URL for the Leaflet map charts. Read more on http://leafletjs.com/reference.html#tilelayer"),
-  type=coerce_str_lowercase,
+  help=_("Tile layer server URL for the Leaflet map charts. Read more on http://leafletjs.com/reference.html#tilelayer. Make sure you add the tile domain to the img-src section of the 'secure_content_security_policy' configuration parameter as well."),
+  type=str,
   default="http://{s}.tile.osm.org/{z}/{x}/{y}.png")
 
 LEAFLET_TILE_LAYER_ATTRIBUTION = Config(
   key="leaflet_tile_layer_attribution",
   help=_("The copyright message for the specified Leaflet maps Tile Layer"),
-  type=coerce_str_lowercase,
   default='&copy; <a href="http://osm.org/copyright">OpenStreetMap</a> contributors')
+
+LEAFLET_MAP_OPTIONS = Config(
+  key="leaflet_map_options",
+  help=_("All the map options, accordingly to http://leafletjs.com/reference-0.7.7.html#map-options. To change CRS, just use the name, ie. 'EPSG4326'"),
+  type=coerce_json_dict,
+  default="{}")
+
+LEAFLET_TILE_LAYER_OPTIONS = Config(
+  key="leaflet_tile_layer_options",
+  help=_("All the tile layer options, accordingly to http://leafletjs.com/reference-0.7.7.html#tilelayer"),
+  type=coerce_json_dict,
+  default="{}")
 
 POLL_ENABLED = Config(
   key="poll_enabled",
@@ -359,7 +447,7 @@ USE_X_FORWARDED_HOST = Config(
   key="use_x_forwarded_host",
   help=_("Enable X-Forwarded-Host header if the load balancer requires it."),
   type=coerce_bool,
-  default=False)
+  dynamic_default=is_lb_enabled)
 
 SECURE_PROXY_SSL_HEADER = Config(
   key="secure_proxy_ssl_header",
@@ -373,6 +461,12 @@ APP_BLACKLIST = Config(
   type=coerce_csv,
   help=_('Comma separated list of apps to not load at server startup.')
 )
+
+CLUSTER_ID = Config(
+  key="cluster_id",
+  help=_("Id of the cluster where Hue is located."),
+  private=False,
+  default='default')
 
 DEMO_ENABLED = Config( # Internal and Temporary
   key="demo_enabled",
@@ -389,10 +483,53 @@ LOG_REDACTION_FILE = Config(
 
 ALLOWED_HOSTS = Config(
   key='allowed_hosts',
+  # dynamic_default=get_dn, # Currently off as pretty disruptive
   default=['*'],
   type=coerce_csv,
   help=_('Comma separated list of strings representing the host/domain names that the Hue server can serve.')
 )
+
+REST_CONN_TIMEOUT = Config(
+  key='rest_conn_timeout',
+  default=120,
+  type=int,
+  help=_('Timeout in seconds for REST calls.'))
+
+VCS = UnspecifiedConfigSection(
+  "vcs",
+  help="One entry for each Version Control",
+  each=ConfigSection(
+    help="""Configuration options for source version control used to list and
+            save files from the editor. Example: Git, SVN""",
+    members=dict(
+      REMOTE_URL = Config(
+        key="remote_url",
+        help=_("Base URL to Interface Remote Server"),
+        default='https://github.com/cloudera/hue/tree/master',
+        type=coerce_string,
+      ),
+      API_URL = Config(
+        key="api_url",
+        help=_("Base URL to Interface API"),
+        default='https://api.github.com',
+        type=coerce_string,
+      ),
+      CLIENT_ID = Config(
+        key="client_id",
+        help=_("The Client ID of the Interface application."),
+        type=coerce_string,
+        default=""
+      ),
+      CLIENT_SECRET = Config(
+        key="client_secret",
+        help=_("The Client Secret of the Interface application."),
+        type=coerce_string,
+        default=""
+      )
+    )
+  )
+)
+
 
 def default_secure_cookie():
   """Enable secure cookies if HTTPS is enabled."""
@@ -537,6 +674,12 @@ DATABASE = ConfigSection(
       type=str,
       default='',
     ),
+    SCHEMA=Config(
+      key='schema',
+      help=_('Database schema, to be used only when public schema is revoked in postgres.'),
+      type=str,
+      default='public',
+    ),
     PASSWORD=Config(
       key='password',
       help=_('Database password.'),
@@ -568,6 +711,12 @@ DATABASE = ConfigSection(
       help=_('Database options to send to the server when connecting.'),
       type=coerce_json_dict,
       dynamic_default=default_database_options
+    ),
+    CONN_MAX_AGE=Config(
+      key='conn_max_age',
+      help=_('The CONN_MAX_AGE parameter controls db connections persistency in seconds.'),
+      type=coerce_zero_or_positive_integer,
+      default=0,
     )
   )
 )
@@ -577,6 +726,13 @@ SESSION = ConfigSection(
   help=_("""Configuration options for specifying the Desktop session.
           For more info, see https://docs.djangoproject.com/en/1.4/topics/http/sessions/"""),
   members=dict(
+    COOKIE_NAME=Config(
+      key='cookie_name',
+      help=_("The name of the cookie to use for sessions."
+            "This can have any value that is not used by the other cookie names in your application."),
+      type=str,
+      default="sessionid",
+    ),
     TTL=Config(
       key='ttl',
       help=_("The cookie containing the users' session ID will expire after this amount of time in seconds."),
@@ -600,6 +756,12 @@ SESSION = ConfigSection(
       help=_("Use session-length cookies. Logs out the user when she closes the browser window."),
       type=coerce_bool,
       default=False
+    ),
+    CONCURRENT_USER_SESSION_LIMIT = Config(
+      key="concurrent_user_session_limit",
+      help=_("If set, limits the number of concurrent user sessions. 1 represents 1 session per user. Default: 0 (unlimited sessions per user)"),
+      type=int,
+      default=0,
     )
   )
 )
@@ -629,15 +791,28 @@ KERBEROS = ConfigSection(
       help=_("Path to keep Kerberos credentials cached."),
       private=True,
       type=str,
-      default="/tmp/hue_krb5_ccache",
+      default="/var/run/hue/hue_krb5_ccache",
     ),
     KINIT_PATH=Config(
       key='kinit_path',
       help=_("Path to Kerberos 'kinit' command."),
       type=str,
       default="kinit", # use PATH!
-    )
+    ),
+    MUTUAL_AUTHENTICATION=Config(
+      key='mutual_authentication',
+      help=_('Mutual authentication from the server, attaches HTTP GSSAPI/Kerberos Authentication to the given Request object'),
+      type=str,
+      default="OPTIONAL",
+    ),
   )
+)
+
+SASL_MAX_BUFFER = Config(
+  key="sasl_max_buffer",
+  help=_("This property specifies the maximum size of the receive buffer in bytes in thrift sasl communication."),
+  default=2*1024*1024,  # 2 MB
+  type=int
 )
 
 # See python's documentation for time.tzset for valid values.
@@ -693,9 +868,12 @@ CUSTOM = ConfigSection(
                    help=_("The login splash HTML code. This code will be placed in the login page, "
                         "useful for security warning messages.")),
     CACHEABLE_TTL=Config("cacheable_ttl",
-                   default=86400000,
+                   default=10 * 24 * 60 * 60 * 1000,
                    type=int,
                    help=_("The cache TTL in milliseconds for the assist/autocomplete/etc calls. Set to 0 it disables the cache.")),
+    LOGO_SVG=Config("logo_svg",
+                   default="",
+                   help=_("SVG code to replace the default Hue logo in the top bar and sign in screen")),
 ))
 
 AUTH = ConfigSection(
@@ -773,7 +951,8 @@ AUTH = ConfigSection(
     ),
     LOGIN_COOLOFF_TIME = Config(
       key="login_cooloff_time",
-      help=_("If set, defines period of inactivity in seconds after which failed logins will be forgotten"),
+      help=_("If set, defines period of inactivity in hours after which failed logins will be forgotten."
+             "A value of 0 or None will disable this check. Default: None."),
       type=coerce_timedelta,
       default=None,
     ),
@@ -797,6 +976,18 @@ AUTH = ConfigSection(
       type=coerce_bool,
       default=False,
     ),
+    BEHIND_REVERSE_PROXY = Config(
+      key="behind_reverse_proxy",
+      help=_("If True, it will look for the IP address from the header defined at reverse_proxy_header."),
+      type=coerce_bool,
+      dynamic_default=is_lb_enabled,
+    ),
+    REVERSE_PROXY_HEADER = Config(
+      key="reverse_proxy_header",
+      help=_("If behind_reverse_proxy is True, it will look for the IP address from this header. Default: HTTP_X_FORWARDED_FOR"),
+      type=str,
+      default="HTTP_X_FORWARDED_FOR",
+    )
 ))
 
 
@@ -811,7 +1002,7 @@ LDAP = ConfigSection(
     SYNC_GROUPS_ON_LOGIN = Config("sync_groups_on_login",
       help=_("Synchronize a users groups when they login."),
       type=coerce_bool,
-      default=False),
+      default=True),
     IGNORE_USERNAME_CASE = Config("ignore_username_case",
       help=_("Ignore the case of usernames when searching for existing users in Hue."),
       type=coerce_bool,
@@ -850,7 +1041,6 @@ LDAP = ConfigSection(
       type=int,
       help=_("Possible values for trace_level are 0 for no logging, 1 for only logging the method calls with arguments,"
              "2 for logging the method calls with arguments and the complete results and 9 for also logging the traceback of method calls.")),
-
     LDAP_SERVERS = UnspecifiedConfigSection(
       key="ldap_servers",
       help=_("LDAP server record."),
@@ -895,6 +1085,12 @@ LDAP = ConfigSection(
                                     help=_("Whether or not to follow referrals."),
                                     type=coerce_bool,
                                     default=False),
+          TEST_LDAP_USER=Config("test_ldap_user",
+                           default=None,
+                           help=_("The test user name to use for LDAP search.")),
+          TEST_LDAP_GROUP=Config("test_ldap_group",
+                            default=None,
+                            help=_("The test group name to use for LDAP search.")),
 
           DEBUG = Config("debug",
             type=coerce_bool,
@@ -978,6 +1174,12 @@ LDAP = ConfigSection(
                    default=True,
                    type=coerce_bool,
                    help=_("Use search bind authentication.")),
+    TEST_LDAP_USER=Config("test_ldap_user",
+                   default=None,
+                   help=_("The test user name to use for LDAP search.")),
+    TEST_LDAP_GROUP=Config("test_ldap_group",
+                   default=None,
+                   help=_("The test group name to use for LDAP search.")),
 
     USERS = ConfigSection(
       key="users",
@@ -1108,6 +1310,18 @@ DJANGO_DEBUG_MODE = Config(
   default=True
 )
 
+DEV = Config("dev",
+   type=coerce_bool,
+   default=False,
+   help=_("Enable development mode, where notably static files are not cached.")
+)
+
+DEV_EMBEDDED = Config("dev_embedded",
+   type=coerce_bool,
+   default=False,
+   help=_("Enable embedded development mode, where the page will be rendered inside a container div element.")
+)
+
 HTTP_500_DEBUG_MODE = Config(
   key='http_500_debug_mode',
   help=_('Enable or disable debugging information in the 500 internal server error response. '
@@ -1123,18 +1337,29 @@ MEMORY_PROFILER = Config(
   type=coerce_bool,
   default=False)
 
+def get_instrumentation_default():
+  """If django_debug_mode is True, this is automatically enabled"""
+  return DJANGO_DEBUG_MODE.get()
+
+INSTRUMENTATION = Config(
+  key='instrumentation',
+  help=_('Enable or disable instrumentation. If django_debug_mode is True, this is automatically enabled.'),
+  type=coerce_bool,
+  dynamic_default=get_instrumentation_default)
+
+
 AUDIT_EVENT_LOG_DIR = Config(
   key="audit_event_log_dir",
   help=_("The directory where to store the auditing logs. Auditing is disable if the value is empty."),
   type=str,
-  default=""
+  dynamic_default=get_navigator_audit_log_dir
 )
 
 AUDIT_LOG_MAX_FILE_SIZE = Config(
   key="audit_log_max_file_size",
   help=_("Size in KB/MB/GB for audit log to rollover."),
   type=str,
-  default="100MB"
+  dynamic_default=get_navigator_audit_max_file_size
 )
 
 DJANGO_SERVER_EMAIL = Config(
@@ -1150,18 +1375,32 @@ DJANGO_EMAIL_BACKEND = Config(
   default="django.core.mail.backends.smtp.EmailBackend"
 )
 
-USE_NEW_AUTOCOMPLETER = Config( # To remove when it's working properly, not supported by old editor
+ENABLE_SQL_SYNTAX_CHECK = Config(
+  key='enable_sql_syntax_check',
+  default=True,
+  type=coerce_bool,
+  help=_('Choose whether to enable SQL syntax check or not.')
+)
+
+IS_EMBEDDED = Config(
+  key='is_embedded',
+  default=False,
+  type=coerce_bool,
+  help=_('Choose whether Hue is embedded or not.')
+)
+
+USE_NEW_AUTOCOMPLETER = Config( # This now refers to the new autocomplete dropdown
   key='use_new_autocompleter',
   default=True,
   type=coerce_bool,
-  help=_('Enable the new editor SQL autocompleter')
+  help=_('Enable the improved editor autocomplete dropdown.')
 )
 
 EDITOR_AUTOCOMPLETE_TIMEOUT = Config(
   key='editor_autocomplete_timeout',
   type=int,
-  default=3000,
-  help=_('Timeout value in ms for autocomplete of columns, tables, values etc. 0 = disabled')
+  default=30000,
+  help=_('Timeout value in ms for autocomplete of columns, tables, values etc. 0 = disabled.')
 )
 
 USE_NEW_EDITOR = Config( # To remove in Hue 4
@@ -1171,12 +1410,99 @@ USE_NEW_EDITOR = Config( # To remove in Hue 4
   help=_('Choose whether to show the new SQL editor.')
 )
 
+ENABLE_DOWNLOAD = Config(
+  key="enable_download",
+  help=_('Global setting to allow or disable end user downloads in all Hue (e.g. Query result in editors and dashboard, file in File Browser browsers...).'),
+  type=coerce_bool,
+  default=True)
+
+def is_hue4():
+  """Hue is configured to show version 4."""
+  return IS_HUE_4.get()
+
+
+USE_NEW_SIDE_PANELS = Config( # To remove in Hue 4
+  key='use_new_side_panels',
+  dynamic_default=is_hue4,
+  type=coerce_bool,
+  help=_('Choose whether to show extended left and right panels.')
+)
+
 USE_DEFAULT_CONFIGURATION = Config(
   key='use_default_configuration',
   default=False,
   type=coerce_bool,
   help=_('Enable saved default configurations for Hive, Impala, Spark, and Oozie.')
 )
+
+USE_NEW_CHARTS = Config(
+  key='use_new_charts',
+  default=False,
+  type=coerce_bool,
+  help=_('Choose whether to use new charting library across the whole Hue.')
+)
+
+
+IS_HUE_4 = Config( # To remove in Hue 5
+  key='is_hue_4',
+  default=True,
+  type=coerce_bool,
+  help=_('Choose whether to enable the new Hue 4 interface.')
+)
+
+DISABLE_HUE_3 = Config( # To remove in Hue 5
+  key='disable_hue_3',
+  default=True,
+  type=coerce_bool,
+  help=_('Choose whether to still allow users to enable the old Hue 3 interface.')
+)
+
+
+def get_clusters():
+  if CLUSTERS.get():
+    cluster_config = CLUSTERS.get()
+    clusters = OrderedDict([
+      (i, {
+        'name': i,
+        'type': cluster_config[i].TYPE.get(),
+        'interfaces': [{'name': i, 'type': cluster_config[i].TYPE.get(), 'interface': interface} for interface in cluster_config[i].INTERFACES.get()]
+      }) for i in cluster_config]
+    )
+  else:
+    if IS_EMBEDDED.get():
+      clusters = OrderedDict([('Default', {'name': 'Analytic DB', 'type': 'analyticdb', 'interfaces': []})])
+    else:
+      clusters = OrderedDict([('Default', {'name': 'Default', 'type': 'ini', 'interfaces': []})])
+
+  if 'Data Eng' in clusters:
+    clusters['Data Eng']['interfaces'].append({'name': 'Data Eng', 'type': 'dataeng', 'interface': 'c1'})
+    clusters['Data Eng']['interfaces'].append({'name': 'Data Eng', 'type': 'dataeng', 'interface': 'c2'})
+
+  return clusters
+
+
+CLUSTERS = UnspecifiedConfigSection(
+  "clusters",
+  help="One entry for each additional cluster Hue can interact with.",
+  each=ConfigSection(
+    help=_("Name of the cluster to show to the user."),
+    members=dict(
+      TYPE=Config(
+          "type",
+          help=_("Type of cluster, e.g. local ini, CM API, Dataeng, Arcus, BigQuery, Presto."),
+          default='local',
+          type=str,
+      ),
+      INTERFACES=Config(
+          "interfaces",
+          help=_("List of cluster instances of the cluster (optional)."),
+          default=[],
+          type=coerce_csv,
+      ),
+    )
+  )
+)
+
 
 def validate_ldap(user, config):
   res = []
@@ -1215,42 +1541,60 @@ def validate_ldap(user, config):
 
   return res
 
-def validate_database():
-
-  from django.db import connection
-
-  LOG = logging.getLogger(__name__)
+def validate_database(user):
   res = []
+  cursor = connection.cursor()
 
   if connection.vendor == 'mysql':
-      cursor = connection.cursor();
+    try:
+      innodb_table_count = cursor.execute('''
+        SELECT *
+        FROM information_schema.tables
+        WHERE table_schema=DATABASE() AND engine = "innodb"''')
 
-      try:
-        innodb_table_count = cursor.execute('''
-            SELECT *
-            FROM information_schema.tables
-            WHERE table_schema=DATABASE() AND engine = "innodb"''')
+      total_table_count = cursor.execute('''
+        SELECT *
+        FROM information_schema.tables
+        WHERE table_schema=DATABASE()''')
 
-        total_table_count = cursor.execute('''
-            SELECT *
-            FROM information_schema.tables
-            WHERE table_schema=DATABASE()''')
+      # Promote InnoDB storage engine
+      if innodb_table_count != total_table_count:
+        res.append(('PREFERRED_STORAGE_ENGINE', unicode(_('''We recommend MySQL InnoDB engine over
+                                                      MyISAM which does not support transactions.'''))))
 
-        # Promote InnoDB storage engine
-        if innodb_table_count != total_table_count:
-          res.append(('PREFERRED_STORAGE_ENGINE', unicode(_('''We recommend MySQL InnoDB engine over
-                                                        MyISAM which does not support transactions.'''))))
-
-        if innodb_table_count != 0 and innodb_table_count != total_table_count:
-          res.append(('MYSQL_STORAGE_ENGINE', unicode(_('''All tables in the database must be of the same
-                                                        storage engine type (preferably InnoDB).'''))))
-      except Exception, ex:
-        LOG.exception("Error in config validation of MYSQL_STORAGE_ENGINE: %s", ex)
+      if innodb_table_count != 0 and innodb_table_count != total_table_count:
+        res.append(('MYSQL_STORAGE_ENGINE', unicode(_('''All tables in the database must be of the same
+                                                      storage engine type (preferably InnoDB).'''))))
+    except Exception, ex:
+      LOG.exception("Error in config validation of MYSQL_STORAGE_ENGINE: %s", ex)
   elif 'sqlite' in connection.vendor:
     res.append(('SQLITE_NOT_FOR_PRODUCTION_USE', unicode(_('SQLite is only recommended for development environments. '
         'It might cause the "Database is locked" error. Migrating to MySQL, Oracle or PostgreSQL is strongly recommended.'))))
-  return res
 
+  # Check if south_migrationhisotry table is up to date
+  try:
+    from desktop import appmanager
+
+    cursor.execute('''SELECT * from south_migrationhistory''')
+    migration_history_entries = [(entry[1], entry[2]) for entry in cursor.fetchall()]
+
+    apps = appmanager.get_apps(user)
+    apps.append(appmanager.get_desktop_module('desktop'))
+    missing_migration_entries = []
+    for app in apps:
+      if app.migrations_path:
+        for migration_file_name in glob.iglob(app.migrations_path + '/*.py'):
+          migration_name = os.path.splitext(os.path.basename(migration_file_name))[0]
+          if migration_name != "__init__" and (app.name, migration_name) not in migration_history_entries:
+              missing_migration_entries.append((app.name, migration_name))
+
+    if missing_migration_entries:
+      res.append(('SOUTH_MIGRATION_HISTORY', unicode(_('''south_migrationhistory table seems to be corrupted or incomplete.
+                                                        %s entries are missing in the table: %s''') % (len(missing_migration_entries), missing_migration_entries))))
+  except Exception:
+    LOG.exception("Error in config validation of SOUTH_MIGRATION_HISTORY")
+
+  return res
 
 def config_validator(user):
   """
@@ -1296,7 +1640,26 @@ def config_validator(user):
     res.extend(validate_ldap(user, LDAP))
 
   # Validate MYSQL storage engine of all tables
-  res.extend(validate_database())
+  res.extend(validate_database(user))
+
+  # Validate if oozie email server is active
+  from oozie.views.editor2 import _is_oozie_mail_enabled
+
+  if not _is_oozie_mail_enabled(user):
+    res.append(('OOZIE_EMAIL_SERVER', unicode(_('Email notifications is disabled for Workflows and Jobs as SMTP server is localhost.'))))
+
+  from notebook.models import make_notebook
+  from notebook.api import _save_notebook
+
+  notebook = make_notebook(name='test', editor_type='hive', statement='select "ทดสอบ"', status='ready')
+  notebook_doc = None
+  try:
+    notebook_doc, save_as = _save_notebook(notebook.get_data(), user)
+  except:
+    res.append(('DATABASE_CHARACTER_SET', unicode(_('Character set of <i>search</i> field in <i>desktop_document2</i> table is not UTF-8. </br>'
+                                                    '<b>NOTE:</b> Configure the database for character set AL32UTF8 and national character set UTF8.'))))
+  if notebook_doc:
+    notebook_doc.delete()
 
   return res
 

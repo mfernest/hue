@@ -20,8 +20,8 @@ from django.utils.translation import ugettext as _
 <div id="documentShareModal" class="modal hide fade">
   <!-- ko if: selectedDoc() -->
   <div class="modal-header">
-    <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
-    <h3>${_('Sharing settings')}</h3>
+    <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+    <h2 class="modal-title">${_('Sharing settings')}</h2>
   </div>
   <div class="modal-body">
     <div class="row-fluid">
@@ -57,7 +57,7 @@ from django.utils.translation import ugettext as _
           <a id="documentShareCaret" class="btn dropdown-toggle disabled" data-toggle="dropdown">
             <span class="caret"></span>
           </a>
-          <ul class="dropdown-menu">
+          <ul class="dropdown-menu pull-right">
             <li><a data-bind="click: changeDocumentSharePerm.bind(null, 'read')" href="javascript:void(0)">${ _('Read') }</a></li>
             <li><a data-bind="click: changeDocumentSharePerm.bind(null, 'write')" href="javascript:void(0)">${ _('Read and Modify') }</a></li>
           </ul>

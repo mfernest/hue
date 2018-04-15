@@ -19,7 +19,7 @@
 %>
 
 <%namespace name="comps" file="jobbrowser_components.mako" />
-${ commonheader(_('Task Trackers'), "jobbrowser", user) | n,unicode }
+${ commonheader(_('Task Trackers'), "jobbrowser", user, request) | n,unicode }
 ${ comps.menubar()}
 <div class="container-fluid">
 <div class="row-fluid">
@@ -71,7 +71,7 @@ ${ comps.menubar()}
 </div>
 </div>
 
-<script type="text/javascript" charset="utf-8">
+<script type="text/javascript">
 $(document).ready(function(){
     $(".datatables").dataTable({
         "bPaginate": false,

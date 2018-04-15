@@ -25,7 +25,7 @@
 <%namespace name="layout" file="../navigation-bar.mako" />
 <%namespace name="utils" file="../utils.inc.mako" />
 
-${ commonheader(_("Coordinator Dashboard"), "oozie", user) | n,unicode }
+${ commonheader(_("Coordinator Dashboard"), "oozie", user, request) | n,unicode }
 ${ layout.menubar(section='coordinators', dashboard=True) }
 
 <link rel="stylesheet" href="${ static('oozie/css/coordinator.css') }" type="text/css" />
@@ -99,24 +99,6 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
                 % if has_job_edition_permission(oozie_coordinator, user):
                 <div id="rerun-coord-modal" class="modal hide"></div>
                 <div class="btn-group action-button-group" style="display: block; margin-bottom: 10px">
-                  <button title="${ _('Resume the coordinator') }" id="resume-btn"
-                      data-url="${ url('oozie:manage_oozie_jobs', job_id=oozie_coordinator.id, action='resume') }"
-                      data-confirmation-header="${ _('Are you sure you want to resume this job?') }"
-                      data-confirmation-footer="normal"
-                      class="btn btn-small confirmationModal
-                      % if oozie_coordinator.is_running():
-                      hide
-                      % endif
-                      ">${ _('Resume') }</button>
-                  <button title="${ _('Suspend the coordinator after finishing the current running actions') }" id="suspend-btn"
-                      data-url="${ url('oozie:manage_oozie_jobs', job_id=oozie_coordinator.id, action='suspend') }"
-                      data-confirmation-header="${ _('Are you sure you want to suspend this job?') }"
-                      data-confirmation-footer="normal"
-                      class="btn btn-small confirmationModal
-                      % if not oozie_coordinator.is_running():
-                      hide
-                      % endif
-                      " rel="tooltip" data-placement="right">${ _('Suspend') }</button>
                   <button title="${_('Kill %(coordinator)s') % dict(coordinator=oozie_coordinator.id)}" id="kill-btn"
                       alt="${ _('Are you sure you want to kill coordinator %s?') % oozie_coordinator.id }"
                       href="javascript:void(0)"
@@ -129,8 +111,34 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
                       hide
                       % endif
                       ">${_('Kill')}</button>
+                  <button id="trash-btn-caret" class="btn toolbarBtn dropdown-toggle" data-toggle="dropdown"><span class="caret"></span></button>
+                  <ul class="dropdown-menu">
+                    <li><a title="${ _('Suspend the coordinator after finishing the current running actions') }" id="suspend-btn"
+                      data-url="${ url('oozie:manage_oozie_jobs', job_id=oozie_coordinator.id, action='suspend') }"
+                      data-confirmation-header="${ _('Are you sure you want to suspend this job?') }"
+                      data-confirmation-footer="normal"
+                      href="javascript:void(0)"
+                      class="confirmationModal
+                      % if not oozie_coordinator.is_running():
+                      hide
+                      % endif
+                      " rel="tooltip" data-placement="right">${ _('Suspend') }</a></li>
+                    <li><a title="${ _('Resume the coordinator') }" id="resume-btn"
+                      data-url="${ url('oozie:manage_oozie_jobs', job_id=oozie_coordinator.id, action='resume') }"
+                      data-confirmation-header="${ _('Are you sure you want to resume this job?') }"
+                      data-confirmation-footer="normal"
+                      href="javascript:void(0)"
+                      class="confirmationModal
+                      % if oozie_coordinator.is_running():
+                      hide
+                      % endif
+                      ">${ _('Resume') }</a></li>
+                  </ul
                 </div>
                 % endif
+              </li>
+              <li class="nav-header">${ _('Synchronize') }</li>
+              <li class="white">
                 <div class="btn-group" style="margin-left: 0; margin-bottom: 5px">
                   % if has_job_edition_permission(oozie_coordinator, user):
                   <button title="${ _('Update Coordinator Job properties') }" id="edit-coord-btn"
@@ -138,15 +146,21 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
                      data-message="${ _('Successfully updated Coordinator Job Properties') }"
                      data-confirmation-header="${ _('Update Coordinator Job Properties') }"
                      data-confirmation-footer="update"
+                     href="javascript:void(0)"
                      class="btn btn-small confirmationModal
                      % if not oozie_coordinator.is_running():
                      hide
                      % endif
-                     ">${ _('Edit') }</button>
+                     ">${ _('Coordinator') }</button>
                   % endif
-                  <button title="${ _('Sync Workflow') }" id="sync-wf-btn"
-                     data-sync-url="${ url('oozie:sync_coord_workflow', job_id=oozie_coordinator.id) }"
-                     class="btn btn-small sync-wf-btn">${ _('Sync Workflow') }</button>
+                  <button id="trash-btn-caret" class="btn toolbarBtn dropdown-toggle" data-toggle="dropdown"><span class="caret"></span></button>
+                  <ul class="dropdown-menu">
+                    <li><a title="${ _('Sync Workflow') }" id="sync-wf-btn"
+                      data-sync-url="${ url('oozie:sync_coord_workflow', job_id=oozie_coordinator.id) }"
+                      href="javascript:void(0)"
+                      class="sync-wf-btn"> ${ _('Workflow') }
+                    </a></li>
+                  </ul>
                 </div>
               </li>
               % endif
@@ -207,10 +221,10 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
               </div>
               <div class="clearfix"></div>
 
-              <table class="table table-striped table-condensed margin-top-10">
+              <table class="table table-condensed margin-top-10">
                 <thead>
                 <tr>
-                  <th width="20"><div data-bind="click: selectAll, css: { 'fa-check': allSelected }" class="hueCheckbox fa"></div></th>
+                  <th width="20"><div data-bind="click: selectAll, css: { 'fa-check': allSelected }" class="hue-checkbox fa"></div></th>
                   <th width="200">${ _('Day') }</th>
                   <th>${ _('Warning message') }</th>
                 </tr>
@@ -220,7 +234,7 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
                 <tfoot>
                   <tr data-bind="visible: isLoading()">
                     <td colspan="3" class="left">
-                      <img src="${ static('desktop/art/spinner.gif') }" />
+                      <i class="fa fa-spinner fa-spin"></i>
                     </td>
                   </tr>
                   <tr data-bind="visible: filteredActions().length == 0 && !isLoading()">
@@ -243,7 +257,7 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
 
             <script id="calendarTemplate" type="text/html">
               <tr data-bind="css: { disabled: url == '' }">
-                <td data-bind="click: handleSelect"><div data-bind="css: { 'fa-check': selected }" class="hueCheckbox fa"></div></td>
+                <td data-bind="click: handleSelect"><div data-bind="css: { 'fa-check': selected }" class="hue-checkbox fa"></div></td>
                 <td data-bind="css: { disabled: url == '' }">
                   <a data-bind="attr: {href: url != '' ? url : 'javascript:void(0)', title: url ? '' : '${ _ko('Workflow not available or instantiated yet') }' }, css: { disabled: url == '' }" data-row-selector="true">
                     <span data-bind="text: title, attr: {'class': statusClass, 'id': 'date-' + $index()}"></span>
@@ -264,7 +278,7 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
                 <a class="btn btn-status btn-danger disable-feedback" data-table="actions" data-value="ERROR">${ _('Error') }</a>
               </div>
               <div class="clearfix"></div>
-              <table class="table table-striped table-condensed margin-top-10" cellpadding="0" cellspacing="0">
+              <table class="table table-condensed margin-top-10" cellpadding="0" cellspacing="0">
                 <thead>
                 <tr>
                   <th width="1%">${ _('Number') }</th>
@@ -291,7 +305,7 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
                 <tfoot>
                 <tr data-bind="visible: isLoading()">
                   <td colspan="10" class="left">
-                    <img src="${ static('desktop/art/spinner.gif') }" />
+                    <i class="fa fa-spinner fa-spin"></i>
                   </td>
                 </tr>
                 <tr data-bind="visible: !isLoading() && filteredActions().length == 0">
@@ -397,14 +411,14 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
             </div>
 
             <div class="tab-pane" id="definition" style="margin-bottom: 10px;">
-              <textarea id="definitionEditor">${ oozie_coordinator.definition.decode('utf-8', 'replace') }</textarea>
+              <div id="definitionEditor">${ oozie_coordinator.definition.decode('utf-8', 'replace') }</div>
             </div>
 
             % if oozie_coordinator.has_sla:
             <div class="tab-pane" id="sla" style="padding-left: 20px">
               <div id="yAxisLabel" class="hide">${_('Time since Nominal Time in min')}</div>
               <div id="slaChart"></div>
-              <table id="slaTable" class="table table-striped table-condensed hide">
+              <table id="slaTable" class="table table-condensed hide">
                 <thead>
                   <th>${_('Status')}</th>
                   <th>${_('Nominal Time')}</th>
@@ -449,8 +463,8 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
 
 <div id="confirmation" class="modal hide">
   <div class="modal-header">
-    <a href="#" class="close" data-dismiss="modal">&times;</a>
-    <h3 class="confirmation_header"></h3>
+    <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+    <h2 class="modal-title confirmation_header"></h2>
   </div>
   <div id="update-coord" class="span10">
     ${ utils.render_field_no_popover(update_coord_form['endTime'], show_label=True) }
@@ -478,10 +492,6 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
 <div id="rerun-coord-modal" class="modal hide"></div>
 
 <script src="${ static('oozie/js/dashboard-utils.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/knockout.min.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/codemirror-3.11.js') }"></script>
-<link rel="stylesheet" href="${ static('desktop/ext/css/codemirror.css') }">
-<script src="${ static('desktop/ext/js/codemirror-xml.js') }"></script>
 
 % if oozie_coordinator.has_sla:
 <script src="${ static('oozie/js/sla.utils.js') }" type="text/javascript" charset="utf-8"></script>
@@ -496,7 +506,6 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
 
 <script src="${ static('desktop/js/bootstrap-spinedit.js') }" type="text/javascript" charset="utf-8"></script>
 <script src="${ static('desktop/js/bootstrap-slider.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/js/ko.hue-bindings.js') }" type="text/javascript" charset="utf-8"></script>
 
 <script src="${ static('oozie/js/list-oozie-coordinator.ko.js') }" type="text/javascript" charset="utf-8"></script>
 
@@ -549,21 +558,16 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
     $(".dataTables_filter").hide();
     % endif
 
-    var definitionEditor = $("#definitionEditor")[0];
-
-    var codeMirror = CodeMirror(function(elt) {
-      definitionEditor.parentNode.replaceChild(elt, definitionEditor);
-      }, {
-        value: definitionEditor.value,
+    var editor = ace.edit("definitionEditor");
+    editor.setOptions({
       readOnly: true,
-      lineNumbers: true
+      maxLines: Infinity
     });
+    editor.setTheme($.totalStorage("hue.ace.theme") || "ace/theme/hue");
+    editor.getSession().setMode("ace/mode/xml");
 
     // force refresh on tab change
     $("a[data-toggle='tab']").on("shown", function (e) {
-      if ($(e.target).attr("href") == "#definition") {
-        codeMirror.refresh();
-      }
       % if oozie_coordinator.has_sla:
       if ($(e.target).attr("href") == "#sla") {
         window.setTimeout(function () {
@@ -764,13 +768,11 @@ ${ layout.menubar(section='coordinators', dashboard=True) }
       });
     };
 
-    var $codeMirror = $(".CodeMirror");
     var tabPanelTop = $("#tab-panel").position().top;
     var $logPre = $("#log pre").css("overflow", "auto");
     var $window = $(window);
 
     function resizeTabs() {
-      $codeMirror.height($window.height() - tabPanelTop - 185);
       $logPre.height($window.height() - tabPanelTop - 204);
     }
 

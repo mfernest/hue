@@ -32,22 +32,21 @@ from django.conf import settings
 from django.utils.translation import ugettext as _
 
 from desktop.lib.i18n import force_unicode, smart_str
-from libsentry.conf import is_enabled
 
 from indexer import conf
-from indexer.models import DATE_FIELD_TYPES, TEXT_FIELD_TYPES, INTEGER_FIELD_TYPES,\
-                           DECIMAL_FIELD_TYPES, BOOLEAN_FIELD_TYPES
+from indexer.models import DATE_FIELD_TYPES, TEXT_FIELD_TYPES, INTEGER_FIELD_TYPES, DECIMAL_FIELD_TYPES, BOOLEAN_FIELD_TYPES
 
 
 LOG = logging.getLogger(__name__)
 TIMESTAMP_PATTERN = '\[([\w\d\s\-\/\:\+]*?)\]'
-FIELD_XML_TEMPLATE = '<field name="%(name)s" type="%(type)s" indexed="%(indexed)s" stored="%(stored)s" required="%(required)s" />'
+FIELD_XML_TEMPLATE = '<field name="%(name)s" type="%(type)s" indexed="%(indexed)s" stored="%(stored)s" required="%(required)s" multiValued="%(multiValued)s" />'
 DEFAULT_FIELD = {
   'name': None,
   'type': 'text',
   'indexed': 'true',
   'stored': 'true',
-  'required': 'true'
+  'required': 'false',
+  'multiValued': 'false'
 }
 
 
@@ -59,10 +58,13 @@ def get_config_template_path(solr_cloud_mode):
 
 
 class SchemaXml(object):
+
   def __init__(self, xml):
     self.xml = xml
+    self.unique_key_field = None
 
   def uniqueKeyField(self, unique_key_field):
+    self.unique_key_field = unique_key_field
     self.xml = force_unicode(force_unicode(self.xml).replace(u'<!-- REPLACE UNIQUE KEY -->', force_unicode(unique_key_field)))
 
   def fields(self, fields):
@@ -70,19 +72,22 @@ class SchemaXml(object):
     for field in fields:
       field_dict = DEFAULT_FIELD.copy()
       field_dict.update(field)
+      if self.unique_key_field == field['name']:
+        field_dict['required'] = 'true'
       fields_xml += FIELD_XML_TEMPLATE % field_dict + '\n'
     self.xml = force_unicode(force_unicode(self.xml).replace(u'<!-- REPLACE FIELDS -->', force_unicode(fields_xml)))
 
 
 class SolrConfigXml(object):
+
   def __init__(self, xml):
     self.xml = xml
 
-  def defaultField(self, df):
-    self.xml = force_unicode(force_unicode(self.xml).replace(u'<str name="df">text</str>', u'<str name="df">%s</str>' % force_unicode(df)))
+  def defaultField(self, df=None):
+    self.xml = force_unicode(force_unicode(self.xml).replace(u'<str name="df">text</str>', u'<str name="df">%s</str>' % force_unicode(df) if df is not None else ''))
 
 
-def copy_configs(fields, unique_key_field, df, solr_cloud_mode=True):
+def copy_configs(fields, unique_key_field, df, solr_cloud_mode=True, is_solr_six_or_more=False, is_solr_hdfs_mode=True, is_sentry_protected=False):
   # Create temporary copy of solr configs
   tmp_path = tempfile.mkdtemp()
 
@@ -103,18 +108,27 @@ def copy_configs(fields, unique_key_field, df, solr_cloud_mode=True):
       with open(os.path.join(solr_config_path, 'conf/schema.xml'), 'w') as f:
         f.write(smart_str(schemaxml.xml))
 
-    if df:
-      # Use secure template
-      solrconfig = 'conf/solrconfig.xml%s' % ('.secure' if is_enabled() else '')
+    # Use template depending on type of Solr
+    solr_config_name = 'solrconfig.xml'
 
-      # Get complete solrconfig.xml
-      with open(os.path.join(config_template_path, solrconfig)) as f:
-        solrconfigxml = SolrConfigXml(f.read())
-        solrconfigxml.defaultField(df)
+    if is_solr_six_or_more:
+      if is_solr_hdfs_mode:
+        solr_config_name = 'solrconfig.xml.solr6'
+      else:
+        solr_config_name = 'solrconfig.xml.solr6NonHdfs'
 
-      # Write complete solrconfig.xml to copy
-      with open(os.path.join(solr_config_path, 'conf/solrconfig.xml'), 'w') as f:
-        f.write(smart_str(solrconfigxml.xml))
+    if is_sentry_protected:
+      solr_config_name += '.secure'
+
+    solrconfig = 'conf/%s' % solr_config_name
+
+    # Get complete solrconfig.xml
+    with open(os.path.join(config_template_path, solrconfig)) as f:
+      solrconfigxml = SolrConfigXml(f.read())
+      solrconfigxml.defaultField(df)
+
+    with open(os.path.join(solr_config_path, 'conf/solrconfig.xml'), 'w') as f:
+      f.write(smart_str(solrconfigxml.xml))
     return tmp_path, solr_config_path
   except Exception:
     # Don't leak the tempdir if there was an exception.
@@ -153,10 +167,10 @@ def get_field_types(field_list, iterations=3):
       raise ValueError()
 
   test_fns = [('boolean', test_boolean),
-              ('tint', test_int),
-              ('tlong', int),
-              ('tdouble', float),
-              ('tdate', test_timestamp),
+              ('pint', test_int),
+              ('plong', int),
+              ('pdouble', float),
+              ('pdate', test_timestamp),
               ('string', test_string),
               ('text_general', any)]
   all_field_types = []

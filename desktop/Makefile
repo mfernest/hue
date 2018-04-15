@@ -41,6 +41,7 @@ include $(ROOT)/Makefile.vars.priv
 
 APPS := core \
 	libs/aws \
+	libs/azure \
 	libs/hadoop \
 	libs/indexer \
 	libs/liboauth \
@@ -52,7 +53,8 @@ APPS := core \
 	libs/libsolr \
 	libs/libzookeeper \
 	libs/metadata \
-	libs/notebook
+	libs/notebook \
+	libs/dashboard
 
 .PHONY: default
 default:: hue syncdb

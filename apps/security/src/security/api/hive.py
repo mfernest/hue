@@ -22,6 +22,7 @@ import time
 from django.utils.translation import ugettext as _
 
 from desktop.lib.django_util import JsonResponse
+
 from libsentry.api import get_api
 from libsentry.sentry_site import get_sentry_server_admin_groups
 from hadoop.cluster import get_defaultfs
@@ -61,7 +62,7 @@ def list_sentry_roles_by_group(request):
   result = {'status': -1, 'message': 'Error'}
 
   try:
-    if request.POST['groupName']:
+    if request.POST.get('groupName'):
       groupName = request.POST['groupName']
     else:
       # Admins can see everything, other only the groups they belong too
@@ -232,10 +233,10 @@ def save_privileges(request):
 
     modified_privileges = [privilege for privilege in role['privilegesChanged'] if privilege['status'] == 'modified']
     old_privileges_ids = [privilege['id'] for privilege in modified_privileges]
-    _hive_add_privileges(request.user, role, modified_privileges)
     for privilege in role['originalPrivileges']:
       if privilege['id'] in old_privileges_ids:
         _drop_sentry_privilege(request.user, role, privilege)
+    _hive_add_privileges(request.user, role, modified_privileges)
 
     result['message'] = _('Privileges updated')
     result['status'] = 0
@@ -304,7 +305,7 @@ def list_sentry_privileges_by_authorizable(request):
   result = {'status': -1, 'message': 'Error'}
 
   try:
-    groups = [request.POST['groupName']] if request.POST['groupName'] else None
+    groups = [request.POST['groupName']] if request.POST.get('groupName') else None
     authorizableSet = [json.loads(request.POST['authorizableHierarchy'])]
 
     _privileges = []

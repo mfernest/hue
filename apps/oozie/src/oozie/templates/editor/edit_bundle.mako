@@ -24,7 +24,7 @@
 <%namespace name="properties" file="coordinator_properties.mako" />
 <%namespace name="utils" file="../utils.inc.mako" />
 
-${ commonheader(_("Edit Bundle"), "oozie", user) | n,unicode }
+${ commonheader(_("Edit Bundle"), "oozie", user, request) | n,unicode }
 ${ layout.menubar(section='bundles') }
 
 <style type="text/css">
@@ -43,8 +43,7 @@ ${ layout.menubar(section='bundles') }
   }
 </style>
 
-<script src="${ static('desktop/ext/js/knockout.min.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/routie-0.3.0.min.js') }" type="text/javascript" charset="utf-8"></script>
+<script src="${ static('desktop/js/hue.routie.js') }" type="text/javascript" charset="utf-8"></script>
 
 
 <div class="container-fluid">
@@ -133,7 +132,7 @@ ${ layout.menubar(section='bundles') }
           <a id="backBtn" class="btn disabled">${ _('Back') }</a>
           <a id="nextBtn" class="btn btn-primary disable-feedback">${ _('Next') }</a>
           % if bundle.is_editable(user):
-            <input type="submit" class="btn btn-primary save" style="margin-left: 30px" value="${ _('Save bundle') }"></input>
+            <input type="submit" class="btn btn-primary save" style="margin-left: 30px" value="${ _('Save bundle') }" />
           % endif
         </div>
       </div>
@@ -146,7 +145,7 @@ ${ layout.menubar(section='bundles') }
 
           <div>
             % if bundled_coordinator_formset.forms:
-            <table class="table table-striped table-condensed" cellpadding="0" cellspacing="0" data-missing="#bundled_coordinator_missing">
+            <table class="table table-condensed" cellpadding="0" cellspacing="0" data-missing="#bundled_coordinator_missing">
               <thead>
                 <tr>
                   <th data-row-selector-exclude="true">${ _('Name') }</th>
@@ -203,7 +202,7 @@ ${ layout.menubar(section='bundles') }
           </div>
             % if bundled_coordinator_formset.forms and bundle.is_editable(user):
               <div class="form-actions" style="padding-left:10px">
-                <input type="submit" class="btn btn-primary" value="${ _('Save') }"></input>
+                <input type="submit" class="btn btn-primary" value="${ _('Save') }" />
               </div>
             % endif
         </div>
@@ -268,9 +267,7 @@ ${ layout.menubar(section='bundles') }
     }
   </style>
 
-  <script src="${ static('desktop/ext/js/knockout.min.js') }" type="text/javascript" charset="utf-8"></script>
-
-  <script type="text/javascript" charset="utf-8">
+  <script type="text/javascript">
 
     /**
      * Initial state is used to define when to display the "initial state" of a table.

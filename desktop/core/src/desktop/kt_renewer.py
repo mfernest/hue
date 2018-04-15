@@ -33,21 +33,29 @@ def renew_from_kt():
           "-t", CONF.HUE_KEYTAB.get(), # specify keytab
           "-c", CONF.CCACHE_PATH.get(), # specify credentials cache
           CONF.HUE_PRINCIPAL.get()]
-  LOG.info("Reinitting kerberos from keytab: " +
-           " ".join(cmdv))
+  retries = 0
+  max_retries = 3
+  while retries < max_retries:
+     LOG.info("Reinitting kerberos retry attempt %s from keytab %s" % (retries, " ".join(cmdv)))
 
-  subp = subprocess.Popen(cmdv,
+     subp = subprocess.Popen(cmdv,
                           stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE,
                           close_fds=True,
                           bufsize=-1)
-  subp.wait()
-  if subp.returncode != 0:
-    LOG.error("Couldn't reinit from keytab! `kinit' exited with %s.\n%s\n%s" % (
+     subp.wait()
+     if subp.returncode != 0:
+       retries = retries + 1
+       LOG.error("Couldn't reinit from keytab! `kinit' exited with %s.\n%s\n%s" % (
               subp.returncode,
               "\n".join(subp.stdout.readlines()),
               "\n".join(subp.stderr.readlines())))
-    sys.exit(subp.returncode)
+       if retries >= max_retries:
+          LOG.error("FATAL: max_retries of %s reached. Exiting..." % max_retries)
+          sys.exit(subp.returncode)
+       time.sleep(3)
+     else:
+       break
 
   global NEED_KRB181_WORKAROUND
   if NEED_KRB181_WORKAROUND is None:
@@ -71,7 +79,7 @@ def perform_krb181_workaround():
     LOG.error("Couldn't renew kerberos ticket in order to work around "
               "Kerberos 1.8.1 issue. Please check that the ticket for "
               "'%(princ)s' is still renewable:\n"
-              "  $ kinit -f -c %(ccache)s\n"
+              "  $ klist -f -c %(ccache)s\n"
               "If the 'renew until' date is the same as the 'valid starting' "
               "date, the ticket cannot be renewed. Please check your KDC "
               "configuration, and the ticket renewal policy (maxrenewlife) "

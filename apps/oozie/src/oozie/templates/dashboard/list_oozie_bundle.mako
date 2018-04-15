@@ -25,7 +25,7 @@
 <%namespace name="layout" file="../navigation-bar.mako" />
 <%namespace name="utils" file="../utils.inc.mako" />
 
-${ commonheader(_("Bundle Dashboard"), "oozie", user) | n,unicode }
+${ commonheader(_("Bundle Dashboard"), "oozie", user, request) | n,unicode }
 ${ layout.menubar(section='bundles', dashboard=True) }
 
 <div class="container-fluid">
@@ -151,7 +151,7 @@ ${ layout.menubar(section='bundles', dashboard=True) }
 
     <div class="tab-content" style="min-height:200px">
       <div class="tab-pane active" id="calendar">
-        <table class="table table-striped table-condensed">
+        <table class="table table-condensed">
           <thead>
           <tr>
             <th>${ _('Coordinator') }</th>
@@ -164,7 +164,7 @@ ${ layout.menubar(section='bundles', dashboard=True) }
           <tfoot>
             <tr data-bind="visible: isLoading()">
               <td colspan="3" class="left">
-                <img src="${ static('desktop/art/spinner.gif') }" />
+                <i class="fa fa-spinner fa-spin"></i>
               </td>
             </tr>
             <tr data-bind="visible: actions().length == 0 && !isLoading()">
@@ -192,7 +192,7 @@ ${ layout.menubar(section='bundles', dashboard=True) }
 
 
       <div class="tab-pane" id="actions">
-        <table class="table table-striped table-condensed" cellpadding="0" cellspacing="0">
+        <table class="table table-condensed" cellpadding="0" cellspacing="0">
           <thead>
           <tr>
             <th>${ _('Name') }</th>
@@ -222,7 +222,7 @@ ${ layout.menubar(section='bundles', dashboard=True) }
           <tfoot>
           <tr data-bind="visible: isLoading()">
             <td colspan="10" class="left">
-              <img src="${ static('desktop/art/spinner.gif') }" />
+              <i class="fa fa-spinner fa-spin"></i>
             </td>
           </tr>
           <tr data-bind="visible: !isLoading() && actions().length == 0">
@@ -277,7 +277,7 @@ ${ layout.menubar(section='bundles', dashboard=True) }
       </div>
 
       <div class="tab-pane" id="definition">
-        <textarea id="definitionEditor">${ oozie_bundle.definition.decode('utf-8', 'replace') }</textarea>
+        <div id="definitionEditor">${ oozie_bundle.definition.decode('utf-8', 'replace') }</div>
       </div>
     </div>
 
@@ -296,8 +296,8 @@ ${ layout.menubar(section='bundles', dashboard=True) }
 
 <div id="confirmation" class="modal hide">
   <div class="modal-header">
-    <a href="#" class="close" data-dismiss="modal">&times;</a>
-    <h3 class="message"></h3>
+    <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+    <h2 class="modal-title message"></h2>
   </div>
   <div class="modal-footer">
     <a href="#" class="btn" data-dismiss="modal">${_('No')}</a>
@@ -306,14 +306,11 @@ ${ layout.menubar(section='bundles', dashboard=True) }
 </div>
 
 <script src="${ static('oozie/js/dashboard-utils.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/knockout.min.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/codemirror-3.11.js') }"></script>
-<link rel="stylesheet" href="${ static('desktop/ext/css/codemirror.css') }">
-<script src="${ static('desktop/ext/js/codemirror-xml.js') }"></script>
 
 <style type="text/css">
-  .CodeMirror.cm-s-default {
-    height:500px;
+  #definitionEditor {
+    min-height: 250px;
+    margin-bottom: 10px;
   }
 </style>
 
@@ -368,22 +365,13 @@ ${ layout.menubar(section='bundles', dashboard=True) }
     });
 
 
-    var definitionEditor = $("#definitionEditor")[0];
-
-    var codeMirror = CodeMirror(function(elt) {
-      definitionEditor.parentNode.replaceChild(elt, definitionEditor);
-      }, {
-        value: definitionEditor.value,
+    var editor = ace.edit("definitionEditor");
+    editor.setOptions({
       readOnly: true,
-      lineNumbers: true
+      maxLines: Infinity
     });
-
-    // force refresh on tab change
-    $("a[data-toggle='tab']").on("shown", function (e) {
-      if ($(e.target).attr("href") == "#definition") {
-        codeMirror.refresh();
-      }
-    });
+    editor.setTheme($.totalStorage("hue.ace.theme") || "ace/theme/hue");
+    editor.getSession().setMode("ace/mode/xml");
 
     $(".confirmationModal").click(function(){
       var _this = $(this);

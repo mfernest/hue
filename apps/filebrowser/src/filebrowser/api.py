@@ -17,11 +17,11 @@
 
 import logging
 
-from django.utils.translation import ugettext as _
-
 from desktop.lib.django_util import JsonResponse
 from desktop.lib.fsmanager import FS_GETTERS
 from desktop.lib.i18n import smart_unicode
+
+from aws.conf import has_s3_access
 
 
 LOG = logging.getLogger(__name__)
@@ -46,8 +46,7 @@ def get_filesystems(request):
 
   filesystems = {}
   for k, v in FS_GETTERS.items():
-    # TODO: Remove when we consolidate s3 with s3a
-    if k != 's3a':
+    if not k.startswith('s3') or has_s3_access(request.user):
       filesystems[k] = v is not None
 
   response['status'] = 0

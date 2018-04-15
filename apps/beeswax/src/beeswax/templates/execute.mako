@@ -18,17 +18,17 @@
   from desktop.views import commonheader, commonfooter, commonshare, _ko
   from beeswax import conf as beeswax_conf
   from desktop import conf
+  from desktop.conf import USE_NEW_EDITOR
   from django.utils.translation import ugettext as _
   from notebook.conf import ENABLE_QUERY_BUILDER
 %>
 
+<%namespace name="assist" file="/assist.mako" />
+<%namespace name="charting" file="/charting.mako" />
 <%namespace name="comps" file="beeswax_components.mako" />
 <%namespace name="layout" file="layout.mako" />
-<%namespace name="dashboard" file="common_dashboard.mako" />
-<%namespace name="tableStats" file="/table_stats.mako" />
-<%namespace name="assist" file="/assist.mako" />
 
-${ commonheader(_('Query'), app_name, user) | n,unicode }
+${ commonheader(_('Query'), app_name, user, request) | n,unicode }
 ${ layout.menubar(section='query') }
 
 <div id="temporaryPlaceholder"></div>
@@ -211,8 +211,7 @@ ${ layout.menubar(section='query') }
           <div class="card-body">
             <!-- ko if: $root.fetchingImpalaSession() -->
             <div style="margin: 5px">
-              <!--[if !IE]><!--><i class="fa fa-spinner fa-spin" style="font-size: 20px; color: #BBB"></i><!--<![endif]-->
-              <!--[if IE]><img src="${ static('desktop/art/spinner.gif') }"/><![endif]-->
+              <i class="fa fa-spinner fa-spin" style="font-size: 20px; color: #BBB"></i>
             </div>
             <!-- /ko -->
 
@@ -238,7 +237,17 @@ ${ layout.menubar(section='query') }
     </div>
   </div>
   <div class="resizer" data-bind="splitDraggable : { appName: '${app_name}', onPosition: onPanelPosition, leftPanelVisible: isEditor }"><div class="resize-bar"><i class="fa fa-ellipsis-v"></i></div></div>
-  <div class="right-panel" id="querySide">
+  <div class="content-panel" id="querySide">
+    % if USE_NEW_EDITOR.get() and action != 'watch-redirect' and action != 'watch-results':
+    <div class="alert">
+      ${ _('This is the old SQL Editor, it is recommended to instead use: ') }
+      % if app_name == 'impala':
+        <a href="/hue/editor?type=impala" target="_blank">${_('Impala')}</a>
+      % else:
+        <a href="/hue/editor?type=hive" target="_blank">${_('Hive')}</a>
+      % endif
+    </div>
+    % endif
     <div class="alert" data-bind="visible: design.isRedacted">
       ${ _('This query had some sensitive information removed when saved.') }
     </div>
@@ -347,7 +356,7 @@ ${ layout.menubar(section='query') }
         </a>
 
         ## Tricks for not triggering the closing of the query on download
-        <a id="download-csv" data-bind="attr: {'href': '/${ app_name }/download/' + $root.design.history.id() + '/csv'}, event: { mouseover: function(){ window.onbeforeunload = null; }, mouseout: function() { window.onbeforeunload = $(window).data('beforeunload'); } }"" href="javascript:void(0)" title="${_('Download the results in CSV format')}" rel="tooltip"
+        <a id="download-csv" data-bind="attr: {'href': '/${ app_name }/download/' + $root.design.history.id() + '/csv'}, event: { mouseover: function(){ window.onbeforeunload = null; }, mouseout: function() { window.onbeforeunload = $(window).data('beforeunload'); } }" href="javascript:void(0)" title="${_('Download the results in CSV format')}" rel="tooltip"
           class="view-query-results download hide pull-right"><h4><i class="hfo hfo-file-csv"></i></h4>
         </a>
 
@@ -380,10 +389,9 @@ ${ layout.menubar(section='query') }
         <div class="tab-content">
           <div class="active tab-pane" id="recentTab">
             <div id="recentLoader">
-              <!--[if !IE]><!--><i class="fa fa-spinner fa-spin" style="font-size: 20px; color: #DDD"></i><!--<![endif]-->
-              <!--[if IE]><img src="${ static('desktop/art/spinner.gif') }"/><![endif]-->
+              <i class="fa fa-spinner fa-spin" style="font-size: 20px; color: #DDD"></i>
             </div>
-            <table id="recentQueries" class="table table-striped table-condensed datatables" cellpadding="0" cellspacing="0" data-tablescroller-enforce-height="true">
+            <table id="recentQueries" class="table table-condensed datatables" cellpadding="0" cellspacing="0" data-tablescroller-enforce-height="true">
               <thead>
                 <tr>
                   <th>${_('Time')}</th>
@@ -409,6 +417,7 @@ ${ layout.menubar(section='query') }
                   <th width="10%">${ _('Table') }</th>
                   <th>${ _('Column') }</th>
                   <th width="10%">${ _('Operation') }</th>
+                  <th width="5%">&nbsp;</th>
                   <th width="1%">&nbsp;</th>
                 </tr>
               </thead>
@@ -431,7 +440,7 @@ ${ layout.menubar(section='query') }
               <ul data-bind="foreach: $root.design.watch.jobUrls" class="unstyled jobs-overlay">
                 <li><a data-bind="text: $.trim($data.name), attr: { href: $data.url }" target="_blank"></a></li>
               </ul>
-              <pre data-bind="visible: $root.design.watch.logs().length == 0">${_('There are currently no logs to visualize.')} <img src="${ static('desktop/art/spinner.gif') }" data-bind="visible: $root.design.isRunning()"/></pre>
+              <pre data-bind="visible: $root.design.watch.logs().length == 0">${_('There are currently no logs to visualize.')} <img src="${ static('desktop/art/spinner.gif') }" alt="${ _('Spinner') }" data-bind="visible: $root.design.isRunning()"/></pre>
               <pre data-bind="visible: $root.design.watch.logs().length > 0, text: $root.design.watch.logs().join('\n')"></pre>
             </div>
           </div>
@@ -441,7 +450,7 @@ ${ layout.menubar(section='query') }
             <div data-bind="visible: $root.design.results.columns().length > 10">
               <input id="columnFilter" class="input-xlarge" type="text" placeholder="${_('Filter for column name or type...')}" />
             </div>
-            <table class="table table-striped table-condensed" cellpadding="0" cellspacing="0">
+            <table class="table table-condensed" cellpadding="0" cellspacing="0">
               <tbody data-bind="foreach: $root.design.results.columns">
                 <tr class="columnRow" data-bind="visible: $index() > 0">
                   <td rel="columntooltip" data-placement="left" data-bind="attr: {title: '${ _ko("Scroll to the column") }">
@@ -463,7 +472,7 @@ ${ layout.menubar(section='query') }
             </div>
 
             <div data-bind="css: {'hide': !$root.hasResults()}">
-              <table id="resultTable" class="table table-striped table-condensed" cellpadding="0" cellspacing="0" data-tablescroller-enforce-height="true">
+              <table id="resultTable" class="table table-condensed" cellpadding="0" cellspacing="0" data-tablescroller-enforce-height="true">
                 <thead>
                 <tr data-bind="foreach: $root.design.results.columns">
                   <th data-bind="html: ($index() == 0 ? '&nbsp;' : $data.name), css: { 'sort-numeric': isNumericColumn($data.type), 'sort-date': isDateTimeColumn($data.type), 'sort-string': isStringColumn($data.type), 'datatables-counter-col': $index() == 0}"></th>
@@ -615,23 +624,10 @@ ${ layout.menubar(section='query') }
   </div>
 
 
-  <div id="chooseFile" class="modal hide fade">
-    <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3>${_('Choose a file')}</h3>
-    </div>
-    <div class="modal-body">
-      <div id="filechooser">
-      </div>
-    </div>
-    <div class="modal-footer">
-    </div>
-  </div>
-
   <div id="chooseFolder" class="modal hide fade">
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3>${_('Select a directory')}</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 class="modal-title">${ _('Select a directory') }</h2>
     </div>
     <div class="modal-body">
       <div id="folderchooser">
@@ -643,8 +639,8 @@ ${ layout.menubar(section='query') }
 
   <div id="choosePath" class="modal hide fade">
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3>${_('Select a file or directory')}</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 class="modal-title">${ _('Select a file or directory') }</h2>
     </div>
     <div class="modal-body">
       <div id="pathchooser">
@@ -657,9 +653,8 @@ ${ layout.menubar(section='query') }
 
   <div id="saveAs" class="modal hide fade">
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-
-      <h3>${_('Choose a name')}</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 class="modal-title">${ _('Choose a name') }</h2>
     </div>
     <form class="form-horizontal">
       <div class="control-group" id="saveas-query-name">
@@ -687,13 +682,12 @@ ${ layout.menubar(section='query') }
   <div id="saveResultsModal" class="modal hide fade">
     <div class="loader">
       <div class="overlay"></div>
-      <!--[if !IE]><!--><i class="fa fa-spinner fa-spin"></i><!--<![endif]-->
-      <!--[if IE]><img class="spinner" src="${ static('desktop/art/spinner-big-inverted.gif') }"/><![endif]-->
+      <i class="fa fa-spinner fa-spin"></i>
     </div>
 
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3>${_('Save Query Results')}</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 class="modal-title">${ _('Save Query Results') }</h2>
     </div>
     <div class="modal-body" style="padding: 4px">
       <!-- ko if: $root.design.results.save.saveTargetError() -->
@@ -766,8 +760,8 @@ ${ layout.menubar(section='query') }
 
 <div id="clearHistoryModal" class="modal hide fade">
   <div class="modal-header">
-    <a href="#" class="close" data-dismiss="modal">&times;</a>
-    <h3>${_('Confirm History Clear')}</h3>
+    <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+    <h2 class="modal-title">${ _('Confirm History Clear') }</h2>
   </div>
   <div class="modal-body">
     <p>${_('Are you sure you want to clear the query history?')}</p>
@@ -781,8 +775,8 @@ ${ layout.menubar(section='query') }
 %if ENABLE_QUERY_BUILDER.get():
 <div id="invalidQueryBuilder" class="modal hide fade">
   <div class="modal-header">
-    <a href="#" class="close" data-dismiss="modal">&times;</a>
-    <h3>${_('Invalid Query')}</h3>
+    <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+    <h2 class="modal-title">${ _('Invalid Query') }</h2>
   </div>
   <div class="modal-body">
     <p>${_('Query requires a select or an aggregate.')}</p>
@@ -800,28 +794,20 @@ ${ commonshare() | n,unicode }
 </script>
 
 <script src="${ static('desktop/js/hue.json.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/js/jquery.huedatatable.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/jquery/plugins/jquery-ui-1.10.4.draggable-droppable-sortable.min.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/routie-0.3.0.min.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/knockout.min.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/knockout-mapping.min.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/js/ko.hue-bindings.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/js/sqlAutocompleter.js') }" type="text/javascript" charset="utf-8"></script>
+<script src="${ static('desktop/ext/js/jquery/plugins/jquery-ui-1.10.4.custom.min.js') }" type="text/javascript" charset="utf-8"></script>
+<script src="${ static('desktop/js/hue.routie.js') }" type="text/javascript" charset="utf-8"></script>
+<script src="${ static('desktop/js/sqlAutocompleter2.js') }" type="text/javascript" charset="utf-8"></script>
 <script src="${ static('desktop/js/hdfsAutocompleter.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/js/assist/tableStats.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/js/apiHelper.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/js/assist/assistHdfsEntry.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/js/assist/assistDbEntry.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/js/assist/assistDbSource.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/js/fileBrowser/hueFileEntry.js') }" type="text/javascript" charset="utf-8"></script>
+<script src="${ static('desktop/js/sqlFunctions.js') }" type="text/javascript" charset="utf-8"></script>
+
+${ assist.assistJSModels() }
+
 <script src="${ static('desktop/js/autocompleter.js') }" type="text/javascript" charset="utf-8"></script>
 <script src="${ static('beeswax/js/beeswax.vm.js') }"></script>
 <script src="${ static('desktop/js/share.vm.js') }"></script>
-<script src="${ static('desktop/js/vkbeautify.js') }" type="text/javascript" charset="utf-8"></script>
 %if ENABLE_QUERY_BUILDER.get():
 <!-- For query builder -->
 <link rel="stylesheet" href="${ static('desktop/ext/css/jquery.contextMenu.min.css') }">
-<link rel="stylesheet" href="${ static('desktop/css/queryBuilder.css') }">
 <script src="${ static('desktop/ext/js/jquery/plugins/jquery.contextMenu.min.js') }"></script>
 <script src="${ static('desktop/ext/js/jquery/plugins/jquery.ui.position.min.js') }"></script>
 <script src="${ static('desktop/js/queryBuilder.js') }"></script>
@@ -877,9 +863,7 @@ ${ commonshare() | n,unicode }
 <link rel="stylesheet" href="${ static('desktop/ext/select2/select2.css') }">
 <script src="${ static('desktop/ext/select2/select2.min.js') }" type="text/javascript" charset="utf-8"></script>
 
-
 ${ assist.assistPanel() }
-${ tableStats.tableStats() }
 
 <style type="text/css">
   h1 {
@@ -920,7 +904,7 @@ ${ tableStats.tableStats() }
     cursor: ew-resize;
   }
 
-  .right-panel {
+  .content-panel {
     position: absolute;
     outline: none !important;
   }
@@ -984,11 +968,6 @@ ${ tableStats.tableStats() }
 
   .remove {
     float: right;
-  }
-
-  .fileChooserBtn {
-    border-radius: 0 3px 3px 0;
-    height: 31px;
   }
 
   .CodeMirror {
@@ -1160,15 +1139,15 @@ ${ tableStats.tableStats() }
 <link rel="stylesheet" href="${ static('desktop/ext/chosen/chosen.min.css') }">
 <script src="${ static('desktop/ext/chosen/chosen.jquery.min.js') }" type="text/javascript" charset="utf-8"></script>
 
-${ dashboard.import_charts() }
+${ charting.import_charts() }
 
 
-<script type="text/javascript" charset="utf-8">
+<script type="text/javascript">
 
 // avoid blinking of the panels
 var leftPanelWidth = $.totalStorage("${app_name}_left_panel_width") != null ? $.totalStorage("${app_name}_left_panel_width") : 250;
 $(".left-panel").css("width", leftPanelWidth + "px");
-$(".right-panel").css("left", leftPanelWidth + 20 + "px");
+$(".content-panel").css("left", leftPanelWidth + 20 + "px");
 
 var codeMirror, dataTable, renderRecent, syncWithHive;
 
@@ -1196,14 +1175,7 @@ editorViewModelOptions.languages.push({
   name: HIVE_AUTOCOMPLETE_APP == "impala" ? "Impala" : "Hive"
 });
 
-var i18n = {
-  errorLoadingDatabases: "${ _('There was a problem loading the databases') }"
-};
-
-var apiHelper = ApiHelper.getInstance({
-  user: HIVE_AUTOCOMPLETE_USER,
-  i18n: i18n
-});
+var apiHelper = ApiHelper.getInstance();
 
 var editorViewModel = {
   sqlSourceTypes: [{
@@ -1226,7 +1198,7 @@ var autocompleter = new Autocompleter({
   user: HIVE_AUTOCOMPLETE_USER,
   oldEditor: true,
   optEnabled: false,
-  timeout: ${ conf.EDITOR_AUTOCOMPLETE_TIMEOUT.get() },
+  timeout: AUTOCOMPLETE_TIMEOUT,
   useNewAutocompleter: false
 });
 
@@ -1483,7 +1455,7 @@ $(document).ready(function () {
     if ($(e.target).attr("href") != "#results" && $(e.target).attr("href") != "#columns"){
       $($(e.target).attr("href")).css('height', 'auto');
       if ($(e.target).attr("href") == "#chart") {
-        logGA('results/chart');
+        hueAnalytics.log('beeswax', 'results/chart');
         predictGraph();
       }
     } else {
@@ -1984,6 +1956,8 @@ $(document).ready(function () {
     MRJOBS: "${_('MR Jobs')}"
   };
 
+  $('.assist').css('top', '36px');
+
   $(window).resize(function () {
     resizeLogs();
   });
@@ -2265,7 +2239,7 @@ $(document).on('error.query', function () {
       errorWidgets.push(
         codeMirror.addLineWidget(
           selectedLine > 0 ? selectedLine - 1 : selectedLine,
-          $("<div>").addClass("editorError").html("<i class='fa fa-exclamation-circle'></i> " + err)[0], {
+          $("<div>").addClass("editorError").text(err)[0], {
             coverGutter: true,
             noHScroll: true
           }
@@ -2289,7 +2263,7 @@ function trySaveDesign() {
   viewModel.design.query.value(query);
   if (viewModel.design.id() && viewModel.design.id() != -1) {
     viewModel.saveDesign();
-    logGA('design/save');
+    hueAnalytics.log('beeswax', 'design/save');
   }
 }
 
@@ -2305,7 +2279,7 @@ function trySaveAsDesign() {
     viewModel.saveDesign();
     $('#saveAs').find('.help-inline').text('');
     $('#saveAs').find('.control-group').removeClass('error');
-    logGA('design/save-as');
+    hueAnalytics.log('beeswax', 'design/save-as');
   } else if (viewModel.design.name()) {
     $.jHueNotify.error("${_('No query provided to save.')}");
     $('#saveAs').modal('hide');
@@ -2329,7 +2303,7 @@ function trySaveResults() {
       $("#saveResultsModal .loader").hide();
     });
   }
-  logGA('results/save');
+  hueAnalytics.log('beeswax', 'results/save');
 }
 
 $(document).on('saved.results', function() {
@@ -2361,7 +2335,7 @@ function tryExecuteQuery() {
     viewModel.executeQuery();
   }
 
-  logGA('query/execute');
+  hueAnalytics.log('beeswax', 'query/execute');
 }
 
 function tryExecuteNextStatement() {
@@ -2381,7 +2355,7 @@ function tryExecuteNextStatement() {
     viewModel.executeNextStatement();
   }
 
-  logGA('query/execute_next');
+  hueAnalytics.log('beeswax', 'query/execute_next');
 }
 
 function tryExecuteParameterizedQuery() {
@@ -2397,19 +2371,26 @@ function tryExplainQuery() {
   viewModel.design.query.value(query);
   viewModel.explainQuery();
 
-  logGA('query/explain');
+  hueAnalytics.log('beeswax', 'query/explain');
 }
 
+
 function formatQuery() {
-  if (vkbeautify) {
-    if (codeMirror.getSelection() != '') {
-      codeMirror.replaceSelection(vkbeautify.sql(codeMirror.getSelection(), 2));
+  $.post("/notebook/api/format", {
+    statements: codeMirror.getSelection() != '' ? codeMirror.getSelection() : codeMirror.getValue()
+  }, function (data) {
+    if (data.status == 0) {
+      if (codeMirror.getSelection() != '') {
+        codeMirror.replaceSelection(data.formatted_statements);
+      }
+      else {
+        codeMirror.setValue(data.formatted_statements);
+      }
+      viewModel.design.query.value(codeMirror.getValue());
+    } else {
+      $.jHueNotify.error(data);
     }
-    else {
-      codeMirror.setValue(vkbeautify.sql(codeMirror.getValue(), 2));
-    }
-    viewModel.design.query.value(codeMirror.getValue());
-  }
+  });
 }
 
 function tryExplainParameterizedQuery() {
@@ -2499,7 +2480,7 @@ function updateSidebarTooltips(selector) {
     $(this).tooltip({
       placement: "right",
       title: $(this).val()
-    }).attr('data-original-title', $(this).val()).tooltip('fixTitle');
+    }).attr('data-original-title', escapeOutput($(this).val())).tooltip('fixTitle');
   });
 }
 
@@ -2635,6 +2616,8 @@ $(document).ready(function () {
     $('#queryContainer').show();
     $('#resizePanel').show();
     $('a[href="#query"]').parent().show();
+    $('.hue-title-bar').show();
+    $('.resultsContainer').css('marginTop', '20px');
   }
 
   function watchPageComponents() {
@@ -2645,6 +2628,9 @@ $(document).ready(function () {
     $('#resizePanel').hide();
     $('a[href="#query"]').parent().hide();
     $('a[href="#recentTab"]').parent().hide();
+    $('a[href="#queryBuilderTab"]').parent().hide();
+    $('.hue-title-bar').hide();
+    $('.resultsContainer').css('marginTop', '-50px');
   }
 
   function queryPage() {
@@ -2728,7 +2714,7 @@ $(document).ready(function () {
       renderRecent();
       placeResizePanelHandle();
 
-      logGA('query/results');
+      hueAnalytics.log('beeswax', 'query/results');
     },
     'query/explanation': function () {
       if (! viewModel.design.results.explanation()) {
@@ -2746,7 +2732,7 @@ $(document).ready(function () {
 
       clickHard('.resultsContainer .nav-tabs a[href="#log"]');
 
-      logGA('watch/logs');
+      hueAnalytics.log('beeswax', 'watch/logs');
     },
     'watch/results': function() {
       showSection('query-editor');
@@ -2754,7 +2740,7 @@ $(document).ready(function () {
 
       clickHard('.resultsContainer .nav-tabs a[href="#results"]');
 
-      logGA('watch/results');
+      hueAnalytics.log('beeswax', 'watch/results');
     },
     '*': function () {
       routie('query');

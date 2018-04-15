@@ -20,9 +20,12 @@ import logging
 import os
 import time
 
+from string import Template
+
 from django.utils.functional import wraps
 from django.utils.translation import ugettext as _
 
+from beeswax.hive_site import get_hive_site_content
 from desktop.lib.exceptions_renderable import PopupException
 from desktop.lib.i18n import smart_str
 from desktop.lib.parameterization import find_variables
@@ -37,6 +40,7 @@ from liboozie.credentials import Credentials
 
 
 LOG = logging.getLogger(__name__)
+
 
 def submit_dryrun(run_func):
   def decorate(self, deployment_dir=None):
@@ -88,6 +92,9 @@ class Submission(object):
       if 'end_date' in self.properties:
         properties['end_date'] = convert_to_server_timezone(self.properties['end_date'], local_tz)
 
+    if 'nominal_time' in self.properties:
+      properties['nominal_time'] = convert_to_server_timezone(self.properties['nominal_time'], local_tz)
+
     self.properties['security_enabled'] = self.api.security_enabled
 
   def __str__(self):
@@ -126,6 +133,9 @@ class Submission(object):
 
     if 'oozie.coord.application.path' in self.properties:
       self.properties.pop('oozie.coord.application.path')
+
+    if 'oozie.bundle.application.path' in self.properties:
+      self.properties.pop('oozie.bundle.application.path')
 
     if fail_nodes:
       self.properties.update({'oozie.wf.rerun.failnodes': fail_nodes})
@@ -195,15 +205,75 @@ class Submission(object):
 
           self.job.override_subworkflow_id(action, workflow.id) # For displaying the correct graph
           self.properties['workspace_%s' % workflow.uuid] = workspace # For pointing to the correct workspace
+
+        elif action.data['type'] == 'impala' or action.data['type'] == 'impala-document':
+          from oozie.models2 import _get_impala_url
+          from impala.impala_flags import get_ssl_server_certificate
+
+          if action.data['type'] == 'impala-document':
+            from notebook.models import Notebook
+            if action.data['properties'].get('uuid'):
+              notebook = Notebook(document=Document2.objects.get_by_uuid(user=self.user, uuid=action.data['properties']['uuid']))
+              statements = notebook.get_str()
+              statements = Template(statements).safe_substitute(**self.properties)
+              script_name = action.data['name'] + '.sql'
+              self._create_file(deployment_dir, script_name, statements)
+          else:
+            script_name = os.path.basename(action.data['properties'].get('script_path'))
+
+          if self.api.security_enabled:
+            kinit = 'kinit -k -t *.keytab %(user_principal)s' % {
+              'user_principal': self.properties.get('user_principal', action.data['properties'].get('user_principal'))
+            }
+          else:
+            kinit = ''
+
+          shell_script = """#!/bin/bash
+
+# Needed to launch impala shell in oozie
+export PYTHON_EGG_CACHE=./myeggs
+
+%(kinit)s
+
+impala-shell %(kerberos_option)s %(ssl_option)s -i %(impalad_host)s -f %(query_file)s""" % {
+  'impalad_host': action.data['properties'].get('impalad_host') or _get_impala_url(),
+  'kerberos_option': '-k' if self.api.security_enabled else '',
+  'ssl_option': '--ssl' if get_ssl_server_certificate() else '',
+  'query_file': script_name,
+  'kinit': kinit
+  }
+
+          self._create_file(deployment_dir, action.data['name'] + '.sh', shell_script)
+
         elif action.data['type'] == 'hive-document':
           from notebook.models import Notebook
-          notebook = Notebook(document=Document2.objects.get_by_uuid(user=self.user, uuid=action.data['properties']['uuid']))
+          if action.data['properties'].get('uuid'):
+            notebook = Notebook(document=Document2.objects.get_by_uuid(user=self.user, uuid=action.data['properties']['uuid']))
+            statements = notebook.get_str()
+          else:
+            statements = action.data['properties'].get('statements')
 
-          self._create_file(deployment_dir, action.data['name'] + '.sql', notebook.get_str())
-        elif action.data['type'] == 'java-document':
-          from notebook.models import Notebook
-          notebook = Notebook(document=Document2.objects.get_by_uuid(user=self.user, uuid=action.data['properties']['uuid']))
-          properties = notebook.get_data()['snippets'][0]['properties']
+          if self.properties.get('send_result_path'):
+            statements = """
+INSERT OVERWRITE DIRECTORY '%s'
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+   "separatorChar" = "\t",
+   "quoteChar"     = "'",
+   "escapeChar"    = "\\"
+)
+STORED AS TEXTFILE %s""" % (self.properties.get('send_result_path'), '\n\n\n'.join([snippet['statement_raw'] for snippet in notebook.get_data()['snippets']]))
+
+          if statements is not None:
+            self._create_file(deployment_dir, action.data['name'] + '.sql', statements)
+
+        elif action.data['type'] in ('java-document', 'java', 'mapreduce-document'):
+          if action.data['type'] == 'java-document' or action.data['type'] == 'mapreduce-document':
+            from notebook.models import Notebook
+            notebook = Notebook(document=Document2.objects.get_by_uuid(user=self.user, uuid=action.data['properties']['uuid']))
+            properties = notebook.get_data()['snippets'][0]['properties']
+          else:
+            properties = action.data['properties']
 
           if properties.get('app_jar'):
             LOG.debug("Adding to oozie.libpath %s" % properties['app_jar'])
@@ -211,6 +281,19 @@ class Submission(object):
             if self.properties.get('oozie.libpath'):
               paths.append(self.properties['oozie.libpath'])
             self.properties['oozie.libpath'] = ','.join(paths)
+
+        elif action.data['type'] == 'pig-document':
+          from notebook.models import Notebook
+          notebook = Notebook(document=Document2.objects.get_by_uuid(user=self.user, uuid=action.data['properties']['uuid']))
+          statements = notebook.get_data()['snippets'][0]['statement_raw']
+
+          self._create_file(deployment_dir, action.data['name'] + '.pig', statements)
+        elif action.data['type'] == 'spark':
+          if not [f for f in action.data.get('properties').get('files', []) if f.get('value').endswith('hive-site.xml')]:
+            hive_site_lib = Hdfs.join(deployment_dir + '/lib/', 'hive-site.xml')
+            hive_site_content = get_hive_site_content()
+            if not self.fs.do_as_user(self.user, self.fs.exists, hive_site_lib) and hive_site_content:
+              self.fs.do_as_user(self.user, self.fs.create, hive_site_lib, overwrite=True, permission=0700, data=smart_str(hive_site_content))
 
     oozie_xml = self.job.to_xml(self.properties)
     self._do_as(self.user.username, self._copy_files, deployment_dir, oozie_xml, self.properties)
@@ -268,6 +351,38 @@ class Submission(object):
       credentials.fetch(self.api)
       self.properties['credentials'] = credentials.get_properties()
 
+      self._update_credentials_from_hive_action(credentials)
+
+
+  def _update_credentials_from_hive_action(self, credentials):
+    """
+    Hive JDBC url from conf should be replaced when URL is set in hive action. Use _HOST from
+    this URL to update the hive2_host in hive principal hive/hive2_host@YOUR-REALM.COM
+    """
+    if hasattr(self.job, 'nodes'):
+      for action in self.job.nodes:
+        if action.data['type'] in ('hive2', 'hive-document') and \
+                        credentials.hiveserver2_name in self.properties['credentials'] and \
+                        action.data['properties']['jdbc_url'] and \
+                        len(action.data['properties']['jdbc_url'].split('//')) > 1:
+          try:
+            hive_jdbc_url = action.data['properties']['jdbc_url']
+            hive_host_from_action = hive_jdbc_url.split('//')[1].split(':')[0]
+
+            hive_principal_from_conf = self.properties['credentials'][credentials.hiveserver2_name]['properties'][1][1]
+            updated_hive_principal = hive_principal_from_conf.split('/')[0] + '/' + hive_host_from_action + '@' + hive_principal_from_conf.split('@')[1]
+
+            self.properties['credentials'][credentials.hiveserver2_name]['properties'] = [
+              ('hive2.jdbc.url', hive_jdbc_url),
+              ('hive2.server.principal', updated_hive_principal)
+            ]
+          except Exception, ex:
+            msg = 'Failed to update the Hive JDBC URL from %s action properties: %s' % (action.data['type'], str(ex))
+            LOG.error(msg)
+            raise PopupException(message=_(msg), detail=str(ex))
+
+
+
   def _create_deployment_dir(self):
     """
     Return the job deployment directory in HDFS, creating it if necessary.
@@ -276,8 +391,14 @@ class Submission(object):
     # Automatic setup of the required directories if needed
     create_directories(self.fs)
 
+    # Check if job owner owns the deployment directory.
+    has_deployment_dir_access = False
+    if self.job.deployment_dir and self.fs.exists(self.job.deployment_dir):
+      statbuf = self.fs.stats(self.job.deployment_dir)
+      has_deployment_dir_access = statbuf and (statbuf.user == self.user.username)
+
     # Case of a shared job
-    if self.user != self.job.document.owner:
+    if self.job.document and self.user != self.job.document.owner or not has_deployment_dir_access:
       path = REMOTE_DEPLOYMENT_DIR.get().replace('$USER', self.user.username).replace('$TIME', str(time.time())).replace('$JOBID', str(self.job.id))
       # Shared coords or bundles might not have any existing workspaces
       if self.fs.exists(self.job.deployment_dir):

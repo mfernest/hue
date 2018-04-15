@@ -26,13 +26,13 @@ from django.core.urlresolvers import reverse
 from django.http import QueryDict
 from django.utils.translation import ugettext as _
 
+from aws.s3.s3fs import S3FileSystemException
 from desktop.context_processors import get_app_name
 from desktop.lib import django_mako, i18n
 from desktop.lib.django_util import render
 from desktop.lib.exceptions_renderable import PopupException
 from desktop.lib.django_forms import MultiForm
 from hadoop.fs import hadoopfs
-from hadoop.fs.fsutils import remove_header
 
 from beeswax.common import TERMINATORS
 from beeswax.design import hql_query
@@ -103,7 +103,7 @@ DELIMITER_READABLE = {'\\001' : _('ctrl-As'),
                       '\\t'   : _('tabs'),
                       ','     : _('commas'),
                       ' '     : _('spaces')}
-FILE_READERS = [ ]
+FILE_READERS = []
 
 def import_wizard(request, database='default'):
   """
@@ -174,12 +174,15 @@ def import_wizard(request, database='default'):
       # Go to step 2: We've just picked the file. Preview it.
       #
       if do_s2_auto_delim:
-        if load_data == 'IMPORT':
-          if not request.fs.isfile(path):
-            raise PopupException(_('Path location must refer to a file if "Import Data" is selected.'))
-        elif load_data == 'EXTERNAL':
-          if not request.fs.isdir(path):
-            raise PopupException(_('Path location must refer to a directory if "Create External Table" is selected.'))
+        try:
+          if load_data == 'IMPORT':
+            if not request.fs.isfile(path):
+              raise PopupException(_('Path location must refer to a file if "Import Data" is selected.'))
+          elif load_data == 'EXTERNAL':
+            if not request.fs.isdir(path):
+              raise PopupException(_('Path location must refer to a directory if "Create External Table" is selected.'))
+        except (IOError, S3FileSystemException), e:
+          raise PopupException(_('Path location "%s" is invalid: %s') % (path, e))
 
         delim_is_auto = True
         fields_list, n_cols, s2_delim_form = _delim_preview(request.fs, s1_file_form, encoding, [reader.TYPE for reader in FILE_READERS], DELIMITERS)
@@ -250,6 +253,7 @@ def import_wizard(request, database='default'):
                 'file_format': 'TextFile',
                 'load_data': load_data,
                 'path': path,
+                'skip_header': request.REQUEST.get('removeHeader', 'off').lower() == 'on'
              },
             'columns': [ f.cleaned_data for f in s3_col_formset.forms ],
             'partition_columns': [],
@@ -282,7 +286,6 @@ def _submit_create_and_load(request, create_hql, table_name, path, load_data, da
   if load_data == 'IMPORT':
     on_success_params['table'] = table_name
     on_success_params['path'] = path
-    on_success_params['removeHeader'] = request.POST.get('removeHeader')
     on_success_url = reverse(app_name + ':load_after_create', kwargs={'database': database}) + '?' + on_success_params.urlencode()
   else:
     on_success_url = reverse('metastore:describe_table', kwargs={'database': database, 'table': table_name})
@@ -338,8 +341,7 @@ def _delim_preview(fs, file_form, encoding, file_types, delimiters):
 
 def _parse_fields(path, file_obj, encoding, filetypes, delimiters):
   """
-  _parse_fields(path, file_obj, encoding, filetypes, delimiters)
-                                  -> (delimiter, filetype, fields_list)
+  _parse_fields(path, file_obj, encoding, filetypes, delimiters) -> (delimiter, filetype, fields_list)
 
   Go through the list of ``filetypes`` (gzip, text) and stop at the first one
   that works for the data. Then apply the list of ``delimiters`` and pick the
@@ -348,7 +350,7 @@ def _parse_fields(path, file_obj, encoding, filetypes, delimiters):
 
   Return the best delimiter, filetype and the data broken down into rows of fields.
   """
-  file_readers = [ reader for reader in FILE_READERS if reader.TYPE in filetypes ]
+  file_readers = [reader for reader in FILE_READERS if reader.TYPE in filetypes]
 
   for reader in file_readers:
     LOG.debug("Trying %s for file: %s" % (reader.TYPE, path))
@@ -379,7 +381,7 @@ def _readfields(lines, delimiters):
     The score is always non-negative. The higher the better.
     """
     n_lines = len(fields_list)
-    len_list = [ len(fields) for fields in fields_list ]
+    len_list = [len(fields) for fields in fields_list]
 
     if not len_list:
       raise PopupException(_("Could not find any columns to import"))
@@ -391,7 +393,7 @@ def _readfields(lines, delimiters):
     avg_n_fields = sum(len_list) / n_lines
     sq_of_exp = avg_n_fields * avg_n_fields
 
-    len_list_sq = [ l * l for l in len_list ]
+    len_list_sq = [l * l for l in len_list]
     exp_of_sq = sum(len_list_sq) / n_lines
     var = exp_of_sq - sq_of_exp
     # Favour more fields
@@ -482,21 +484,11 @@ def load_after_create(request, database):
   """
   tablename = request.REQUEST.get('table')
   path = request.REQUEST.get('path')
-  is_remove_header = request.REQUEST.get('removeHeader').lower() == 'on' and not path.endswith('gz')
 
   if not tablename or not path:
     msg = _('Internal error: Missing needed parameter to load data into table.')
     LOG.error(msg)
     raise PopupException(msg)
-
-  if is_remove_header:
-    try:
-      path = path.rstrip('/')  # need to remove trailing slash before overwrite
-      remove_header(request.fs, path)
-    except Exception, e:
-      msg = "The headers of the file could not be removed."
-      LOG.exception(msg)
-      raise PopupException(_(msg), detail=e)
 
   LOG.debug("Auto loading data from %s into table %s" % (path, tablename))
   hql = "LOAD DATA INPATH '%s' INTO TABLE `%s.%s`" % (path, database, tablename)

@@ -21,32 +21,37 @@ import logging
 import socket
 import threading
 import time
+import re
 import sasl
+import struct
 import sys
 
 from thrift.Thrift import TType, TApplicationException
 from thrift.transport.TSocket import TSocket
-from thrift.transport.TSSLSocket import TSSLSocket
 from thrift.transport.TTransport import TBufferedTransport, TFramedTransport, TMemoryBuffer,\
                                         TTransportException
 from thrift.protocol.TBinaryProtocol import TBinaryProtocol
 from thrift.protocol.TMultiplexedProtocol import TMultiplexedProtocol
 
 from django.conf import settings
+from django.utils.translation import ugettext as _
+from desktop.conf import SASL_MAX_BUFFER, CHERRYPY_SERVER_THREADS
+
+from desktop.lib.apputil import WARN_LEVEL_CALL_DURATION_MS, INFO_LEVEL_CALL_DURATION_MS
 from desktop.lib.python_util import create_synchronous_io_multiplexer
 from desktop.lib.thrift_.http_client import THttpClient
+from desktop.lib.thrift_.TSSLSocketWithWildcardSAN import TSSLSocketWithWildcardSAN
 from desktop.lib.thrift_sasl import TSaslClientTransport
 from desktop.lib.exceptions import StructuredException, StructuredThriftTransportException
+
+
+LOG = logging.getLogger(__name__)
+
 
 # The maximum depth that we will recurse through a "jsonable" structure
 # while converting to thrift. This prevents us from infinite recursion
 # in the case of circular references.
 MAX_RECURSION_DEPTH = 50
-
-# When a thrift call finishes, the level at which we log its duration
-# depends on the number of millis the call took.
-WARN_LEVEL_CALL_DURATION_MS = 5000
-INFO_LEVEL_CALL_DURATION_MS = 1000
 
 
 class LifoQueue(Queue.Queue):
@@ -213,16 +218,19 @@ class ConnectionPooler(object):
         this_round_timeout = None
 
       try:
-        connection = self.pooldict[_get_pool_key(conf)].get(
-          block=True, timeout=this_round_timeout)
+        connection = self.pooldict[_get_pool_key(conf)].get(block=True, timeout=this_round_timeout)
+        if connection is not None:
+          duration = time.time() - start_pool_get_time
+          message = "Thrift client %s got connection %s after %.2f seconds" % (self, connection.CID, duration)
+          log_if_slow_call(duration=duration, message=message)
       except Queue.Empty:
         has_waited_for = time.time() - start_pool_get_time
         if get_client_timeout is not None and has_waited_for > get_client_timeout:
           raise socket.timeout(
-            ("Timed out after %.2f seconds waiting to retrieve a " +
-             "%s client from the pool.") % (has_waited_for, conf.service_name))
-        logging.warn("Waited %d seconds for a thrift client to %s:%d" %
-          (has_waited_for, conf.host, conf.port))
+            ("Timed out after %.2f seconds waiting to retrieve a %s client from the pool.") % (has_waited_for, conf.service_name))
+        else:
+          message = "Waited %d seconds for a Thrift client to %s:%d" % (has_waited_for, conf.host, conf.port)
+          log_if_slow_call(duration=has_waited_for, message=message)
 
     return connection
 
@@ -260,7 +268,7 @@ def connect_to_thrift(conf):
     mode = THttpClient(conf.http_url)
   else:
     if conf.use_ssl:
-      mode = TSSLSocket(conf.host, conf.port, validate=conf.validate, ca_certs=conf.ca_certs, keyfile=conf.keyfile, certfile=conf.certfile)
+      mode = TSSLSocketWithWildcardSAN(conf.host, conf.port, validate=conf.validate, ca_certs=conf.ca_certs, keyfile=conf.keyfile, certfile=conf.certfile)
     else:
       mode = TSocket(conf.host, conf.port)
 
@@ -283,6 +291,8 @@ def connect_to_thrift(conf):
       if conf.mechanism == 'PLAIN':
         saslc.setAttr("username", str(conf.username))
         saslc.setAttr("password", str(conf.password)) # Defaults to 'hue' for a non-empty string unless using LDAP
+      else:
+        saslc.setAttr("maxbufsize", SASL_MAX_BUFFER.get())
       saslc.init()
       return saslc
     transport = TSaslClientTransport(sasl_factory, conf.mechanism, mode)
@@ -298,7 +308,8 @@ def connect_to_thrift(conf):
   return service, protocol, transport
 
 
-_connection_pool = ConnectionPooler()
+_connection_pool = ConnectionPooler(poolsize=CHERRYPY_SERVER_THREADS.get())
+
 
 def get_client(klass, host, port, service_name, **kwargs):
   conf = ConnectionConfig(klass, host, port, service_name, **kwargs)
@@ -314,6 +325,7 @@ def _grab_transport_from_wrapper(outer_transport):
   else:
     raise Exception("Unknown transport type: " + outer_transport.__class__)
 
+
 class PooledClient(object):
   """
   A wrapper for a SuperClient
@@ -326,8 +338,7 @@ class PooledClient(object):
       return self.__dict__[attr_name]
 
     # Fetch the thrift client from the pool
-    superclient = _connection_pool.get_client(self.conf,
-        get_client_timeout=self.conf.timeout_seconds)
+    superclient = _connection_pool.get_client(self.conf, get_client_timeout=self.conf.timeout_seconds)
 
     # Fetch the attribute. If it's callable, wrap it in a wrapper that re-gets
     # the client.
@@ -365,7 +376,6 @@ class PooledClient(object):
             superclient.transport.open()
 
           superclient.set_timeout(self.conf.timeout_seconds)
-
           return attr(*args, **kwargs)
         except TApplicationException, e:
           # Unknown thrift exception... typically IO errors
@@ -375,7 +385,10 @@ class PooledClient(object):
           logging.info("Thrift saw a socket error: " + str(e), exc_info=False)
           raise StructuredException('THRIFTSOCKET', str(e), data=None, error_code=502)
         except TTransportException, e:
-          logging.info("Thrift saw a transport exception: " + str(e), exc_info=False)
+          err_msg = str(e)
+          logging.info("Thrift saw a transport exception: " + err_msg, exc_info=False)
+          if err_msg and 'generic failure: Unable to find a callback: 32775' in err_msg:
+            raise StructuredException(_("Increase the sasl_max_buffer value in hue.ini"), err_msg, data=None, error_code=502)
           raise StructuredThriftTransportException(e, error_code=502)
         except Exception, e:
           # Stack tends to be only noisy here.
@@ -410,6 +423,7 @@ class SuperClient(object):
     res = getattr(self.wrapped, attr)
     if not hasattr(res, '__call__'):
       return res
+
     def wrapper(*args, **kwargs):
       tries_left = 3
       while tries_left:
@@ -420,27 +434,22 @@ class SuperClient(object):
           if not self.transport.isOpen():
             self.transport.open()
           st = time.time()
-          logging.debug("Thrift call: %s.%s(args=%s, kwargs=%s)"
-            % (str(self.wrapped.__class__), attr, repr(args), repr(kwargs)))
+
+          str_args = _unpack_guid_secret_in_handle(repr(args))
+          logging.debug("Thrift call: %s.%s(args=%s, kwargs=%s)" % (str(self.wrapped.__class__), attr, str_args, repr(kwargs)))
+
           ret = res(*args, **kwargs)
-          log_msg = repr(ret)
+          log_msg = _unpack_guid_secret_in_handle(repr(ret))
 
           # Truncate log message, increase output in DEBUG mode
           log_limit = 2000 if settings.DEBUG else 1000
           log_msg = log_msg[:log_limit] + (log_msg[log_limit:] and '...')
-          
+
           duration = time.time() - st
 
-          # Log the duration at different levels, depending on how long
-          # it took.
-          logmsg = "Thrift call %s.%s returned in %dms: %s" % (
-            str(self.wrapped.__class__), attr, duration*1000, log_msg)
-          if duration >= WARN_LEVEL_CALL_DURATION_MS:
-            logging.warn(logmsg)
-          elif duration >= INFO_LEVEL_CALL_DURATION_MS:
-            logging.info(logmsg)
-          else:
-            logging.debug(logmsg)
+          # Log the duration at different levels, depending on how long it took.
+          logmsg = "Thrift call: %s.%s(args=%s, kwargs=%s) returned in %dms: %s" % (str(self.wrapped.__class__), attr, str_args, repr(kwargs), duration * 1000, log_msg)
+          log_if_slow_call(duration=duration, message=logmsg)
 
           return ret
         except socket.error, e:
@@ -450,15 +459,18 @@ class SuperClient(object):
         except Exception, e:
           logging.exception("Thrift saw exception (this may be expected).")
           raise
+
         self.transport.close()
 
-        if isinstance(e, socket.timeout):
+        if isinstance(e, socket.timeout) or 'read operation timed out' in str(e): # Can come from ssl.SSLError
           logging.warn("Not retrying thrift call %s due to socket timeout" % attr)
           raise
         else:
           tries_left -= 1
           if tries_left:
             logging.info("Thrift exception; retrying: " + str(e), exc_info=0)
+            if 'generic failure: Unable to find a callback: 32775' in str(e):
+              logging.warn("Increase the sasl_max_buffer value in hue.ini")
       logging.warn("Out of retries for thrift call: " + attr)
       raise
     return wrapper
@@ -471,6 +483,23 @@ class SuperClient(object):
         _grab_transport_from_wrapper(self.transport).setTimeout(self.timeout_seconds * 1000)
       else:
         _grab_transport_from_wrapper(self.transport).setTimeout(None)
+
+def _unpack_guid_secret_in_handle(str_args):
+  if 'operationHandle' in str_args or 'sessionHandle' in str_args:
+    secret = re.search('secret=(\".*\"), guid', str_args) or re.search('secret=(\'.*\'), guid', str_args)
+    guid = re.search('guid=(\".*\")\)\)', str_args) or re.search('guid=(\'.*\')\)\)', str_args)
+
+    if secret and guid:
+      try:
+        encoded_secret = eval(secret.group(1))
+        encoded_guid = eval(guid.group(1))
+
+        str_args = str_args.replace(secret.group(1), "%x:%x" % struct.unpack(b"QQ", encoded_secret))
+        str_args = str_args.replace(guid.group(1), "%x:%x" % struct.unpack(b"QQ", encoded_guid))
+      except Exception, e:
+        logging.warn("Unable to unpack the secret and guid in Thrift Handle: %s" % e)
+
+  return str_args
 
 def simpler_string(thrift_obj):
   """
@@ -718,3 +747,13 @@ def fixup_enums(obj, name_class_map, suffix="AsString"):
 
 def is_thrift_struct(o):
   return hasattr(o.__class__, "thrift_spec")
+
+
+# Same in resource.py for not losing the trace class
+def log_if_slow_call(duration, message):
+  if duration >= WARN_LEVEL_CALL_DURATION_MS / 1000:
+    LOG.warn('SLOW: %.2f - %s' % (duration, message))
+  elif duration >= INFO_LEVEL_CALL_DURATION_MS / 1000:
+    LOG.info('SLOW: %.2f - %s' % (duration, message))
+  else:
+    LOG.debug(message)

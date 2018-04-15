@@ -24,7 +24,7 @@
 <%namespace name="layout" file="../navigation-bar.mako" />
 <%namespace name="utils" file="../utils.inc.mako" />
 
-${ commonheader(_("Bundles"), "oozie", user) | n,unicode }
+${ commonheader(_("Bundles"), "oozie", user, request) | n,unicode }
 ${ layout.menubar(section='bundles') }
 
 <style type="text/css">
@@ -68,7 +68,7 @@ ${ layout.menubar(section='bundles') }
   <table id="bundleTable" class="table datatables">
     <thead>
       <tr>
-        <th width="1%"><div class="hueCheckbox selectAll fa" data-selectables="bundleCheck"></div></th>
+        <th width="1%"><div class="hue-checkbox selectAll fa" data-selectables="bundleCheck"></div></th>
         <th width="10%">${ _('Name') }</th>
         <th width="20%">${ _('Description') }</th>
         <th width="35%">${ _('Coordinators') }</th>
@@ -82,7 +82,7 @@ ${ layout.menubar(section='bundles') }
       % for bundle in jobs:
         <tr>
           <td data-row-selector-exclude="true">
-            <div class="hueCheckbox bundleCheck fa" data-row-selector-exclude="true"
+            <div class="hue-checkbox bundleCheck fa" data-row-selector-exclude="true"
               % if bundle.can_read(user):
                   data-clone-url="${ url('oozie:clone_bundle', bundle=bundle.id) }"
                   data-submit-url="${ url('oozie:submit_bundle', bundle=bundle.id) }"
@@ -120,12 +120,7 @@ ${ layout.menubar(section='bundles') }
 </div>
 
 <div class="hueOverlay" data-bind="visible: isLoading">
-  <!--[if lte IE 9]>
-    <img src="${ static('desktop/art/spinner-big.gif') }" />
-  <![endif]-->
-  <!--[if !IE]> -->
-    <i class="fa fa-spinner fa-spin"></i>
-  <!-- <![endif]-->
+  <i class="fa fa-spinner fa-spin big-spinner"></i>
 </div>
 
 <div id="submit-job-modal" class="modal hide"></div>
@@ -134,8 +129,8 @@ ${ layout.menubar(section='bundles') }
   <form id="trashForm" action="${ url('oozie:delete_bundle') }" method="POST">
     ${ csrf_token(request) | n,unicode }
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3 id="trashMessage">${ _('Move the selected bundle(s) to trash?') }</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 id="trashMessage" class="modal-title">${ _('Move the selected bundle(s) to trash?') }</h2>
     </div>
     <div class="modal-footer">
       <a href="#" class="btn" data-dismiss="modal">${ _('No') }</a>
@@ -151,8 +146,8 @@ ${ layout.menubar(section='bundles') }
   <form id="destroyForm" action="${ url('oozie:delete_bundle') }?skip_trash=true" method="POST">
     ${ csrf_token(request) | n,unicode }
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3 id="destroyMessage">${ _('Delete the selected bundle(s)?') }</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 id="destroyMessage" class="modal-title">${ _('Delete the selected bundle(s)?') }</h2>
     </div>
     <div class="modal-footer">
       <a href="#" class="btn" data-dismiss="modal">${ _('No') }</a>
@@ -165,9 +160,8 @@ ${ layout.menubar(section='bundles') }
 </div>
 
 <script src="${ static('desktop/ext/js/datatables-paging-0.1.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/knockout.min.js') }" type="text/javascript" charset="utf-8"></script>
 
-<script type="text/javascript" charset="utf-8">
+<script type="text/javascript">
   $(document).ready(function () {
     var viewModel = {
       availableJobs : ko.observableArray(${ json_jobs | n }),
@@ -202,7 +196,7 @@ ${ layout.menubar(section='bundles') }
 
     function toggleActions() {
       $(".toolbarBtn").attr("disabled", "disabled");
-      var selector = $(".hueCheckbox[checked='checked']:not(.selectAll)");
+      var selector = $(".hue-checkbox[checked='checked']:not(.selectAll)");
       if (selector.length == 1) {
         var action_buttons = [
           ['#submit-btn', 'data-submit-url'],
@@ -217,7 +211,7 @@ ${ layout.menubar(section='bundles') }
           }
         });
       }
-      var can_delete = $(".hueCheckbox[checked='checked'][data-delete-id]");
+      var can_delete = $(".hue-checkbox[checked='checked'][data-delete-id]");
       if (can_delete.length > 0 && can_delete.length == selector.length) {
         $("#trash-btn").removeAttr("disabled");
         $("#trash-btn-caret").removeAttr("disabled");
@@ -226,7 +220,7 @@ ${ layout.menubar(section='bundles') }
 
     $("#trash-btn").click(function (e) {
       viewModel.chosenJobs.removeAll();
-      $(".hueCheckbox[checked='checked']").each(function( index ) {
+      $(".hue-checkbox[checked='checked']").each(function( index ) {
         viewModel.chosenJobs.push($(this).data("delete-id"));
       });
       $("#trash-job").modal("show");
@@ -234,14 +228,14 @@ ${ layout.menubar(section='bundles') }
 
     $("#destroy-btn").click(function (e) {
       viewModel.chosenJobs.removeAll();
-      $(".hueCheckbox[checked='checked']").each(function( index ) {
+      $(".hue-checkbox[checked='checked']").each(function( index ) {
         viewModel.chosenJobs.push($(this).data("delete-id"));
       });
       $("#destroy-job").modal("show");
     });
 
     $("#submit-btn").click(function () {
-      var _this = $(".hueCheckbox[checked='checked']");
+      var _this = $(".hue-checkbox[checked='checked']");
       var _action = _this.attr("data-submit-url");
       $.get(_action, function (response) {
           $("#submit-job-modal").html(response);
@@ -252,7 +246,7 @@ ${ layout.menubar(section='bundles') }
 
     $("#clone-btn").click(function (e) {
       viewModel.isLoading(true);
-      var _this = $(".hueCheckbox[checked='checked']");
+      var _this = $(".hue-checkbox[checked='checked']");
       var _url = _this.attr("data-clone-url");
       $.post(_url, function (data) {
         window.location = data.url;

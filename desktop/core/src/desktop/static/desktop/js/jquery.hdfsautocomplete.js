@@ -32,8 +32,11 @@
         smartTooltipThreshold: 10, // needs 10 up/down or click actions and no tab to activate the smart tooltip
         showOnFocus: false,
         skipKeydownEvents: false,
+        skipEnter: false,
         skipScrollEvent: false,
-        zIndex: 33000
+        zIndex: 33000,
+        root: "/",
+        isS3: false
       };
 
   function Plugin(element, options) {
@@ -48,6 +51,7 @@
 
     var _this = this;
     var _el = $(_this.element);
+    _el.addClass("jHueAutocompleteElement");
     _el.attr("autocomplete", "off"); // prevents default browser behavior
 
     // creates autocomplete popover
@@ -55,7 +59,7 @@
       $("<div>").attr("id", "jHueHdfsAutocomplete").addClass("jHueAutocomplete popover")
           .attr("style", "position:absolute;display:none;max-width:1000px;z-index:" + _this.options.zIndex)
           .html('<div class="arrow"></div><div class="popover-inner"><h3 class="popover-title"></h3><div class="popover-content"><p><ul class="unstyled"></ul></p></div></div>')
-          .appendTo($("body"));
+          .appendTo($(HUE_CONTAINER));
     }
 
     function setHueBreadcrumbCaretAtEnd(element) {
@@ -131,6 +135,11 @@
       }
       if (e.keyCode == 32 && e.ctrlKey) {
         e.preventDefault();
+      }
+      if (_this.options.skipEnter && e.keyCode === 13){
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
       }
     });
 
@@ -211,16 +220,15 @@
     var BASE_PATH = "/filebrowser/view=";
     var _currentFiles = [];
 
-    function prepareAutocompletePath(path) {
-      if (path.indexOf('/') == 0 || /^([a-zA-Z0-9]+):\/\//.test(path))
-        return path.substr(0, path.lastIndexOf("/") + 1);
-      if (path.indexOf("/") > 0)
-        return _this.options.home + path.substr(0, path.lastIndexOf("/"));
-      return _this.options.home;
-    }
-
     function showHdfsAutocomplete(callback) {
-      autocompleteUrl = BASE_PATH + prepareAutocompletePath(_el.val());
+      var base = "";
+      var path = _el.val();
+      var hasScheme = path.indexOf(":/") >= 0;
+      var isRelative = !hasScheme && path.charAt(0) !== "/";
+      if (isRelative && _this.options.root) {
+        base += _this.options.root;
+      }
+      var autocompleteUrl = BASE_PATH + base + path;
       $.getJSON(autocompleteUrl + "?pagesize=1000&format=json", function (data) {
         _currentFiles = [];
         if (data.error == null) {
@@ -230,7 +238,7 @@
               if (item.type == "dir") {
                 ico = "fa-folder";
               }
-              _currentFiles.push('<li class="hdfsAutocompleteItem" data-value="' + item.name + '"><i class="fa ' + ico + '"></i> ' + item.name + '</li>');
+              _currentFiles.push('<li class="hdfsAutocompleteItem" data-value="' + escapeOutput(item.name) + '"><i class="fa ' + ico + '"></i> ' + escapeOutput(item.name) + '</li>');
             }
           });
           window.setTimeout(function () {
@@ -240,13 +248,12 @@
               smartTooltipMaker();
               e.preventDefault();
               var item = $(this).text().trim();
-              var path = autocompleteUrl.substring(BASE_PATH.length);
               if (item == "..") { // one folder up
-                _el.val(path.substring(0, path.lastIndexOf("/")));
+                path = path.substring(0, path.lastIndexOf("/"));
+              } else {
+                path = path + (path.charAt(path.length - 1) == "/" ? "" : "/") + item;
               }
-              else {
-                _el.val(path + (path.charAt(path.length - 1) == "/" ? "" : "/") + item);
-              }
+              _el.val(base + path);
               if ($(this).html().indexOf("folder") > -1) {
                 _el.val(_el.val() + "/");
                 _this.options.onPathChange(_el.val());
@@ -313,6 +320,9 @@
     return this.each(function () {
       if (!$.data(this, 'plugin_' + pluginName)) {
         $.data(this, 'plugin_' + pluginName, new Plugin(this, options));
+      }
+      else {
+        $.data(this, 'plugin_' + pluginName).setOptions(options);
       }
     });
   }

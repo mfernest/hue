@@ -21,7 +21,7 @@
 
 <%namespace name="shared" file="shared_components.mako" />
 
-${ commonheader(_('View'), app_name, user) | n,unicode }
+${ commonheader(_('View'), app_name, user, request) | n,unicode }
 ${ shared.menubar() }
 
 <%
@@ -86,7 +86,7 @@ ${ shared.footer() }
 %endif
 
 
-<script type="text/javascript" charset="utf-8">
+<script type="text/javascript">
   $(document).ready(function () {
     $("a[data-row-selector='true']").jHueRowSelector();
   });

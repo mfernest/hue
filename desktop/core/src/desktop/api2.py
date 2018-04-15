@@ -17,8 +17,8 @@
 
 import logging
 import json
-import tempfile
 import StringIO
+import tempfile
 import zipfile
 
 from datetime import datetime
@@ -28,18 +28,23 @@ from django.core import management
 
 from django.http import HttpResponse
 from django.shortcuts import redirect
+from django.utils.html import escape
 from django.utils.translation import ugettext as _
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
+
+from metadata.conf import has_navigator
+from metadata.navigator_api import search_entities as metadata_search_entities, _highlight
+from metadata.navigator_api import search_entities_interactive as metadata_search_entities_interactive
+from notebook.connectors.base import Notebook
+from notebook.views import upgrade_session_properties
 
 from desktop.lib.django_util import JsonResponse
 from desktop.lib.exceptions_renderable import PopupException
 from desktop.lib.export_csvxls import make_response
 from desktop.lib.i18n import smart_str, force_unicode
-from desktop.models import Document2, Document, Directory, FilesystemException, uuid_default
-
-from notebook.connectors.base import Notebook
-from notebook.views import upgrade_session_properties
+from desktop.models import Document2, Document, Directory, FilesystemException, uuid_default, \
+  UserPreferences, get_user_preferences, set_user_preferences, USER_PREFERENCE_CLUSTER, get_cluster_config
 
 
 LOG = logging.getLogger(__name__)
@@ -60,6 +65,18 @@ def api_error_handler(func):
         return JsonResponse(response)
 
   return decorator
+
+
+@api_error_handler
+def get_config(request):
+  if request.POST.get(USER_PREFERENCE_CLUSTER):
+    set_user_preferences(request.user, USER_PREFERENCE_CLUSTER, request.POST.get(USER_PREFERENCE_CLUSTER))
+
+
+  config = get_cluster_config(request.user)
+  config['status'] = 0
+
+  return JsonResponse(config)
 
 
 @api_error_handler
@@ -116,6 +133,35 @@ def search_documents(request):
   return JsonResponse(response)
 
 
+def _search(user, perms='both', include_history=False, include_trashed=False, include_managed=False, search_text=None, limit=25):
+  response = {
+    'documents': []
+  }
+
+  documents = Document2.objects.documents(
+    user=user,
+    perms=perms,
+    include_history=include_history,
+    include_trashed=include_trashed,
+    include_managed=include_managed
+  )
+
+  type_filters = None
+  sort = '-last_modified'
+  search_text = search_text
+  flatten = True
+
+  page = 1
+
+  # Refine results
+  response.update(__filter_documents(type_filters, sort, search_text, queryset=documents, flatten=flatten))
+
+  # Paginate
+  response.update(__paginate(page, limit, queryset=response['documents']))
+
+  return response
+
+
 @api_error_handler
 def get_document(request):
   """
@@ -135,9 +181,22 @@ def get_document(request):
   """
   path = request.GET.get('path', '/')
   uuid = request.GET.get('uuid')
+  uuids = request.GET.get('uuids')
   with_data = request.GET.get('data', 'false').lower() == 'true'
   with_dependencies = request.GET.get('dependencies', 'false').lower() == 'true'
 
+  if uuids:
+    response = {
+      'data_list': [_get_document_helper(request, uuid, with_data, with_dependencies, path) for uuid in uuids.split(',')],
+      'status': 0
+    }
+  else:
+    response = _get_document_helper(request, uuid, with_data, with_dependencies, path)
+
+  return JsonResponse(response)
+
+
+def _get_document_helper(request, uuid, with_data, with_dependencies, path):
   if uuid:
     if uuid.isdigit():
       document = Document2.objects.document(user=request.user, doc_id=uuid)
@@ -168,14 +227,14 @@ def get_document(request):
       notebook = Notebook(document=document)
       notebook = upgrade_session_properties(request, notebook)
       data = json.loads(notebook.data)
-      if 'uuid' not in data:
+      if data.get('uuid') != document.uuid: # Old format < 3.11
         data['uuid'] = document.uuid
 
     response['data'] = data
 
   if with_dependencies:
     response['dependencies'] = [dependency.to_dict() for dependency in document.dependencies.all()]
-    response['dependents'] = [dependent.to_dict() for dependent in document.dependents.all()]
+    response['dependents'] = [dependent.to_dict() for dependent in document.dependents.exclude(is_history=True).all()]
 
   # Get children documents if this is a directory
   if document.is_directory:
@@ -184,11 +243,10 @@ def get_document(request):
     # If this is the user's home directory, fetch shared docs too
     if document.is_home_directory:
       children = directory.get_children_and_shared_documents(user=request.user)
+      response.update(_filter_documents(request, queryset=children, flatten=True))
     else:
       children = directory.get_children_documents()
-
-    # Filter and order results
-    response.update(_filter_documents(request, queryset=children, flatten=False))
+      response.update(_filter_documents(request, queryset=children, flatten=False))
 
   # Paginate and serialize Results
   if 'documents' in response:
@@ -197,7 +255,7 @@ def get_document(request):
     response['children'] = response.pop('documents')
     response['children'] = [doc.to_dict() for doc in response['children']]
 
-  return JsonResponse(response)
+  return response
 
 
 @api_error_handler
@@ -305,6 +363,91 @@ def delete_document(request):
       'status': 0,
   })
 
+@api_error_handler
+@require_POST
+def copy_document(request):
+  uuid = json.loads(request.POST.get('uuid'), '""')
+
+  if not uuid:
+    raise PopupException(_('copy_document requires uuid'))
+
+  document = Document2.objects.get_by_uuid(user=request.user, uuid=uuid)
+
+  if document.type == 'directory':
+    raise PopupException(_('Directory copy is not supported'))
+
+
+  name = document.name + '-copy'
+
+  # Make the copy of the new Document
+  copy_document = document.copy(name=name, owner=request.user)
+
+  # Import workspace for all oozie jobs
+  if document.type == 'oozie-workflow2' or document.type == 'oozie-bundle2' or document.type == 'oozie-coordinator2':
+    from oozie.models2 import Workflow, Coordinator, Bundle, _import_workspace
+    # Update the name field in the json 'data' field
+    if document.type == 'oozie-workflow2':
+      workflow = Workflow(document=document)
+      workflow.update_name(name)
+      workflow.update_uuid(copy_document.uuid)
+      _import_workspace(request.fs, request.user, workflow)
+      copy_document.update_data({'workflow': workflow.get_data()['workflow']})
+      copy_document.save()
+
+    if document.type == 'oozie-bundle2' or document.type == 'oozie-coordinator2':
+      if document.type == 'oozie-bundle2':
+        bundle_or_coordinator = Bundle(document=document)
+      else:
+        bundle_or_coordinator = Coordinator(document=document)
+      json_data = bundle_or_coordinator.get_data_for_json()
+      json_data['name'] = name
+      json_data['uuid'] = copy_document.uuid
+      copy_document.update_data(json_data)
+      copy_document.save()
+      _import_workspace(request.fs, request.user, bundle_or_coordinator)
+  elif document.type == 'search-dashboard':
+    from dashboard.models import Collection2
+    collection = Collection2(request.user, document=document)
+    collection.data['collection']['label'] = name
+    collection.data['collection']['uuid'] = copy_document.uuid
+    copy_document.update_data({'collection': collection.data['collection']})
+    copy_document.save()
+  # Keep the document and data in sync
+  else:
+    copy_data = copy_document.data_dict
+    if 'name' in copy_data:
+      copy_data['name'] = name
+    if 'uuid' in copy_data:
+      copy_data['uuid'] = copy_document.uuid
+    copy_document.update_data(copy_data)
+    copy_document.save()
+
+  return JsonResponse({
+    'status': 0,
+    'document': copy_document.to_dict()
+  })
+
+@api_error_handler
+@require_POST
+def restore_document(request):
+  """
+  Accepts a uuid
+
+  Restores the document to /home
+  """
+  uuids = json.loads(request.POST.get('uuids'))
+
+  if not uuids:
+    raise PopupException(_('restore_document requires comma separated uuids'))
+
+  for uuid in uuids.split(','):
+    document = Document2.objects.get_by_uuid(user=request.user, uuid=uuid, perm_type='write')
+    document.restore()
+
+  return JsonResponse({
+      'status': 0,
+  })
+
 
 @api_error_handler
 @require_POST
@@ -314,11 +457,14 @@ def share_document(request):
 
   Example of input: {'read': {'user_ids': [1, 2, 3], 'group_ids': [1, 2, 3]}}
   """
-  perms_dict = json.loads(request.POST.get('data'))
-  uuid = json.loads(request.POST.get('uuid'))
+  perms_dict = request.POST.get('data')
+  uuid = request.POST.get('uuid')
 
   if not uuid or not perms_dict:
     raise PopupException(_('share_document requires uuid and perms_dict'))
+  else:
+    perms_dict = json.loads(perms_dict)
+    uuid = json.loads(uuid)
 
   doc = Document2.objects.get_by_uuid(user=request.user, uuid=uuid)
 
@@ -361,6 +507,12 @@ def export_documents(request):
 
   # Get PKs of documents to export
   doc_ids = [doc.pk for doc in export_doc_set]
+  num_docs = len(doc_ids)
+
+  if len(selection) == 1 and num_docs >= len(selection) and docs[0].name:
+    filename = docs[0].name
+  else:
+    filename = 'hue-documents-%s-(%s)' % (datetime.today().strftime('%Y-%m-%d'), num_docs)
 
   f = StringIO.StringIO()
 
@@ -383,62 +535,197 @@ def export_documents(request):
     zfile.close()
     response = HttpResponse(content_type="application/zip")
     response["Content-Length"] = len(f.getvalue())
-    response['Content-Disposition'] = 'attachment; filename="hue-documents.zip"'
+    response['Content-Disposition'] = 'attachment; filename="%s".zip' % filename
     response.write(f.getvalue())
     return response
   else:
-    return make_response(f.getvalue(), 'json', 'hue-documents')
+    return make_response(f.getvalue(), 'json', filename)
 
 
 @ensure_csrf_cookie
 def import_documents(request):
-  if request.FILES.get('documents'):
-    documents = request.FILES['documents'].read()
-  else:
-    documents = json.loads(request.POST.get('documents'))
+  def is_reserved_directory(doc):
+    return doc['fields']['type'] == 'directory' and doc['fields']['name'] in (Document2.HOME_DIR, Document2.TRASH_DIR)
 
-  documents = json.loads(documents)
+  try:
+    if request.FILES.get('documents'):
+      documents = request.FILES['documents'].read()
+    else:
+      documents = json.loads(request.POST.get('documents'))
+
+    documents = json.loads(documents)
+  except ValueError, e:
+    raise PopupException(_('Failed to import documents, the file does not contain valid JSON.'))
+
+  # Validate documents
+  if not _is_import_valid(documents):
+    raise PopupException(_('Failed to import documents, the file does not contain the expected JSON schema for Hue documents.'))
+
   docs = []
 
-  uuids_map = dict((doc['fields']['uuid'], None) for doc in documents)
+  uuids_map = dict((doc['fields']['uuid'], None) for doc in documents if not is_reserved_directory(doc))
 
   for doc in documents:
-    # Remove any deprecated fields
-    if 'tags' in doc['fields']:
-      doc['fields'].pop('tags')
+    # Filter docs to import, ignoring reserved directories (home and Trash) and history docs
+    if not is_reserved_directory(doc):
+      # Remove any deprecated fields
+      if 'tags' in doc['fields']:
+        doc['fields'].pop('tags')
 
-    # If doc is not owned by current user, make a copy of the document with current user as owner
-    if doc['fields']['owner'][0] != request.user.username:
-      doc = _copy_document_with_owner(doc, request.user, uuids_map)
-    else:  # Update existing doc or create new
-      doc = _create_or_update_document_with_owner(doc, request.user, uuids_map)
+      # If doc is not owned by current user, make a copy of the document with current user as owner
+      if doc['fields']['owner'][0] != request.user.username:
+        doc = _copy_document_with_owner(doc, request.user, uuids_map)
+      else:  # Update existing doc or create new
+        doc = _create_or_update_document_with_owner(doc, request.user, uuids_map)
 
-    # If the doc contains any history dependencies, ignore them
-    # NOTE: this assumes that each dependency is exported as an array using the natural PK [uuid, version, is_history]
-    deps_minus_history = [dep for dep in doc.get('dependencies', []) if len(dep) >= 3 and not dep[2]]
-    doc['dependencies'] = deps_minus_history
+      # For oozie docs replace dependent uuids with the newly created ones
+      if doc['fields']['type'].startswith('oozie-'):
+        doc = _update_imported_oozie_document(doc, uuids_map)
 
-    # Set last modified date to now
-    doc['fields']['last_modified'] = datetime.now().replace(microsecond=0).isoformat()
-    docs.append(doc)
+      # If the doc contains any history dependencies, ignore them
+      # NOTE: this assumes that each dependency is exported as an array using the natural PK [uuid, version, is_history]
+      deps_minus_history = [dep for dep in doc['fields'].get('dependencies', []) if len(dep) >= 3 and not dep[2]]
+      doc['fields']['dependencies'] = deps_minus_history
+
+      # Replace illegal characters
+      if '/' in doc['fields']['name']:
+        new_name = doc['fields']['name'].replace('/', '-')
+        LOG.warn("Found illegal slash in document named: %s, renaming to: %s." % (doc['fields']['name'], new_name))
+        doc['fields']['name'] = new_name
+
+      # Set last modified date to now
+      doc['fields']['last_modified'] = datetime.now().replace(microsecond=0).isoformat()
+      docs.append(doc)
 
   f = tempfile.NamedTemporaryFile(mode='w+', suffix='.json')
-
   f.write(json.dumps(docs))
   f.flush()
 
   stdout = StringIO.StringIO()
   try:
-    management.call_command('loaddata', f.name, stdout=stdout)
+    management.call_command('loaddata', f.name, verbosity=2, traceback=True, stdout=stdout)
+    Document.objects.sync()
+
+    if request.POST.get('redirect'):
+      return redirect(request.POST.get('redirect'))
+    else:
+      return JsonResponse({
+        'status': 0,
+        'message': stdout.getvalue(),
+        'count': len(documents),
+        'created_count': len([doc for doc in documents if doc['pk'] is None]),
+        'updated_count': len([doc for doc in documents if doc['pk'] is not None]),
+        'username': request.user.username,
+        'documents': [
+          dict([
+            ('name', doc['fields']['name']),
+            ('uuid', doc['fields']['uuid']),
+            ('type', doc['fields']['type']),
+            ('owner', doc['fields']['owner'][0])
+          ]) for doc in docs]
+      })
   except Exception, e:
-    return JsonResponse({'message': smart_str(e)})
+    LOG.error('Failed to run loaddata command in import_documents:\n %s' % stdout.getvalue())
+    return JsonResponse({'status': -1, 'message': smart_str(e)})
+  finally:
+    stdout.close()
 
-  Document.objects.sync()
+def _update_imported_oozie_document(doc, uuids_map):
+  for key, value in uuids_map.iteritems():
+    if value:
+      doc['fields']['data'] = doc['fields']['data'].replace(key, value)
 
-  if request.POST.get('redirect'):
-    return redirect(request.POST.get('redirect'))
+  return doc
+
+
+def user_preferences(request, key=None):
+  response = {'status': 0, 'data': {}}
+
+  if request.method != "POST":
+    response['data'] = get_user_preferences(request.user, key)
   else:
-    return JsonResponse({'message': stdout.getvalue()})
+    if "set" in request.POST:
+      x = set_user_preferences(request.user, key, request.POST["set"])
+      response['data'] = {key: x.value}
+    elif "delete" in request.POST:
+      try:
+        x = UserPreferences.objects.get(user=request.user, key=key)
+        x.delete()
+      except UserPreferences.DoesNotExist:
+        pass
+
+  return JsonResponse(response)
+
+
+def search_entities(request):
+  sources = json.loads(request.POST.get('sources')) or []
+
+  if 'documents' in sources:
+    search_text = json.loads(request.POST.get('query_s', ''))
+    entities = _search(user=request.user, search_text=search_text)
+    response = {
+      'entities': [{
+          'hue_name': _highlight(search_text, escape(e.name)),
+          'hue_description': _highlight(search_text, escape(e.description)),
+          'type': 'HUE',
+          'doc_type': escape(e.type),
+          'originalName': escape(e.name),
+          'link': e.get_absolute_url()
+        } for e in entities['documents']
+      ],
+      'count': len(entities['documents']),
+      'status': 0
+    }
+
+    return JsonResponse(response)
+  else:
+    if has_navigator(request.user):
+      return metadata_search_entities(request)
+    else:
+      return JsonResponse({'status': 1, 'message': _('Navigator not enabled')})
+
+
+def search_entities_interactive(request):
+  sources = json.loads(request.POST.get('sources')) or []
+
+  if 'documents' in sources:
+    search_text = json.loads(request.POST.get('query_s', ''))
+    limit = int(request.POST.get('limit', 25))
+    entities = _search(user=request.user, search_text=search_text, limit=limit)
+    response = {
+      'results': [{
+          'hue_name': _highlight(search_text, escape(e.name)),
+          'hue_description': _highlight(search_text, escape(e.description)),
+          'link': e.get_absolute_url(),
+          'doc_type': escape(e.type),
+          'type': 'HUE',
+          'uuid': e.uuid,
+          'parentUuid': e.parent_directory.uuid,
+          'originalName': escape(e.name)
+        } for e in entities['documents']
+      ],
+      'count': len(entities['documents']),
+      'status': 0
+    }
+
+    return JsonResponse(response)
+  else:
+    if has_navigator(request.user):
+      return metadata_search_entities_interactive(request)
+    else:
+      return JsonResponse({'status': 1, 'message': _('Navigator not enabled')})
+
+
+def _is_import_valid(documents):
+  """
+  Validates the JSON file to be imported for schema correctness
+  :param documents: object loaded from JSON file
+  :return: True if schema seems valid, False otherwise
+  """
+  return isinstance(documents, list) and \
+    all(isinstance(d, dict) for d in documents) and \
+    all(all(k in d for k in ('pk', 'model', 'fields')) for d in documents) and \
+    all(all(k in d['fields'] for k in ('uuid', 'owner')) for d in documents)
 
 
 def _get_dependencies(documents, deps_mode=True):
@@ -478,9 +765,16 @@ def _copy_document_with_owner(doc, owner, uuids_map):
     uuids_map[old_uuid] = uuid_default()
   doc['fields']['uuid'] = uuids_map[old_uuid]
 
+  # Update UUID in data if needed
+  if 'data' in doc['fields']:
+    data = json.loads(doc['fields']['data'])
+    if 'uuid' in data:
+      data['uuid'] = uuids_map[old_uuid]
+      doc['fields']['data'] = json.dumps(data)
+
   # Remap parent directory if needed
   parent_uuid = None
-  if 'parent_directory' in doc['fields']:
+  if doc['fields'].get('parent_directory'):
     parent_uuid = doc['fields']['parent_directory'][0]
 
   if parent_uuid is not None and parent_uuid in uuids_map.keys():
@@ -535,11 +829,20 @@ def _create_or_update_document_with_owner(doc, owner, uuids_map):
       doc['fields']['parent_directory'] = [home_dir.uuid, home_dir.version, home_dir.is_history]
 
   # Verify that dependencies exist, raise critical error if any dependency not found
+  # Ignore history dependencies
   if doc['fields']['dependencies']:
-    for uuid, version, is_history in doc['fields']['dependencies']:
-      if not uuid in uuids_map.keys() and \
-              not Document2.objects.filter(uuid=uuid, version=version, is_history=is_history).exists():
-        raise PopupException(_('Cannot import document, dependency with UUID: %s not found.') % uuid)
+    history_deps_list = []
+    for index, (uuid, version, is_history) in enumerate(doc['fields']['dependencies']):
+      if not uuid in uuids_map.keys() and not is_history and \
+              not Document2.objects.filter(uuid=uuid, version=version).exists():
+          raise PopupException(_('Cannot import document, dependency with UUID: %s not found.') % uuid)
+      elif is_history:
+        history_deps_list.insert(0, index) # Insert in decreasing order to facilitate delete
+        LOG.warn('History dependency with UUID: %s ignored while importing document %s' % (uuid, doc['fields']['name']))
+
+    # Delete history dependencies not found in the DB
+    for index in history_deps_list:
+      del doc['fields']['dependencies'][index]
 
   return doc
 
@@ -556,6 +859,10 @@ def _filter_documents(request, queryset, flatten=True):
   sort = request.GET.get('sort', '-last_modified')
   search_text = request.GET.get('text', None)
 
+  return __filter_documents(type_filters, sort, search_text, queryset, flatten)
+
+
+def __filter_documents(type_filters, sort, search_text, queryset, flatten=True):
   documents = queryset.search_documents(
       types=type_filters,
       search_text=search_text,
@@ -585,6 +892,11 @@ def _paginate(request, queryset):
   """
   page = int(request.GET.get('page', 1))
   limit = int(request.GET.get('limit', 0))
+
+  return __paginate(page, limit, queryset)
+
+
+def __paginate(page, limit, queryset):
 
   if limit > 0:
     offset = (page - 1) * limit

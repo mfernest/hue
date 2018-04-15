@@ -20,6 +20,7 @@ from __future__ import absolute_import
 import inspect
 import json
 import logging
+import mimetypes
 import os.path
 import re
 import tempfile
@@ -34,7 +35,7 @@ from django.contrib.auth.middleware import RemoteUserMiddleware
 from django.contrib.auth.models import User
 from django.core import exceptions, urlresolvers
 import django.db
-from django.http import HttpResponseNotAllowed
+from django.http import HttpResponseNotAllowed, HttpResponseForbidden
 from django.core.urlresolvers import resolve
 from django.http import HttpResponseRedirect, HttpResponse
 from django.utils.translation import ugettext as _
@@ -43,6 +44,7 @@ import django.views.static
 
 import desktop.views
 import desktop.conf
+from desktop.conf import IS_EMBEDDED
 from desktop.context_processors import get_app_name
 from desktop.lib import apputil, i18n, fsmanager
 from desktop.lib.django_util import render, render_json
@@ -99,8 +101,10 @@ class ExceptionMiddleware(object):
         response.status_code = getattr(exception, 'error_code', 500)
         return response
       else:
-        response = render("error.mako", request,
-                      dict(error=exception.response_data.get("message")))
+        response = render("error.mako", request, {
+          'error': exception.response_data.get("message"),
+          'is_embeddable': request.GET.get('is_embeddable', False),
+        })
         response.status_code = getattr(exception, 'error_code', 500)
         return response
 
@@ -126,11 +130,8 @@ class ClusterMiddleware(object):
       if request.fs is not None:
         request.fs.setuser(request.user.username)
 
-      request.jt = cluster.get_default_mrcluster() # Deprecated, only there for MR1
-      if request.jt is not None:
-        request.jt.setuser(request.user.username)
-    else:
-      request.jt = None
+    # Deprecated
+    request.jt = None
 
 
 class NotificationMiddleware(object):
@@ -270,6 +271,8 @@ class LoginAndPermissionMiddleware(object):
     which tells us the log level. The downside is that we don't have the status code,
     which isn't useful for status logging anyways.
     """
+    request.ts = time.time()
+    request.view_func = view_func
     access_log_level = getattr(view_func, 'access_log_level', None)
     # First, skip views not requiring login
 
@@ -293,8 +296,8 @@ class LoginAndPermissionMiddleware(object):
       try:
         access_view = 'access_view:%s:%s' % (request._desktop_app, resolve(request.path)[0].__name__)
       except Exception, e:
-        access_log(request, 'error checking view perm: %s', e, level=access_log_level)
-        access_view =''
+        access_log(request, 'error checking view perm: %s' % e, level=access_log_level)
+        access_view = ''
 
       # Accessing an app can access an underlying other app.
       # e.g. impala or spark uses code from beeswax and so accessing impala shows up as beeswax here.
@@ -305,19 +308,20 @@ class LoginAndPermissionMiddleware(object):
         app_accessed = ui_app_accessed
 
       if app_accessed and \
-          app_accessed not in ("desktop", "home", "home2", "about", "notebook") and \
+          app_accessed not in ("desktop", "home", "home2", "about", "hue", "editor", "notebook", "indexer", "404", "500", "403") and \
           not (request.user.has_hue_permission(action="access", app=app_accessed) or
                request.user.has_hue_permission(action=access_view, app=app_accessed)):
         access_log(request, 'permission denied', level=access_log_level)
         return PopupException(
             _("You do not have permission to access the %(app_name)s application.") % {'app_name': app_accessed.capitalize()}, error_code=401).response(request)
       else:
-        log_page_hit(request, view_func, level=access_log_level)
+        if not hasattr(request, 'view_func'):
+          log_page_hit(request, view_func, level=access_log_level)
         return None
 
     logging.info("Redirecting to login page: %s", request.get_full_path())
     access_log(request, 'login redirection', level=access_log_level)
-    if request.ajax:
+    if request.ajax and not 'libsaml.backend.SAML2Backend' in desktop.conf.AUTH.BACKEND.get():
       # Send back a magic header which causes Hue.Request to interpose itself
       # in the ajax request and make the user login before resubmitting the
       # request.
@@ -325,7 +329,15 @@ class LoginAndPermissionMiddleware(object):
       response[MIDDLEWARE_HEADER] = 'LOGIN_REQUIRED'
       return response
     else:
-      return HttpResponseRedirect("%s?%s=%s" % (settings.LOGIN_URL, REDIRECT_FIELD_NAME, urlquote(request.get_full_path())))
+      if IS_EMBEDDED.get():
+        return HttpResponseForbidden()
+      else:
+        return HttpResponseRedirect("%s?%s=%s" % (settings.LOGIN_URL, REDIRECT_FIELD_NAME, urlquote(request.get_full_path())))
+
+  def process_response(self, request, response):
+    if hasattr(request, 'ts') and hasattr(request, 'view_func'):
+      log_page_hit(request, request.view_func, level=logging.INFO, start_time=request.ts)
+    return response
 
 
 class JsonMessage(object):
@@ -646,7 +658,10 @@ class EnsureSafeRedirectURLMiddleware(object):
       if is_safe_url(location, request.get_host()):
         return response
 
-      response = render("error.mako", request, dict(error=_('Redirect to %s is not allowed.') % response['Location']))
+      response = render("error.mako", request, {
+        'error': _('Redirect to %s is not allowed.') % response['Location'],
+        'is_embeddable': request.GET.get('is_embeddable', False),
+      })
       response.status_code = 403
       return response
     else:
@@ -683,4 +698,22 @@ class ContentSecurityPolicyMiddleware(object):
     if self.secure_content_security_policy and not 'Content-Security-Policy' in response:
       response["Content-Security-Policy"] = self.secure_content_security_policy
 
+    return response
+
+
+class MimeTypeJSFileFixStreamingMiddleware(object):
+  """
+  Middleware to detect and fix ".js" mimetype. SLES 11SP4 as example OS which detect js file
+  as "text/x-js" and if strict X-Content-Type-Options=nosniff is set then browser fails to
+  execute javascript file.
+  """
+  def __init__(self):
+    jsmimetypes = ['application/javascript', 'application/ecmascript']
+    if mimetypes.guess_type("dummy.js")[0] in jsmimetypes:
+      LOG.info('Unloading MimeTypeJSFileFixStreamingMiddleware')
+      raise exceptions.MiddlewareNotUsed
+
+  def process_response(self, request, response):
+    if request.path_info.endswith('.js'):
+      response['Content-Type'] = "application/javascript"
     return response

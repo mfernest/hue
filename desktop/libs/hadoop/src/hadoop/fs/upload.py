@@ -29,10 +29,14 @@ import errno
 import logging
 import time
 
-from django.core.files.uploadhandler import FileUploadHandler, StopFutureHandlers, StopUpload
+from django.core.files.uploadhandler import FileUploadHandler, StopFutureHandlers, StopUpload, UploadFileException, SkipFile
+from django.utils.translation import ugettext as _
+
+from desktop.lib import fsmanager
 
 import hadoop.cluster
 from hadoop.conf import UPLOAD_CHUNK_SIZE
+from hadoop.fs.exceptions import WebHdfsException
 
 
 LOG = logging.getLogger(__name__)
@@ -41,7 +45,7 @@ LOG = logging.getLogger(__name__)
 UPLOAD_SUBDIR = 'hue-uploads'
 
 
-class HDFSerror(Exception):
+class HDFSerror(UploadFileException):
   pass
 
 
@@ -61,11 +65,18 @@ class HDFStemporaryUploadedFile(object):
 
     # Don't want to handle this upload if we don't have an HDFS
     if not self._fs:
-      raise HDFSerror("No HDFS found")
+      raise HDFSerror(_("No HDFS found"))
 
     # We want to set the user to be the user doing the upload
     self._fs.setuser(request.user.username)
     self._path = self._fs.mkswap(name, suffix='tmp', basedir=destination)
+
+    # Check access permissions before attempting upload
+    try:
+      self._fs.check_access(destination, 'rw-')
+    except WebHdfsException, e:
+      LOG.exception(e)
+      raise HDFSerror(_('User %s does not have permissions to write to path "%s".') % (request.user.username, destination))
 
     if self._fs.exists(self._path):
       self._fs._delete(self._path)
@@ -130,8 +141,9 @@ class HDFSfileUploadHandler(FileUploadHandler):
     self._activated = False
     self._destination = request.GET.get('dest', None) # GET param avoids infinite looping
     self.request = request
-    # Need to directly modify FileUploadHandler.chunk_size
-    FileUploadHandler.chunk_size = UPLOAD_CHUNK_SIZE.get()
+    fs = fsmanager.get_filesystem('default')
+    fs.setuser(request.user.username)
+    FileUploadHandler.chunk_size = fs.get_upload_chuck_size(self._destination) if self._destination else UPLOAD_CHUNK_SIZE.get()
 
     LOG.debug("Chunk size = %d" % FileUploadHandler.chunk_size)
 
@@ -140,6 +152,9 @@ class HDFSfileUploadHandler(FileUploadHandler):
     if field_name.upper().startswith('HDFS'):
       LOG.info('Using HDFSfileUploadHandler to handle file upload.')
       try:
+        fs_ref = self.request.REQUEST.get('fs', 'default')
+        self.request.fs = fsmanager.get_filesystem(fs_ref)
+        self.request.fs.setuser(self.request.user.username)
         self._file = HDFStemporaryUploadedFile(self.request, file_name, self._destination)
         LOG.debug('Upload attempt to %s' % (self._file.get_temp_path(),))
         self._activated = True
@@ -155,7 +170,7 @@ class HDFSfileUploadHandler(FileUploadHandler):
 
     if not self._activated:
       if self.request.META.get('PATH_INFO').startswith('/filebrowser') and self.request.META.get('PATH_INFO') != '/filebrowser/upload/archive':
-        raise StopUpload()
+        raise SkipFile()
       return raw_data
 
     try:

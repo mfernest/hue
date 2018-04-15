@@ -25,29 +25,37 @@ DataDefinition_EDIT
 CreateStatement
  : DatabaseDefinition
  | TableDefinition
+ | ViewDefinition
+ | RoleDefinition
+ | FunctionDefinition
+ | IndexDefinition
+ | MacroDefinition
  ;
 
 CreateStatement_EDIT
  : DatabaseDefinition_EDIT
  | TableDefinition_EDIT
+ | ViewDefinition_EDIT
+ | FunctionDefinition_EDIT
+ | IndexDefinition_EDIT
+ | MacroDefinition_EDIT
  | AnyCreate OptionalHiveTemporary OptionalExternal 'CURSOR'
    {
      if ($3) {
-       suggestKeywords(['TABLE']);
-     } else if (isHive()) {
+       parser.suggestKeywords(['TABLE']);
+     } else if (parser.isHive()) {
        if ($2) {
-         suggestKeywords(['EXTERNAL TABLE', 'TABLE']);
+         parser.suggestKeywords(['EXTERNAL TABLE', 'FUNCTION', 'MACRO', 'TABLE']);
        } else {
-         suggestKeywords(['DATABASE', 'EXTERNAL TABLE', 'SCHEMA', 'TABLE', 'TEMPORARY EXTERNAL TABLE', 'TEMPORARY TABLE']);
+         parser.suggestKeywords(['DATABASE', 'EXTERNAL TABLE', 'FUNCTION', 'INDEX', 'ROLE', 'SCHEMA', 'TABLE', 'TEMPORARY EXTERNAL TABLE', 'TEMPORARY FUNCTION', 'TEMPORARY MACRO', 'TEMPORARY TABLE', 'VIEW']);
        }
-     } else if (isImpala()) {
-       suggestKeywords(['DATABASE', 'EXTERNAL TABLE', 'SCHEMA', 'TABLE']);
+     } else if (parser.isImpala()) {
+       parser.suggestKeywords(['AGGREGATE FUNCTION', 'DATABASE', 'EXTERNAL TABLE', 'FUNCTION', 'ROLE', 'SCHEMA', 'TABLE', 'VIEW']);
      } else {
-       suggestKeywords(['DATABASE', 'SCHEMA', 'TABLE']);
+       parser.suggestKeywords(['DATABASE', 'ROLE', 'SCHEMA', 'TABLE', 'VIEW']);
      }
    }
  ;
-
 
 DatabaseDefinition
  : AnyCreate DatabaseOrSchema OptionalIfNotExists
@@ -58,18 +66,17 @@ DatabaseDefinition_EDIT
  : AnyCreate DatabaseOrSchema OptionalIfNotExists 'CURSOR'
    {
      if (!$3) {
-       suggestKeywords(['IF NOT EXISTS']);
+       parser.suggestKeywords(['IF NOT EXISTS']);
      }
    }
  | AnyCreate DatabaseOrSchema OptionalIfNotExists_EDIT
  | AnyCreate DatabaseOrSchema OptionalIfNotExists 'CURSOR' RegularIdentifier
    {
      if (!$3) {
-       suggestKeywords(['IF NOT EXISTS']);
+       parser.suggestKeywords(['IF NOT EXISTS']);
      }
    }
  | AnyCreate DatabaseOrSchema OptionalIfNotExists_EDIT RegularIdentifier
- | AnyCreate DatabaseOrSchema OptionalIfNotExists RegularIdentifier DatabaseDefinitionOptionals_EDIT error
  | AnyCreate DatabaseOrSchema OptionalIfNotExists RegularIdentifier DatabaseDefinitionOptionals 'CURSOR'
  ;
 
@@ -77,7 +84,7 @@ DatabaseDefinitionOptionals
  : OptionalComment OptionalHdfsLocation OptionalHiveDbProperties
    {
      var keywords = [];
-     if (!$3 && isHive()) {
+     if (!$3 && parser.isHive()) {
        keywords.push('WITH DBPROPERTIES');
      }
      if (!$2 && !$3) {
@@ -87,14 +94,14 @@ DatabaseDefinitionOptionals
        keywords.push('COMMENT');
      }
      if (keywords.length > 0) {
-       suggestKeywords(keywords);
+       parser.suggestKeywords(keywords);
      }
    }
  ;
 
 DatabaseDefinitionOptionals_EDIT
  : OptionalComment_INVALID OptionalHdfsLocation OptionalHiveDbProperties
- | OptionalComment OptionalHdfsLocation_EDIT OptionalHiveDbProperties
+ | OptionalComment HdfsLocation_EDIT OptionalHiveDbProperties
  ;
 
 OptionalComment
@@ -103,60 +110,18 @@ OptionalComment
  ;
 
 Comment
- : HiveOrImpalaComment SingleQuotedValue
+ : HiveOrImpalaComment QuotedValue
  ;
 
 Comment_INVALID
  : HiveOrImpalaComment SINGLE_QUOTE
+ | HiveOrImpalaComment DOUBLE_QUOTE
  | HiveOrImpalaComment SINGLE_QUOTE VALUE
+ | HiveOrImpalaComment DOUBLE_QUOTE VALUE
  ;
 
 OptionalComment_INVALID
  : Comment_INVALID
- ;
-
-OptionalHdfsLocation
- :
- | HdfsLocation
- ;
-
-OptionalHdfsLocation_EDIT
- : HdfsLocation_EDIT
- ;
-
-HdfsLocation
- : HiveOrImpalaLocation HdfsPath
- ;
-
-HdfsLocation_EDIT
- : HiveOrImpalaLocation HdfsPath_EDIT
- ;
-
-HdfsPath
- : 'HDFS_START_QUOTE' 'HDFS_PATH' 'HDFS_END_QUOTE'
- ;
-
-HdfsPath_EDIT
- : 'HDFS_START_QUOTE' 'HDFS_PATH' 'PARTIAL_CURSOR' 'HDFS_PATH' 'HDFS_END_QUOTE'
-    {
-      suggestHdfs({ path: $2 });
-    }
- | 'HDFS_START_QUOTE' 'HDFS_PATH' 'PARTIAL_CURSOR' 'HDFS_END_QUOTE'
-   {
-     suggestHdfs({ path: $2 });
-   }
- | 'HDFS_START_QUOTE' 'HDFS_PATH' 'PARTIAL_CURSOR'
-    {
-      suggestHdfs({ path: $2 });
-    }
- | 'HDFS_START_QUOTE' 'PARTIAL_CURSOR' 'HDFS_END_QUOTE'
-   {
-     suggestHdfs({ path: '' });
-   }
- | 'HDFS_START_QUOTE' 'PARTIAL_CURSOR'
-    {
-      suggestHdfs({ path: '' });
-    }
  ;
 
 OptionalHiveDbProperties
@@ -165,11 +130,11 @@ OptionalHiveDbProperties
  ;
 
 HiveDbProperties
- : '<hive>WITH' 'DBPROPERTIES' ParenthesizedPropertyAssignmentList
- | '<hive>WITH' 'DBPROPERTIES'
+ : '<hive>WITH' '<hive>DBPROPERTIES' ParenthesizedPropertyAssignmentList
+ | '<hive>WITH' '<hive>DBPROPERTIES'
  | '<hive>WITH' 'CURSOR'
    {
-     suggestKeywords(['DBPROPERTIES']);
+     parser.suggestKeywords(['DBPROPERTIES']);
    }
  ;
 
@@ -195,123 +160,110 @@ TableDefinition_EDIT
  | AnyCreate OptionalHiveTemporary OptionalExternal AnyTable OptionalIfNotExists 'CURSOR'
    {
      if (!$5) {
-       suggestKeywords(['IF NOT EXISTS']);
+       parser.suggestKeywords(['IF NOT EXISTS']);
      }
    }
  | AnyCreate OptionalHiveTemporary OptionalExternal AnyTable OptionalIfNotExists_EDIT
  ;
 
 TableDefinitionRightPart
- : TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalImpalaWithSerdeproperties OptionalHiveClusteredBy
-   OptionalHiveSkewedBy OptionalStoredAsOrBy OptionalHdfsLocation OptionalTblproperties OptionalImpalaCachedIn OptionalAsSelectStatement
+ : TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalSortBy OptionalClusteredBy OptionalSkewedBy
+   OptionalStoredAsOrBy OptionalWithSerdeproperties OptionalHdfsLocation OptionalTblproperties OptionalCachedInOrUncached OptionalAsSelectStatement
  ;
 
 TableDefinitionRightPart_EDIT
- : TableIdentifierAndOptionalColumnSpecification_EDIT OptionalComment OptionalPartitionedBy OptionalImpalaWithSerdeproperties OptionalHiveClusteredBy
-   OptionalHiveSkewedBy OptionalStoredAsOrBy OptionalHdfsLocation OptionalTblproperties OptionalImpalaCachedIn OptionalAsSelectStatement
- | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy_EDIT OptionalImpalaWithSerdeproperties OptionalHiveClusteredBy
-   OptionalHiveSkewedBy OptionalStoredAsOrBy OptionalHdfsLocation OptionalTblproperties OptionalImpalaCachedIn OptionalAsSelectStatement
- | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalImpalaWithSerdeproperties_EDIT OptionalHiveClusteredBy
-   OptionalHiveSkewedBy OptionalStoredAsOrBy OptionalHdfsLocation OptionalTblproperties OptionalImpalaCachedIn OptionalAsSelectStatement
- | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalImpalaWithSerdeproperties OptionalHiveClusteredBy_EDIT
-   OptionalHiveSkewedBy OptionalStoredAsOrBy OptionalHdfsLocation OptionalTblproperties OptionalImpalaCachedIn OptionalAsSelectStatement
- | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalImpalaWithSerdeproperties OptionalHiveClusteredBy
-   OptionalHiveSkewedBy_EDIT OptionalStoredAsOrBy OptionalHdfsLocation OptionalTblproperties OptionalImpalaCachedIn OptionalAsSelectStatement
- | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalImpalaWithSerdeproperties OptionalHiveClusteredBy
-   OptionalHiveSkewedBy OptionalStoredAsOrBy_EDIT OptionalHdfsLocation OptionalTblproperties OptionalImpalaCachedIn OptionalAsSelectStatement
- | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalImpalaWithSerdeproperties OptionalHiveClusteredBy
-   OptionalHiveSkewedBy OptionalStoredAsOrBy OptionalHdfsLocation_EDIT OptionalTblproperties OptionalImpalaCachedIn OptionalAsSelectStatement
- | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalImpalaWithSerdeproperties OptionalHiveClusteredBy
-   OptionalHiveSkewedBy OptionalStoredAsOrBy OptionalHdfsLocation OptionalTblproperties OptionalImpalaCachedIn_EDIT OptionalAsSelectStatement
- | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalImpalaWithSerdeproperties OptionalHiveClusteredBy
-   OptionalHiveSkewedBy OptionalStoredAsOrBy OptionalHdfsLocation OptionalTblproperties OptionalImpalaCachedIn OptionalAsSelectStatement_EDIT
- | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalImpalaWithSerdeproperties OptionalHiveClusteredBy
-   OptionalHiveSkewedBy OptionalStoredAsOrBy OptionalHdfsLocation OptionalTblproperties OptionalImpalaCachedIn 'CURSOR'
+ : TableIdentifierAndOptionalColumnSpecification_EDIT OptionalComment OptionalPartitionedBy OptionalSortBy OptionalClusteredBy OptionalSkewedBy
+   OptionalStoredAsOrBy OptionalWithSerdeproperties OptionalHdfsLocation OptionalTblproperties OptionalCachedInOrUncached OptionalAsSelectStatement
+ | TableIdentifierAndOptionalColumnSpecification OptionalComment PartitionedBy_EDIT OptionalSortBy OptionalClusteredBy OptionalSkewedBy
+   OptionalStoredAsOrBy OptionalWithSerdeproperties OptionalHdfsLocation OptionalTblproperties OptionalCachedInOrUncached OptionalAsSelectStatement
+ | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy SortBy_EDIT OptionalClusteredBy OptionalSkewedBy
+   OptionalStoredAsOrBy OptionalWithSerdeproperties OptionalHdfsLocation OptionalTblproperties OptionalCachedInOrUncached OptionalAsSelectStatement
+ | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalSortBy ClusteredBy_EDIT OptionalSkewedBy
+   OptionalStoredAsOrBy OptionalWithSerdeproperties OptionalHdfsLocation OptionalTblproperties OptionalCachedInOrUncached OptionalAsSelectStatement
+ | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalSortBy OptionalClusteredBy SkewedBy_EDIT
+   OptionalStoredAsOrBy OptionalWithSerdeproperties OptionalHdfsLocation OptionalTblproperties OptionalCachedInOrUncached OptionalAsSelectStatement
+ | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalSortBy OptionalClusteredBy OptionalSkewedBy
+   StoredAsOrBy_EDIT OptionalWithSerdeproperties OptionalHdfsLocation OptionalTblproperties OptionalCachedInOrUncached OptionalAsSelectStatement
+ | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalSortBy OptionalClusteredBy OptionalSkewedBy
+   OptionalStoredAsOrBy WithSerdeproperties_EDIT OptionalHdfsLocation OptionalTblproperties OptionalCachedInOrUncached OptionalAsSelectStatement
+ | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalSortBy OptionalClusteredBy OptionalSkewedBy
+   OptionalStoredAsOrBy OptionalWithSerdeproperties HdfsLocation_EDIT OptionalTblproperties OptionalCachedInOrUncached OptionalAsSelectStatement
+ | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalSortBy OptionalClusteredBy OptionalSkewedBy
+   OptionalStoredAsOrBy OptionalWithSerdeproperties OptionalHdfsLocation OptionalTblproperties CachedIn_EDIT OptionalAsSelectStatement
+ | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalSortBy OptionalClusteredBy OptionalSkewedBy
+   OptionalStoredAsOrBy OptionalWithSerdeproperties OptionalHdfsLocation OptionalTblproperties CachedIn WithReplication_EDIT OptionalAsSelectStatement
+ | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalSortBy OptionalClusteredBy OptionalSkewedBy
+   OptionalStoredAsOrBy OptionalWithSerdeproperties OptionalHdfsLocation OptionalTblproperties OptionalCachedInOrUncached OptionalAsSelectStatement_EDIT
+ | TableIdentifierAndOptionalColumnSpecification OptionalComment OptionalPartitionedBy OptionalSortBy OptionalClusteredBy OptionalSkewedBy
+   OptionalStoredAsOrBy OptionalWithSerdeproperties OptionalHdfsLocation OptionalTblproperties OptionalCachedInOrUncached 'CURSOR'
    {
-     // TODO: Don't always sort the keywords as order is important
      var keywords = [];
-     if (!$1 && !$2 && !$3 && !$4 && !$5 && !$6 && !$7 && !$8 && !$9 && !$10) {
-       keywords.push('LIKE');
-       if (isImpala()) {
-         keywords.push('LIKE PARQUET');
+     if (!$1 && !$2 && !$3 && !$4 && !$5 && !$6 && !$7 && !$8 && !$9 && !$10 && !$11) {
+       keywords.push({ value: 'LIKE', weight: 1 });
+       if (parser.isImpala()) {
+         keywords.push({ value: 'LIKE PARQUET', weight: 1 });
        }
      } else {
-       keywords.push('AS');
-       if (!$2 && !$3 && !$4 && !$5 && !$6 && !$7 && !$8 && !$9 && !$10) {
-         keywords.push('COMMENT');
+       if (!$2 && !$3 && !$4 && !$5 && !$6 && !$7 && !$8 && !$9 && !$10 && !$11) {
+         keywords.push({ value: 'COMMENT', weight: 11 });
        }
-       if (!$3 && !$4 && !$5 && !$6 && !$7 && !$8 && !$9 && !$10) {
-         keywords.push('PARTITIONED BY');
-       }
-       if (isImpala() && !$4 && !$5 && !$6 && !$7 && !$8 && !$9 && !$10) {
-         keywords.push('WITH SERDEPROPERTIES');
-       }
-       if (isHive() && !$5 && !$6 && !$7 && !$8 && !$9 && !$10) {
-         keywords.push('CLUSTERED BY');
-       }
-       if (isHive() && !$6 && !$7 && !$8 && !$9 && !$10) {
-         keywords.push('SKEWED BY');
-       } else if (isHive() && $6 && $6.suggestKeywords && !$7 && !$8 && !$9 && !$10) {
-         keywords = keywords.concat($6.suggestKeywords); // Get the last optional from SKEWED BY
-       }
-       if (!$7 && !$8 && !$9 && !$10) {
-         keywords.push('ROW FORMAT');
-         keywords.push('STORED AS');
-         if (isHive()) {
-          keywords.push('STORED BY');
+       if (!$3 && !$4 && !$5 && !$6 && !$7 && !$8 && !$9 && !$10 && !$11) {
+         keywords.push({ value: 'PARTITIONED BY', weight: 10 });
+         if (parser.isImpala()) {
+           keywords.push({ value: 'PARTITION BY', weight: 10 });
          }
-       } else if ($7 && $7.suggestKeywords && !$8 && !$9 && !$10) {
-         keywords = keywords.concat($7.suggestKeywords);
        }
-       if (!$8 && !$9 && !$10) {
-         keywords.push('LOCATION');
+       if (parser.isImpala() && !$4 && !$5 && !$6 && !$7 && !$8 && !$9 && !$10 && !$11) {
+         keywords.push({ value: 'SORT BY', weight: 9 });
        }
-       if (!$9 && !$10) {
-         keywords.push('TBLPROPERTIES');
+       if (parser.isHive() && !$5 && !$6 && !$7 && !$8 && !$9 && !$10 && !$11) {
+         keywords.push({ value: 'CLUSTERED BY', weight: 8 });
        }
-       if (isImpala() && !$10) {
-         keywords.push('CACHED IN');
+       if (parser.isHive() && !$6 && !$7 && !$8 && !$9 && !$10 && !$11) {
+         keywords.push({ value: 'SKEWED BY', weight: 7 });
+       } else if (parser.isHive() && $6 && $6.suggestKeywords && !$7 && !$8 && !$9 && !$10 && !$10) {
+         keywords = keywords.concat(parser.createWeightedKeywords($6.suggestKeywords, 7)); // Get the last optional from SKEWED BY
        }
+       if (!$7 && !$8 && !$9 && !$10 && !$11) {
+         keywords.push({ value: 'ROW FORMAT', weight: 6 });
+         keywords.push({ value: 'STORED AS', weight: 6 });
+         if (parser.isHive()) {
+           keywords.push({ value: 'STORED BY', weight: 6 });
+         }
+       } else if ($7 && $7.suggestKeywords && !$8 && !$9 && !$10 && !$11) {
+         keywords = keywords.concat(parser.createWeightedKeywords($7.suggestKeywords, 6));
+       }
+       if ((($7 && $7.storedBy) || parser.isImpala()) && !$8 && !$9 && !$10 && !$11) {
+         keywords.push({ value: 'WITH SERDEPROPERTIES', weight: 5 });
+       }
+       if (!$9 && !$10 && !$11) {
+         keywords.push({ value: 'LOCATION', weight: 4 });
+       }
+       if (!$10 && !$11) {
+         keywords.push({ value: 'TBLPROPERTIES', weight: 3 });
+       }
+       if (parser.isImpala() && !$11) {
+         keywords.push({ value: 'CACHED IN', weight: 2 }, { value: 'UNCACHED', weight: 2 });
+       }
+       if (parser.isImpala() && $11 && $11.suggestKeywords) {
+         keywords = keywords.concat(parser.createWeightedKeywords($11.suggestKeywords, 2));
+       }
+       keywords.push({ value: 'AS', weight: 1 });
      }
 
      if (keywords.length > 0) {
-       suggestKeywords(keywords);
+       parser.suggestKeywords(keywords);
      }
    }
  ;
 
-// Hack as no space is required between table name and '(' which would be read as UDF(
-// can be dropped if switched to LR(*)
 TableIdentifierAndOptionalColumnSpecification
- : SchemaQualifiedTableIdentifier OptionalColumnSpecificationsOrLike  -> $2
- | 'UDF(' DropLastLocation ColumnSpecificationList ')'
- | RegularOrBacktickedIdentifier AnyDot 'UDF(' DropLastLocation ColumnSpecificationList ')'
+ : SchemaQualifiedIdentifier OptionalColumnSpecificationsOrLike  -> $2
  ;
 
 TableIdentifierAndOptionalColumnSpecification_EDIT
- : SchemaQualifiedTableIdentifier OptionalColumnSpecificationsOrLike_EDIT
- | 'UDF(' DropLastLocation ColumnSpecificationList_EDIT RightParenthesisOrError
- | RegularOrBacktickedIdentifier AnyDot 'UDF(' DropLastLocation ColumnSpecificationList_EDIT RightParenthesisOrError
- ;
-
-DropLastLocation
- : /* Empty */
-   {
-     if (parser.yy.locations.length > 0) {
-       parser.yy.locations.pop();
-     }
-   }
- ;
-
-OptionalHiveTemporary
- :
- | '<hive>TEMPORARY'
- ;
-
-OptionalExternal
- :
- | '<hive>EXTERNAL'
- | '<impala>EXTERNAL'
+ : SchemaQualifiedIdentifier OptionalColumnSpecificationsOrLike_EDIT
+ | SchemaQualifiedIdentifier_EDIT OptionalColumnSpecificationsOrLike
  ;
 
 OptionalColumnSpecificationsOrLike
@@ -326,10 +278,10 @@ OptionalColumnSpecificationsOrLike_EDIT
  | '<impala>LIKE_PARQUET' HdfsPath_EDIT
  | 'LIKE' 'CURSOR'
    {
-     suggestTables();
-     suggestDatabases({ appendDot: true });
-     if (isImpala()) {
-       suggestKeywords(['PARQUET']);
+     parser.suggestTables();
+     parser.suggestDatabases({ appendDot: true });
+     if (parser.isImpala()) {
+       parser.suggestKeywords(['PARQUET']);
      }
    }
  | 'LIKE' SchemaQualifiedTableIdentifier_EDIT
@@ -337,15 +289,25 @@ OptionalColumnSpecificationsOrLike_EDIT
 
 ParenthesizedColumnSpecificationList
  : '(' ColumnSpecificationList ')'
+ | '(' ColumnSpecificationList ',' ConstraintSpecification ')'
  ;
 
 ParenthesizedColumnSpecificationList_EDIT
  : '(' ColumnSpecificationList_EDIT RightParenthesisOrError
+ | '(' ColumnSpecificationList ',' ConstraintSpecification_EDIT RightParenthesisOrError
+ | '(' ColumnSpecificationList ',' 'CURSOR' RightParenthesisOrError
+   {
+     if (parser.isImpala()) {
+       parser.suggestKeywords(['PRIMARY KEY']);
+     } else if (parser.isHive()) {
+       parser.suggestKeywords([{ value: 'PRIMARY KEY', weight: 2 }, { value: 'CONSTRAINT', weight: 1 }]);
+     }
+   }
  ;
 
 ColumnSpecificationList
  : ColumnSpecification
- | ColumnSpecificationList ',' ColumnSpecification
+ | ColumnSpecificationList ',' ColumnSpecification                                        -> $3
  ;
 
 ColumnSpecificationList_EDIT
@@ -353,22 +315,111 @@ ColumnSpecificationList_EDIT
  | ColumnSpecification_EDIT ',' ColumnSpecificationList
  | ColumnSpecificationList ',' ColumnSpecification_EDIT
  | ColumnSpecificationList ',' ColumnSpecification_EDIT ',' ColumnSpecificationList
+ | ColumnSpecification 'CURSOR'
+   {
+     parser.checkForKeywords($1);
+   }
+ | ColumnSpecification 'CURSOR' ',' ColumnSpecificationList
+   {
+     parser.checkForKeywords($1);
+   }
+ | ColumnSpecificationList ',' ColumnSpecification 'CURSOR'
+   {
+     parser.checkForKeywords($3);
+   }
+ | ColumnSpecificationList ',' ColumnSpecification 'CURSOR' ',' ColumnSpecificationList
+   {
+     parser.checkForKeywords($3);
+   }
  ;
 
 ColumnSpecification
- : ColumnIdentifier ColumnDataType OptionalComment
+ : ColumnIdentifier ColumnDataType OptionalColumnOptions
+   {
+     var keywords = [];
+     if (parser.isImpala()) {
+       if (!$3['primary']) {
+         keywords.push('PRIMARY KEY');
+       }
+       if (!$3['encoding']) {
+         keywords.push('ENCODING');
+       }
+       if (!$3['compression']) {
+         keywords.push('COMPRESSION');
+       }
+       if (!$3['default']) {
+         keywords.push('DEFAULT');
+       }
+       if (!$3['block_size']) {
+         keywords.push('BLOCK_SIZE');
+       }
+       if (!$3['null']) {
+         keywords.push('NOT NULL');
+         keywords.push('NULL');
+       }
+     }
+     if (!$3['comment']) {
+       keywords.push('COMMENT');
+       if (parser.isHive() && $2.toLowerCase() === 'double') {
+         keywords.push({ value: 'PRECISION', weight: 2 });
+       }
+     }
+     if (keywords.length > 0) {
+       $$ = { suggestKeywords: keywords };
+     }
+   }
  ;
 
 ColumnSpecification_EDIT
- : ColumnIdentifier 'CURSOR' OptionalComment
+ : ColumnIdentifier 'CURSOR' OptionalColumnOptions
    {
-     suggestKeywords(getColumnDataTypeKeywords());
+     parser.suggestKeywords(parser.getColumnDataTypeKeywords());
    }
- | ColumnIdentifier ColumnDataType_EDIT
- | ColumnIdentifier ColumnDataType OptionalComment 'CURSOR'
+ | ColumnIdentifier ColumnDataType_EDIT OptionalColumnOptions
+ | ColumnIdentifier ColumnDataType ColumnOptions_EDIT
+ ;
+
+OptionalColumnOptions
+ :                      -> {}
+ | ColumnOptions
+ ;
+
+ColumnOptions
+ : ColumnOption
    {
-     if (!$3) {
-       suggestKeywords(['COMMENT']);
+     $$ = {};
+     $$[$1] = true;
+   }
+ | ColumnOptions ColumnOption
+   {
+     $1[$2] = true;
+   }
+ ;
+
+ColumnOptions_EDIT
+ : ColumnOption_EDIT
+ | ColumnOption_EDIT ColumnOptions
+ | ColumnOptions ColumnOption_EDIT
+ | ColumnOptions ColumnOption_EDIT ColumnOptions
+ ;
+
+ColumnOption
+ : ImpalaPrimaryKey                                          -> 'primary'
+ | '<impala>ENCODING' RegularIdentifier                      -> 'encoding'
+ | '<impala>COMPRESSION' RegularIdentifier                   -> 'compression'
+ | '<impala>DEFAULT' NonParenthesizedValueExpressionPrimary  -> 'default'
+ | '<impala>BLOCK_SIZE' UnsignedNumericLiteral               -> 'block_size'
+ | 'NOT' 'NULL'                                              -> 'null'
+ | 'NULL'                                                    -> 'null'
+ | Comment                                                   -> 'comment'
+ ;
+
+ColumnOption_EDIT
+ : ImpalaPrimaryKey_EDIT
+ | 'NOT' 'CURSOR'
+   {
+     if (parser.isImpala()) {
+       parser.suggestKeywords(['NULL']);
      }
    }
  ;
@@ -393,55 +444,55 @@ ColumnDataType_EDIT
  ;
 
 ArrayType
- : '<hive>ARRAY' '<' ColumnDataType '>'
+ : 'ARRAY' '<' ColumnDataType '>'
  ;
 
 ArrayType_INVALID
- : '<hive>ARRAY' '<' '>'
+ : 'ARRAY' '<' '>'
  ;
 
 ArrayType_EDIT
- : '<hive>ARRAY' '<' AnyCursor GreaterThanOrError
+ : 'ARRAY' '<' AnyCursor GreaterThanOrError
    {
-     suggestKeywords(getColumnDataTypeKeywords());
+     parser.suggestKeywords(parser.getColumnDataTypeKeywords());
    }
- | '<hive>ARRAY' '<' ColumnDataType_EDIT GreaterThanOrError
+ | 'ARRAY' '<' ColumnDataType_EDIT GreaterThanOrError
  ;
 
 MapType
- : '<hive>MAP' '<' PrimitiveType ',' ColumnDataType '>'
+ : 'MAP' '<' PrimitiveType ',' ColumnDataType '>'
  ;
 
 MapType_INVALID
- : '<hive>MAP' '<' '>'
+ : 'MAP' '<' '>'
  ;
 
 MapType_EDIT
- : '<hive>MAP' '<' PrimitiveType ',' ColumnDataType_EDIT GreaterThanOrError
- | '<hive>MAP' '<' AnyCursor GreaterThanOrError
+ : 'MAP' '<' PrimitiveType ',' ColumnDataType_EDIT GreaterThanOrError
+ | 'MAP' '<' AnyCursor GreaterThanOrError
    {
-     suggestKeywords(getTypeKeywords());
+     parser.suggestKeywords(parser.getTypeKeywords());
    }
- | '<hive>MAP' '<' PrimitiveType ',' AnyCursor GreaterThanOrError
+ | 'MAP' '<' PrimitiveType ',' AnyCursor GreaterThanOrError
    {
-     suggestKeywords(getColumnDataTypeKeywords());
+     parser.suggestKeywords(parser.getColumnDataTypeKeywords());
    }
- | '<hive>MAP' '<' ',' AnyCursor GreaterThanOrError
+ | 'MAP' '<' ',' AnyCursor GreaterThanOrError
    {
-     suggestKeywords(getColumnDataTypeKeywords());
+     parser.suggestKeywords(parser.getColumnDataTypeKeywords());
    }
  ;
 
 StructType
- : '<hive>STRUCT' '<' StructDefinitionList '>'
+ : 'STRUCT' '<' StructDefinitionList '>'
  ;
 
 StructType_INVALID
- : '<hive>STRUCT' '<' '>'
+ : 'STRUCT' '<' '>'
  ;
 
 StructType_EDIT
- : '<hive>STRUCT' '<' StructDefinitionList_EDIT GreaterThanOrError
+ : 'STRUCT' '<' StructDefinitionList_EDIT GreaterThanOrError
  ;
 
 StructDefinitionList
@@ -457,11 +508,6 @@ StructDefinitionList_EDIT
  | StructDefinitionList ',' StructDefinition_EDIT Commas StructDefinitionList
  ;
 
-Commas
- : ','
- | Commas ','
- ;
-
 StructDefinition
  : RegularOrBacktickedIdentifier ':' ColumnDataType OptionalComment
  ;
@@ -469,20 +515,20 @@ StructDefinition
 StructDefinition_EDIT
  : Commas RegularOrBacktickedIdentifier ':' ColumnDataType 'CURSOR'
    {
-     suggestKeywords(['COMMENT']);
+     parser.suggestKeywords(['COMMENT']);
    }
  | Commas RegularOrBacktickedIdentifier ':' AnyCursor
    {
-     suggestKeywords(getColumnDataTypeKeywords());
+     parser.suggestKeywords(parser.getColumnDataTypeKeywords());
    }
  | Commas RegularOrBacktickedIdentifier ':' ColumnDataType_EDIT
  | RegularOrBacktickedIdentifier ':' ColumnDataType 'CURSOR'
    {
-     suggestKeywords(['COMMENT']);
+     parser.suggestKeywords(['COMMENT']);
    }
  | RegularOrBacktickedIdentifier ':' AnyCursor
    {
-     suggestKeywords(getColumnDataTypeKeywords());
+     parser.suggestKeywords(parser.getColumnDataTypeKeywords());
    }
  | RegularOrBacktickedIdentifier ':' ColumnDataType_EDIT
  ;
@@ -515,12 +561,12 @@ ColumnDataTypeList_EDIT
 ColumnDataTypeListInner_EDIT
  : Commas AnyCursor
    {
-     suggestKeywords(getColumnDataTypeKeywords());
+     parser.suggestKeywords(parser.getColumnDataTypeKeywords());
    }
  | Commas ColumnDataType_EDIT
  | AnyCursor
    {
-     suggestKeywords(getColumnDataTypeKeywords());
+     parser.suggestKeywords(parser.getColumnDataTypeKeywords());
    }
  | ColumnDataType_EDIT
  ;
@@ -530,54 +576,334 @@ GreaterThanOrError
  | error
  ;
 
-OptionalPartitionedBy
- :
- | HiveOrImpalaPartitioned 'BY' ParenthesizedColumnSpecificationList
+ConstraintSpecification
+ : ImpalaPrimaryKeySpecification
+ | HivePrimaryKeySpecification
+ | '<hive>CONSTRAINT' RegularOrBacktickedIdentifier HiveForeignKeySpecification
+ | HivePrimaryKeySpecification ',' '<hive>CONSTRAINT' RegularOrBacktickedIdentifier HiveForeignKeySpecification
  ;
 
-OptionalPartitionedBy_EDIT
+ConstraintSpecification_EDIT
+ : ImpalaPrimaryKeySpecification_EDIT
+ | HivePrimaryKeySpecification_EDIT
+ | HivePrimaryKeySpecification ',' 'CURSOR'
+   {
+     parser.suggestKeywords(['CONSTRAINT']);
+   }
+ | HivePrimaryKeySpecification ',' '<hive>CONSTRAINT' RegularOrBacktickedIdentifier 'CURSOR'
+   {
+     parser.suggestKeywords(['FOREIGN KEY']);
+   }
+ | HivePrimaryKeySpecification ',' '<hive>CONSTRAINT' RegularOrBacktickedIdentifier HiveForeignKeySpecification_EDIT
+ | HivePrimaryKeySpecification_EDIT ',' '<hive>CONSTRAINT' RegularOrBacktickedIdentifier HiveForeignKeySpecification
+ | '<hive>CONSTRAINT' RegularOrBacktickedIdentifier 'CURSOR'
+   {
+     parser.suggestKeywords(['FOREIGN KEY']);
+   }
+ | '<hive>CONSTRAINT' RegularOrBacktickedIdentifier HiveForeignKeySpecification_EDIT
+ | 'CURSOR' '<hive>CONSTRAINT' RegularOrBacktickedIdentifier HiveForeignKeySpecification
+   {
+     parser.suggestKeywords(['PRIMARY KEY']);
+   }
+ ;
+
+HivePrimaryKeySpecification
+ : HivePrimaryKey ParenthesizedColumnList '<hive>DISABLE' '<hive>NOVALIDATE'
+ ;
+
+HivePrimaryKeySpecification_EDIT
+ : HivePrimaryKey_EDIT
+ | HivePrimaryKey ParenthesizedColumnList_EDIT
+ | HivePrimaryKey ParenthesizedColumnList 'CURSOR'
+   {
+     parser.suggestKeywords(['DISABLE NOVALIDATE']);
+   }
+ | HivePrimaryKey ParenthesizedColumnList '<hive>DISABLE' 'CURSOR'
+   {
+     parser.suggestKeywords(['NOVALIDATE']);
+   }
+ | HivePrimaryKey ParenthesizedColumnList_EDIT '<hive>DISABLE' '<hive>NOVALIDATE'
+ ;
+
+HiveForeignKeySpecification
+ : '<hive>FOREIGN' '<hive>KEY' ParenthesizedColumnList '<hive>REFERENCES' SchemaQualifiedTableIdentifier ParenthesizedColumnList '<hive>DISABLE' '<hive>NOVALIDATE' OptionalRelyNoRely
+   {
+     parser.addTablePrimary($5);
+   }
+ ;
+
+HiveForeignKeySpecification_EDIT
+ : '<hive>FOREIGN' 'CURSOR'
+   {
+     parser.suggestKeywords(['KEY']);
+   }
+ | '<hive>FOREIGN' '<hive>KEY' ParenthesizedColumnList_EDIT
+ | '<hive>FOREIGN' '<hive>KEY' ParenthesizedColumnList 'CURSOR'
+   {
+     parser.suggestKeywords(['REFERENCES']);
+   }
+ | '<hive>FOREIGN' '<hive>KEY' ParenthesizedColumnList '<hive>REFERENCES' 'CURSOR'
+   {
+     parser.suggestTables();
+     parser.suggestDatabases({ appendDot: true });
+   }
+ | '<hive>FOREIGN' '<hive>KEY' ParenthesizedColumnList '<hive>REFERENCES' SchemaQualifiedTableIdentifier_EDIT
+ | '<hive>FOREIGN' '<hive>KEY' ParenthesizedColumnList '<hive>REFERENCES' SchemaQualifiedTableIdentifier ParenthesizedColumnList_EDIT
+   {
+     parser.addTablePrimary($5);
+   }
+ | '<hive>FOREIGN' '<hive>KEY' ParenthesizedColumnList '<hive>REFERENCES' SchemaQualifiedTableIdentifier ParenthesizedColumnList 'CURSOR'
+   {
+     parser.addTablePrimary($5);
+     parser.suggestKeywords(['DISABLE NOVALIDATE']);
+   }
+ | '<hive>FOREIGN' '<hive>KEY' ParenthesizedColumnList '<hive>REFERENCES' SchemaQualifiedTableIdentifier ParenthesizedColumnList '<hive>DISABLE' 'CURSOR'
+   {
+     parser.addTablePrimary($5);
+     parser.suggestKeywords(['NOVALIDATE']);
+   }
+ | '<hive>FOREIGN' '<hive>KEY' ParenthesizedColumnList '<hive>REFERENCES' SchemaQualifiedTableIdentifier ParenthesizedColumnList '<hive>DISABLE' '<hive>NOVALIDATE' OptionalRelyNoRely 'CURSOR'
+   {
+     parser.addTablePrimary($5);
+     if (!$9) {
+       parser.suggestKeywords(['NORELY', 'RELY']);
+     }
+   }
+ ;
+
+OptionalRelyNoRely
+ :
+ | '<hive>RELY'
+ | '<hive>NORELY'
+ ;
+
+ImpalaPrimaryKeySpecification
+ : ImpalaPrimaryKey ParenthesizedColumnList
+ ;
+
+ImpalaPrimaryKeySpecification_EDIT
+ : ImpalaPrimaryKey_EDIT
+ | ImpalaPrimaryKey_EDIT ParenthesizedColumnList
+ | ImpalaPrimaryKey ParenthesizedColumnList_EDIT
+ ;
+
+ImpalaPrimaryKey
+ : '<impala>PRIMARY' '<impala>KEY'
+ ;
+
+ImpalaPrimaryKey_EDIT
+ : '<impala>PRIMARY' 'CURSOR'
+   {
+     parser.suggestKeywords(['KEY']);
+   }
+ ;
+
+HivePrimaryKey
+ : '<hive>PRIMARY' '<hive>KEY'
+ ;
+
+HivePrimaryKey_EDIT
+ : '<hive>PRIMARY' 'CURSOR'
+   {
+     parser.suggestKeywords(['KEY']);
+   }
+ ;
+
+OptionalPartitionedBy
+ :
+ | PartitionedBy
+ ;
+
+PartitionedBy
+ : HiveOrImpalaPartitioned 'BY' ParenthesizedColumnSpecificationList
+ | 'PARTITION' 'BY' AnyRange ParenthesizedColumnList ParenthesizedPartitionValuesList
+ | 'PARTITION' 'BY' '<impala>HASH' ParenthesizedColumnList '<impala>PARTITIONS' UnsignedNumericLiteral
+ ;
+
+PartitionedBy_EDIT
  : HiveOrImpalaPartitioned 'CURSOR'
    {
-     suggestKeywords(['BY']);
+     parser.suggestKeywords(['BY']);
    }
  | HiveOrImpalaPartitioned 'CURSOR' ParenthesizedColumnSpecificationList
    {
-     suggestKeywords(['BY']);
+     parser.suggestKeywords(['BY']);
    }
  | HiveOrImpalaPartitioned 'BY' ParenthesizedColumnSpecificationList_EDIT
  | HiveOrImpalaPartitioned ParenthesizedColumnSpecificationList_EDIT
+ | 'PARTITION' 'CURSOR'
+   {
+     parser.suggestKeywords(['BY']);
+   }
+ | 'PARTITION' 'BY' 'CURSOR'
+   {
+     parser.suggestKeywords(['HASH', 'RANGE']);
+   }
+ | 'PARTITION' 'BY' AnyRange ParenthesizedColumnList_EDIT
+ | 'PARTITION' 'BY' AnyRange ParenthesizedColumnList ParenthesizedPartitionValuesList_EDIT
+ | 'PARTITION' 'BY' '<impala>HASH' ParenthesizedColumnList_EDIT
+ | 'PARTITION' 'BY' '<impala>HASH' ParenthesizedColumnList 'CURSOR'
+   {
+     parser.suggestKeywords(['PARTITIONS']);
+   }
+ | 'PARTITION' 'BY' '<impala>HASH' ParenthesizedColumnList_EDIT '<impala>PARTITIONS' UnsignedNumericLiteral
  ;
 
-ParenthesizedColumnList
- : '(' ColumnList ')'
- ;
-
-ColumnList
- : ColumnIdentifier
- | ColumnList ',' ColumnIdentifier
- ;
-
-OptionalHiveClusteredBy
+OptionalSortBy
  :
- | '<hive>CLUSTERED' 'BY' ParenthesizedColumnList OptionalHiveSortedBy 'INTO' 'UNSIGNED_INTEGER' '<hive>BUCKETS'
+ | SortBy
  ;
 
-OptionalHiveClusteredBy_EDIT
+SortBy
+ : '<impala>SORT' 'BY' ParenthesizedColumnList
+ ;
+
+SortBy_EDIT
+ : '<impala>SORT' 'CURSOR'
+   {
+     parser.suggestKeywords(['BY']);
+   }
+ | '<impala>SORT' 'BY' ParenthesizedColumnList_EDIT
+ ;
+
+ParenthesizedPartitionValuesList
+ : '(' PartitionValueList ')'
+ ;
+
+ParenthesizedPartitionValuesList_EDIT
+ : '(' 'CURSOR' RightParenthesisOrError
+   {
+     if (parser.isImpala()) {
+       parser.suggestKeywords(['PARTITION']);
+     }
+   }
+ |'(' PartitionValueList_EDIT RightParenthesisOrError
+ ;
+
+PartitionValueList
+ : PartitionValue
+ | PartitionValueList ',' PartitionValue
+ ;
+
+PartitionValueList_EDIT
+ : PartitionValue_EDIT
+ | PartitionValueList ',' 'CURSOR'
+   {
+     if (parser.isImpala()) {
+       parser.suggestKeywords(['PARTITION']);
+     }
+   }
+ | PartitionValueList ',' 'CURSOR' ',' PartitionValueList
+   {
+     if (parser.isImpala()) {
+       parser.suggestKeywords(['PARTITION']);
+     }
+   }
+ | PartitionValueList ',' PartitionValue_EDIT
+ | PartitionValueList ',' PartitionValue_EDIT ',' PartitionValueList
+ ;
+
+PartitionValue
+ : 'PARTITION' ValueExpression LessThanOrEqualTo 'VALUES' LessThanOrEqualTo ValueExpression
+ | 'PARTITION' 'VALUES' LessThanOrEqualTo ValueExpression
+ | 'PARTITION' ValueExpression LessThanOrEqualTo 'VALUES'
+ | '<impala>PARTITION_VALUE' '=' ValueExpression
+ ;
+
+PartitionValue_EDIT
+ : 'PARTITION' 'CURSOR'
+   {
+     if (parser.isImpala()) {
+       parser.suggestKeywords(['VALUE', 'VALUES']);
+     }
+   }
+ | '<impala>PARTITION_VALUE' 'CURSOR'
+   {
+     parser.suggestKeywords(['=']);
+   }
+ | '<impala>PARTITION_VALUE' '=' 'CURSOR'
+   {
+     parser.suggestFunctions();
+   }
+ | 'PARTITION' ValueExpression_EDIT
+   {
+     if ($2.endsWithLessThanOrEqual && parser.isImpala()) {
+      parser.suggestKeywords(['VALUES']);
+     }
+   }
+ | 'PARTITION' ValueExpression 'CURSOR'
+   {
+     if (parser.isImpala()) {
+       parser.suggestKeywords(['<', '<=']);
+     }
+   }
+ | 'PARTITION' ValueExpression LessThanOrEqualTo 'CURSOR'
+   {
+    if (parser.isImpala()) {
+      parser.suggestKeywords(['VALUES']);
+    }
+   }
+ | 'PARTITION' ValueExpression_EDIT LessThanOrEqualTo 'VALUES'
+ | 'PARTITION' ValueExpression LessThanOrEqualTo 'VALUES' 'CURSOR'
+   {
+     if (parser.isImpala()) {
+       parser.suggestKeywords(['<', '<=']);
+     }
+   }
+ | 'PARTITION' ValueExpression LessThanOrEqualTo 'VALUES' LessThanOrEqualTo 'CURSOR'
+   {
+     if (parser.isImpala()) {
+      parser.suggestFunctions();
+     }
+   }
+ | 'PARTITION' ValueExpression LessThanOrEqualTo 'VALUES' LessThanOrEqualTo ValueExpression_EDIT
+ | 'PARTITION' 'VALUES' 'CURSOR'
+   {
+     if (parser.isImpala()) {
+       parser.suggestKeywords(['<', '<=']);
+     }
+   }
+ | 'PARTITION' 'VALUES' LessThanOrEqualTo 'CURSOR'
+   {
+     if (parser.isImpala()) {
+      parser.suggestFunctions();
+     }
+   }
+ | 'PARTITION' 'VALUES' LessThanOrEqualTo ValueExpression_EDIT
+ ;
+
+LessThanOrEqualTo
+ : '<'
+ | 'COMPARISON_OPERATOR' // This is fine for autocompletion
+ ;
+
+OptionalClusteredBy
+ :
+ | ClusteredBy
+ ;
+
+ClusteredBy
+ : '<hive>CLUSTERED' 'BY' ParenthesizedColumnList OptionalHiveSortedBy 'INTO' 'UNSIGNED_INTEGER' '<hive>BUCKETS'
+ ;
+
+ClusteredBy_EDIT
  : '<hive>CLUSTERED' 'CURSOR'
    {
-     suggestKeywords(['BY']);
+     parser.suggestKeywords(['BY']);
    }
+ | '<hive>CLUSTERED' 'BY' ParenthesizedColumnList_EDIT OptionalHiveSortedBy
+ | '<hive>CLUSTERED' 'BY' ParenthesizedColumnList_EDIT OptionalHiveSortedBy 'INTO' 'UNSIGNED_INTEGER' '<hive>BUCKETS'
  | '<hive>CLUSTERED' 'BY' ParenthesizedColumnList OptionalHiveSortedBy 'CURSOR'
    {
      if (!$4) {
-       suggestKeywords(['INTO', 'SORTED BY']);
+       parser.suggestKeywords([{ value: 'INTO', weight: 1 }, { value: 'SORTED BY', weight: 2 }]);
      } else {
-       suggestKeywords(['INTO']);
+       parser.suggestKeywords(['INTO']);
      }
    }
  | '<hive>CLUSTERED' 'BY' ParenthesizedColumnList OptionalHiveSortedBy 'INTO' 'UNSIGNED_INTEGER' 'CURSOR'
    {
-     suggestKeywords(['BUCKETS']);
+     parser.suggestKeywords(['BUCKETS']);
    }
  | '<hive>CLUSTERED' 'BY' ParenthesizedColumnList OptionalHiveSortedBy_EDIT 'INTO' 'UNSIGNED_INTEGER' '<hive>BUCKETS'
  | '<hive>CLUSTERED' 'BY' ParenthesizedColumnList OptionalHiveSortedBy_EDIT
@@ -591,7 +917,7 @@ OptionalHiveSortedBy
 OptionalHiveSortedBy_EDIT
  : '<hive>SORTED' 'CURSOR'
    {
-     suggestKeywords(['BY']);
+     parser.suggestKeywords(['BY']);
    }
  | '<hive>SORTED' 'BY' ParenthesizedSortList_EDIT
  ;
@@ -623,25 +949,33 @@ SortIdentifier
 SortIdentifier_EDIT
  : ColumnIdentifier OptionalAscOrDesc 'CURSOR'
    {
-     checkForKeywords($2);
+     parser.checkForKeywords($2);
+   }
+ | ColumnIdentifier_EDIT OptionalAscOrDesc
+ | AnyCursor OptionalAscOrDesc
+   {
+     parser.suggestColumns();
    }
  ;
 
-
-OptionalHiveSkewedBy
+OptionalSkewedBy
  :
- | '<hive>SKEWED' 'BY' ParenthesizedColumnList ON ParenthesizedSkewedValueList  -> { suggestKeywords: ['STORED AS DIRECTORIES'] }
+ | SkewedBy
+ ;
+
+SkewedBy
+ : '<hive>SKEWED' 'BY' ParenthesizedColumnList ON ParenthesizedSkewedValueList  -> { suggestKeywords: ['STORED AS DIRECTORIES'] }
  | '<hive>SKEWED' 'BY' ParenthesizedColumnList ON ParenthesizedSkewedValueList '<hive>STORED_AS_DIRECTORIES' // Hack otherwise ambiguous with OptionalHiveStoredAsOrBy
  ;
 
-OptionalHiveSkewedBy_EDIT
+SkewedBy_EDIT
  : '<hive>SKEWED' 'CURSOR'
    {
-     suggestKeywords(['BY']);
+     parser.suggestKeywords(['BY']);
    }
  | '<hive>SKEWED' 'BY' ParenthesizedColumnList 'CURSOR'
    {
-     suggestKeywords(['ON']);
+     parser.suggestKeywords(['ON']);
    }
  ;
 
@@ -654,59 +988,51 @@ SkewedValueList
  | SkewedValueList ',' ParenthesizedSimpleValueList
  ;
 
-ParenthesizedSimpleValueList
- : '(' SimpleValueList ')'
- ;
-
-SimpleValueList
- : UnsignedValueSpecification
- | SimpleValueList ',' UnsignedValueSpecification
- ;
-
 OptionalStoredAsOrBy
  :
- | StoredAs
+ | StoredAsOrBy
+ ;
+
+StoredAsOrBy
+ : StoredAs
  | 'ROW' HiveOrImpalaFormat HiveOrImpalaRowFormat OptionalStoredAs
    {
-     $$ = mergeSuggestKeywords($3, $4)
+     $$ = parser.mergeSuggestKeywords($3, $4)
    }
- | '<hive>STORED' 'BY' QuotedValue OptionalHiveWithSerdeproperties
+ | '<hive>STORED' 'BY' QuotedValue
   {
-    if (!$4) {
-      $$ = { suggestKeywords: ['WITH SERDEPROPERTIES'] };
-    }
+    $$ = { storedBy: true }
   }
  ;
 
-OptionalStoredAsOrBy_EDIT
+StoredAsOrBy_EDIT
  : HiveOrImpalaStored 'CURSOR'
    {
-     if (isHive()) {
-       suggestKeywords(['AS', 'BY']);
+     if (parser.isHive()) {
+       parser.suggestKeywords(['AS', 'BY']);
      } else {
-       suggestKeywords(['AS']);
+       parser.suggestKeywords(['AS']);
      }
    }
  | StoredAs_EDIT
  | 'ROW' 'CURSOR'
    {
-     suggestKeywords(['FORMAT']);
+     parser.suggestKeywords(['FORMAT']);
    }
  | 'ROW' HiveOrImpalaFormat 'CURSOR'
    {
-     if (isHive()) {
-       suggestKeywords(['DELIMITED', 'SERDE']);
+     if (parser.isHive()) {
+       parser.suggestKeywords(['DELIMITED', 'SERDE']);
      } else {
-       suggestKeywords(['DELIMITED']);
+       parser.suggestKeywords(['DELIMITED']);
      }
    }
  | 'ROW' HiveOrImpalaFormat HiveOrImpalaRowFormat_EDIT
  | 'ROW' HiveOrImpalaFormat HiveOrImpalaRowFormat HiveOrImpalaStored 'CURSOR'
    {
-     suggestKeywords(['AS']);
+     parser.suggestKeywords(['AS']);
    }
  | 'ROW' HiveOrImpalaFormat HiveOrImpalaRowFormat StoredAs_EDIT
- | '<hive>STORED' 'BY' QuotedValue OptionalHiveWithSerdeproperties_EDIT
  ;
 
 OptionalStoredAs
@@ -721,22 +1047,8 @@ StoredAs
 StoredAs_EDIT
  : HiveOrImpalaStored AnyAs 'CURSOR'
    {
-     if (isHive()) {
-       suggestKeywords(['AVRO', 'INPUTFORMAT', 'ORC', 'PARQUET', 'RCFILE', 'SEQUENCEFILE', 'TEXTFILE']);
-     } else {
-       suggestKeywords(['AVRO', 'PARQUET', 'RCFILE', 'SEQUENCEFILE', 'TEXTFILE']);
-     }
+     parser.suggestFileFormats();
    }
- ;
-
-HiveOrImpalaFormat
- : '<hive>FORMAT'
- | '<impala>FORMAT'
- ;
-
-HiveOrImpalaStored
- : '<hive>STORED'
- | '<impala>STORED'
  ;
 
 FileFormat
@@ -748,6 +1060,7 @@ FileFormat
  | '<hive>SEQUENCEFILE'
  | '<hive>TEXTFILE'
  | '<impala>AVRO'
+ | '<impala>KUDU'
  | '<impala>PARQUET'
  | '<impala>RCFILE'
  | '<impala>SEQUENCEFILE'
@@ -765,32 +1078,35 @@ HiveOrImpalaRowFormat_EDIT
  ;
 
 HiveRowFormat
+ : HiveDelimitedRowFormat
+ | '<hive>SERDE' QuotedValue
+ ;
+
+HiveRowFormat_EDIT
+ : HiveDelimitedRowFormat_EDIT
+ ;
+
+HiveDelimitedRowFormat
  : '<hive>DELIMITED' OptionalFieldsTerminatedBy OptionalCollectionItemsTerminatedBy OptionalMapKeysTerminatedBy
    OptionalLinesTerminatedBy OptionalNullDefinedAs
    {
      if (!$2 && !$3 && !$4 && !$5 && !$6) {
-       $$ = { suggestKeywords: ['COLLECTION ITEMS TERMINATED BY', 'FIELDS TERMINATED BY', 'LINES TERMINATED BY', 'MAP KEYS TERMINATED BY', 'NULL DEFINED AS'] };
+       $$ = { suggestKeywords: [{ value: 'FIELDS TERMINATED BY', weight: 5 }, { value: 'COLLECTION ITEMS TERMINATED BY', weight: 4 }, { value: 'MAP KEYS TERMINATED BY', weight: 3 }, { value: 'LINES TERMINATED BY', weight: 2 }, { value: 'NULL DEFINED AS', weight: 1 }]};
      } else if ($2 && $2.suggestKeywords && !$3 && !$4 && !$5 && !$6) {
-       $$ = { suggestKeywords: $2.suggestKeywords.concat(['COLLECTION ITEMS TERMINATED BY', 'LINES TERMINATED BY', 'MAP KEYS TERMINATED BY', 'NULL DEFINED AS']) };
+       $$ = { suggestKeywords: parser.createWeightedKeywords($2.suggestKeywords, 5).concat([{ value: 'COLLECTION ITEMS TERMINATED BY', weight: 4 }, { value: 'MAP KEYS TERMINATED BY', weight: 3 }, { value: 'LINES TERMINATED BY', weight: 2 }, { value: 'NULL DEFINED AS', weight: 1 }]) };
      } else if (!$3 && !$4 && !$5 && !$6) {
-       $$ = { suggestKeywords: ['COLLECTION ITEMS TERMINATED BY', 'LINES TERMINATED BY', 'MAP KEYS TERMINATED BY', 'NULL DEFINED AS'] };
+       $$ = { suggestKeywords: [{ value: 'COLLECTION ITEMS TERMINATED BY', weight: 4 }, { value: 'MAP KEYS TERMINATED BY', weight: 3 }, { value: 'LINES TERMINATED BY', weight: 2 }, { value: 'NULL DEFINED AS', weight: 1 }] };
      } else if (!$4 && !$5 && !$6) {
-       $$ = { suggestKeywords: ['LINES TERMINATED BY', 'MAP KEYS TERMINATED BY', 'NULL DEFINED AS'] };
+       $$ = { suggestKeywords: [{ value: 'MAP KEYS TERMINATED BY', weight: 3 }, { value: 'LINES TERMINATED BY', weight: 2 }, { value: 'NULL DEFINED AS', weight: 1 }] };
      } else if (!$5 && !$6) {
-       $$ = { suggestKeywords: ['LINES TERMINATED BY', 'NULL DEFINED AS'] };
+       $$ = { suggestKeywords: [{ value: 'LINES TERMINATED BY', weight: 2 }, { value: 'NULL DEFINED AS', weight: 1 }] };
      } else if (!$6) {
-       $$ = { suggestKeywords: ['NULL DEFINED AS'] };
-     }
-   }
- | '<hive>SERDE' QuotedValue OptionalHiveWithSerdeproperties
-   {
-     if (!$3) {
-       $$ = { suggestKeywords: ['WITH SERDEPROPERTIES'] };
+       $$ = { suggestKeywords: [{ value: 'NULL DEFINED AS', weight: 1 }] };
      }
    }
  ;
 
-HiveRowFormat_EDIT
+HiveDelimitedRowFormat_EDIT
  : '<hive>DELIMITED' OptionalFieldsTerminatedBy_EDIT OptionalCollectionItemsTerminatedBy OptionalMapKeysTerminatedBy
    OptionalLinesTerminatedBy OptionalNullDefinedAs
  | '<hive>DELIMITED' OptionalFieldsTerminatedBy OptionalCollectionItemsTerminatedBy_EDIT OptionalMapKeysTerminatedBy
@@ -807,11 +1123,11 @@ ImpalaRowFormat
  : '<impala>DELIMITED' OptionalFieldsTerminatedBy OptionalLinesTerminatedBy
    {
      if (!$2 && !$3) {
-       $$ = { suggestKeywords: ['FIELDS TERMINATED BY', 'LINES TERMINATED BY'] };
+       $$ = { suggestKeywords: [{ value: 'FIELDS TERMINATED BY', weight: 2 }, { value: 'LINES TERMINATED BY', weight: 1 }] };
      } else if ($2 && $2.suggestKeywords && !$3) {
-       $$ = { suggestKeywords: $2.suggestKeywords.concat(['LINES TERMINATED BY']) };
+       $$ = { suggestKeywords: parser.createWeightedKeywords($2.suggestKeywords, 2).concat(['LINES TERMINATED BY']) };
      } else if (!$3) {
-       $$ = { suggestKeywords: ['LINES TERMINATED BY'] };
+       $$ = { suggestKeywords: [{ value: 'LINES TERMINATED BY', weight: 1 }] };
      }
    }
  ;
@@ -830,31 +1146,16 @@ OptionalFieldsTerminatedBy
 OptionalFieldsTerminatedBy_EDIT
  : HiveOrImpalaFields 'CURSOR'
    {
-     suggestKeywords(['TERMINATED BY']);
+     parser.suggestKeywords(['TERMINATED BY']);
    }
  | HiveOrImpalaFields HiveOrImpalaTerminated 'CURSOR'
    {
-     suggestKeywords(['BY']);
+     parser.suggestKeywords(['BY']);
    }
  | HiveOrImpalaFields HiveOrImpalaTerminated 'BY' SingleQuotedValue 'ESCAPED' 'CURSOR'
    {
-     suggestKeywords(['BY']);
+     parser.suggestKeywords(['BY']);
    }
- ;
-
-HiveOrImpalaFields
- : '<hive>FIELDS'
- | '<impala>FIELDS'
- ;
-
-HiveOrImpalaTerminated
- : '<hive>TERMINATED'
- | '<impala>TERMINATED'
- ;
-
-HiveOrImpalaEscaped
- : '<hive>ESCAPED'
- | '<impala>ESCAPED'
  ;
 
 OptionalCollectionItemsTerminatedBy
@@ -865,35 +1166,35 @@ OptionalCollectionItemsTerminatedBy
 OptionalCollectionItemsTerminatedBy_EDIT
  : '<hive>COLLECTION' 'CURSOR'
    {
-     suggestKeywords(['ITEMS TERMINATED BY']);
+     parser.suggestKeywords(['ITEMS TERMINATED BY']);
    }
  | '<hive>COLLECTION' '<hive>ITEMS' 'CURSOR'
    {
-     suggestKeywords(['TERMINATED BY']);
+     parser.suggestKeywords(['TERMINATED BY']);
    }
  | '<hive>COLLECTION' '<hive>ITEMS' '<hive>TERMINATED' 'CURSOR'
    {
-     suggestKeywords(['BY']);
+     parser.suggestKeywords(['BY']);
    }
  ;
 
 OptionalMapKeysTerminatedBy
  :
- | '<hive>MAP' '<hive>KEYS' '<hive>TERMINATED' 'BY' SingleQuotedValue
+ | 'MAP' '<hive>KEYS' '<hive>TERMINATED' 'BY' SingleQuotedValue
  ;
 
 OptionalMapKeysTerminatedBy_EDIT
- : '<hive>MAP' 'CURSOR'
+ : 'MAP' 'CURSOR'
    {
-     suggestKeywords(['KEYS TERMINATED BY']);
+     parser.suggestKeywords(['KEYS TERMINATED BY']);
    }
- | '<hive>MAP' '<hive>KEYS' 'CURSOR'
+ | 'MAP' '<hive>KEYS' 'CURSOR'
    {
-     suggestKeywords(['TERMINATED BY']);
+     parser.suggestKeywords(['TERMINATED BY']);
    }
- | '<hive>MAP' '<hive>KEYS' '<hive>TERMINATED' 'CURSOR'
+ | 'MAP' '<hive>KEYS' '<hive>TERMINATED' 'CURSOR'
    {
-     suggestKeywords(['BY']);
+     parser.suggestKeywords(['BY']);
    }
  ;
 
@@ -905,17 +1206,12 @@ OptionalLinesTerminatedBy
 OptionalLinesTerminatedBy_EDIT
  : HiveOrImpalaLines 'CURSOR'
    {
-     suggestKeywords(['TERMINATED BY']);
+     parser.suggestKeywords(['TERMINATED BY']);
    }
  | HiveOrImpalaLines HiveOrImpalaTerminated 'CURSOR'
    {
-     suggestKeywords(['BY']);
+     parser.suggestKeywords(['BY']);
    }
- ;
-
-HiveOrImpalaLines
- : '<hive>LINES'
- | '<impala>LINES'
  ;
 
 OptionalNullDefinedAs
@@ -926,42 +1222,47 @@ OptionalNullDefinedAs
 OptionalNullDefinedAs_EDIT
  : 'NULL' 'CURSOR'
    {
-     suggestKeywords(['DEFINED AS']);
+     parser.suggestKeywords(['DEFINED AS']);
    }
  | 'NULL' '<hive>DEFINED' 'CURSOR'
    {
-     suggestKeywords(['AS']);
+     parser.suggestKeywords(['AS']);
    }
  ;
 
-OptionalHiveWithSerdeproperties
+OptionalWithSerdeproperties
  :
- | 'WITH' '<hive>SERDEPROPERTIES' ParenthesizedPropertyAssignmentList
+ | WithSerdeproperties
  ;
 
-OptionalHiveWithSerdeproperties_EDIT
- : OptionalImpalaWithSerdeproperties_EDIT
- ;
-
-OptionalImpalaWithSerdeproperties
- :
+WithSerdeproperties
+ : 'WITH' '<hive>SERDEPROPERTIES' ParenthesizedPropertyAssignmentList
  | 'WITH' '<impala>SERDEPROPERTIES' ParenthesizedPropertyAssignmentList
  ;
 
-OptionalImpalaWithSerdeproperties_EDIT
+WithSerdeproperties_EDIT
  : 'WITH' 'CURSOR'
    {
-     suggestKeywords(['SERDEPROPERTIES']);
+     parser.suggestKeywords(['SERDEPROPERTIES']);
    }
  | 'WITH' 'CURSOR' ParenthesizedPropertyAssignmentList
    {
-     suggestKeywords(['SERDEPROPERTIES']);
+     parser.suggestKeywords(['SERDEPROPERTIES']);
    }
  ;
 
 OptionalTblproperties
  :
- | HiveOrImpalaTblproperties ParenthesizedPropertyAssignmentList
+ | TblProperties
+ ;
+ 
+TblProperties
+ : HiveOrImpalaTblproperties ParenthesizedPropertyAssignmentList
+ ;
+
+OptionalHiveTblproperties
+ :
+ | '<hive>TBLPROPERTIES' ParenthesizedPropertyAssignmentList
  ;
 
 OptionalAsSelectStatement
@@ -972,7 +1273,7 @@ OptionalAsSelectStatement
 OptionalAsSelectStatement_EDIT
  : AnyAs CommitLocations 'CURSOR'
    {
-     suggestKeywords(['SELECT']);
+     parser.suggestKeywords(['SELECT']);
    }
  | AnyAs CommitLocations QuerySpecification_EDIT
  ;
@@ -980,33 +1281,626 @@ OptionalAsSelectStatement_EDIT
 CommitLocations
  : /* empty */
    {
-     commitLocations();
+     parser.commitLocations();
    }
  ;
 
-OptionalImpalaCachedIn
- :
- | '<impala>CACHED' 'IN' QuotedValue
+ViewDefinition
+ : AnyCreate AnyView OptionalIfNotExists SchemaQualifiedIdentifier OptionalParenthesizedViewColumnList OptionalComment OptionalHiveTblproperties AnyAs QuerySpecification
  ;
 
-OptionalImpalaCachedIn_EDIT
- : '<impala>CACHED' 'CURSOR'
+ViewDefinition_EDIT
+ : AnyCreate AnyView OptionalIfNotExists 'CURSOR'
    {
-     suggestKeywords(['IN']);
+     if (!$3) {
+       parser.suggestKeywords(['IF NOT EXISTS']);
+     }
+     parser.suggestDatabases({ appendDot: true });
+   }
+ | AnyCreate AnyView OptionalIfNotExists 'CURSOR' SchemaQualifiedIdentifier OptionalParenthesizedViewColumnList OptionalComment OptionalHiveTblproperties AnyAs QuerySpecification
+   {
+     if (!$3) {
+       parser.suggestKeywords(['IF NOT EXISTS']);
+     }
+   }
+ | AnyCreate AnyView OptionalIfNotExists_EDIT
+ | AnyCreate AnyView OptionalIfNotExists SchemaQualifiedIdentifier OptionalParenthesizedViewColumnList OptionalComment OptionalHiveTblproperties 'CURSOR'
+   {
+     if (parser.isHive() && !$6 && !$7) {
+       parser.suggestKeywords([{ value: 'COMMENT', weight: 3 }, { value: 'TBLPROPERTIES', weight: 2 }, {value: 'AS', weight: 1 }]);
+     } else if (parser.isHive() && !$7) {
+       parser.suggestKeywords([{ value: 'TBLPROPERTIES', weight: 2 }, {value: 'AS', weight: 1 }]);
+     } else {
+       parser.suggestKeywords([{value: 'AS', weight: 1 }]);
+     }
+   }
+ | AnyCreate AnyView OptionalIfNotExists SchemaQualifiedIdentifier OptionalParenthesizedViewColumnList OptionalComment OptionalHiveTblproperties AnyAs 'CURSOR'
+   {
+     parser.suggestKeywords(['SELECT']);
+   }
+ | AnyCreate AnyView OptionalIfNotExists SchemaQualifiedIdentifier OptionalParenthesizedViewColumnList OptionalComment OptionalHiveTblproperties AnyAs QuerySpecification_EDIT
+ | AnyCreate AnyView OptionalIfNotExists SchemaQualifiedIdentifier_EDIT OptionalParenthesizedViewColumnList OptionalComment OptionalHiveTblproperties AnyAs QuerySpecification
+ ;
+
+FunctionDefinition
+ : ImpalaFunctionDefinition
+ | ImpalaAggregateFunctionDefinition
+ | HiveFunctionDefinition
+ | HiveTemporaryFunction
+ ;
+
+FunctionDefinition_EDIT
+ : ImpalaFunctionDefinition_EDIT
+ | ImpalaAggregateFunctionDefinition_EDIT
+ | HiveFunctionDefinition_EDIT
+ | HiveTemporaryFunction_EDIT
+ ;
+
+ImpalaFunctionDefinition
+ : AnyCreate '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns HdfsLocation ImpalaSymbol
+ ;
+
+ImpalaFunctionDefinition_EDIT
+ : AnyCreate '<impala>FUNCTION' OptionalIfNotExists 'CURSOR'
+   {
+     if (!$3) {
+       parser.suggestKeywords(['IF NOT EXISTS']);
+     }
+     parser.suggestDatabases({ appendDot: true });
+   }
+ | AnyCreate '<impala>FUNCTION' OptionalIfNotExists 'CURSOR' SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns HdfsLocation ImpalaSymbol
+   {
+     if (!$3) {
+       parser.suggestKeywords(['IF NOT EXISTS']);
+     }
+   }
+ | AnyCreate '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList 'CURSOR'
+   {
+     parser.suggestKeywords(['RETURNS']);
+   }
+ | AnyCreate '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns 'CURSOR'
+   {
+     parser.suggestKeywords(['LOCATION']);
+   }
+ | AnyCreate '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns HdfsLocation 'CURSOR'
+   {
+     parser.suggestKeywords(['SYMBOL']);
+   }
+ | AnyCreate '<impala>FUNCTION' OptionalIfNotExists_EDIT
+ | AnyCreate '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList_EDIT
+ | AnyCreate '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns_EDIT
+ | AnyCreate '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns HdfsLocation_EDIT
+ | AnyCreate '<impala>FUNCTION' OptionalIfNotExists_EDIT SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns HdfsLocation ImpalaSymbol
+ | AnyCreate '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList_EDIT ImpalaReturns HdfsLocation ImpalaSymbol
+ | AnyCreate '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns_EDIT HdfsLocation ImpalaSymbol
+ | AnyCreate '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns HdfsLocation_EDIT ImpalaSymbol
+ ;
+
+ImpalaAggregateFunctionDefinition
+ : AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn ImpalaMergeFn OptionalImpalaPrepareFn OptionalImpalaCloseFn OptionalImpalaSerializeFn OptionalImpalaFinalizeFn OptionalIntermediate
+ ;
+
+ImpalaAggregateFunctionDefinition_EDIT
+ : AnyCreate '<impala>AGGREGATE' 'CURSOR'
+   {
+     parser.suggestKeywords(['FUNCTION']);
+   }
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists 'CURSOR' SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn ImpalaMergeFn OptionalImpalaPrepareFn OptionalImpalaCloseFn OptionalImpalaSerializeFn OptionalImpalaFinalizeFn OptionalIntermediate
+   {
+     if (!$4) {
+       parser.suggestKeywords(['IF NOT EXISTS']);
+     }
+   }
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists 'CURSOR'
+   {
+     if (!$4) {
+       parser.suggestKeywords(['IF NOT EXISTS']);
+     }
+     parser.suggestDatabases({ appendDot: true });
+   }
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists_EDIT
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists_EDIT SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn ImpalaMergeFn OptionalImpalaPrepareFn OptionalImpalaCloseFn OptionalImpalaSerializeFn OptionalImpalaFinalizeFn OptionalIntermediate
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList_EDIT
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList_EDIT ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn ImpalaMergeFn OptionalImpalaPrepareFn OptionalImpalaCloseFn OptionalImpalaSerializeFn OptionalImpalaFinalizeFn OptionalIntermediate
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList 'CURSOR'
+   {
+     parser.suggestKeywords(['RETURNS']);
+   }
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   'CURSOR'
+   {
+     parser.suggestKeywords(['LOCATION']);
+   }
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn 'CURSOR'
+   {
+     if (!$9) {
+       parser.suggestKeywords([{value: 'INIT_FN', weight: 2 }, {value: 'UPDATE_FN', weight: 1 }]);
+     } else {
+       parser.suggestKeywords([{value: 'UPDATE_FN', weight: 1 }]);
+     }
+   }
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn 'CURSOR'
+   {
+     parser.suggestKeywords(['MERGE_FN']);
+   }
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn ImpalaMergeFn OptionalImpalaPrepareFn OptionalImpalaCloseFn OptionalImpalaSerializeFn OptionalImpalaFinalizeFn OptionalIntermediate 'CURSOR'
+   {
+     if (!$12 && !$13 && !$14 && !$15 && !$16) {
+       parser.suggestKeywords([{value: 'PREPARE_FN', weight: 5 }, {value: 'CLOSE_FN', weight: 4 }, {value: 'SERIALIZE_FN', weight: 3 }, {value: 'FINALIZE_FN', weight: 2 }, {value: 'INTERMEDIATE', weight: 1 }]);
+     } else if ($12 && !$13 && !$14 && !$15 && !$16) {
+       parser.suggestKeywords([{value: 'CLOSE_FN', weight: 4 }, {value: 'SERIALIZE_FN', weight: 3 }, {value: 'FINALIZE_FN', weight: 2 }, {value: 'INTERMEDIATE', weight: 1 }]);
+     } else if ($13 && !$14 && !$15 && !$16) {
+       parser.suggestKeywords([{value: 'SERIALIZE_FN', weight: 3 }, {value: 'FINALIZE_FN', weight: 2 }, {value: 'INTERMEDIATE', weight: 1 }]);
+     } else if ($14 && !$15 && !$16) {
+       parser.suggestKeywords([{value: 'FINALIZE_FN', weight: 2 }, {value: 'INTERMEDIATE', weight: 1 }]);
+     } else if ($15 && !$16) {
+       parser.suggestKeywords([{value: 'INTERMEDIATE', weight: 1 }]);
+     }
+   }
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns_EDIT
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation_EDIT OptionalImpalaInitFn
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn_EDIT
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn_EDIT
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn ImpalaMergeFn_EDIT OptionalImpalaPrepareFn OptionalImpalaCloseFn OptionalImpalaSerializeFn OptionalImpalaFinalizeFn OptionalIntermediate
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn ImpalaMergeFn OptionalImpalaPrepareFn_EDIT OptionalImpalaCloseFn OptionalImpalaSerializeFn OptionalImpalaFinalizeFn OptionalIntermediate
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn ImpalaMergeFn OptionalImpalaPrepareFn OptionalImpalaCloseFn_EDIT  OptionalImpalaSerializeFn OptionalImpalaFinalizeFn OptionalIntermediate
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn ImpalaMergeFn OptionalImpalaPrepareFn OptionalImpalaCloseFn OptionalImpalaSerializeFn_EDIT OptionalImpalaFinalizeFn OptionalIntermediate
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn ImpalaMergeFn OptionalImpalaPrepareFn OptionalImpalaCloseFn OptionalImpalaSerializeFn OptionalImpalaFinalizeFn_EDIT OptionalIntermediate
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn ImpalaMergeFn OptionalImpalaPrepareFn OptionalImpalaCloseFn OptionalImpalaSerializeFn OptionalImpalaFinalizeFn Intermediate_EDIT
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns_EDIT
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn ImpalaMergeFn OptionalImpalaPrepareFn OptionalImpalaCloseFn OptionalImpalaSerializeFn OptionalImpalaFinalizeFn OptionalIntermediate
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation_EDIT OptionalImpalaInitFn ImpalaUpdateFn ImpalaMergeFn OptionalImpalaPrepareFn OptionalImpalaCloseFn OptionalImpalaSerializeFn OptionalImpalaFinalizeFn OptionalIntermediate
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn_EDIT ImpalaUpdateFn ImpalaMergeFn OptionalImpalaPrepareFn OptionalImpalaCloseFn OptionalImpalaSerializeFn OptionalImpalaFinalizeFn OptionalIntermediate
+ | AnyCreate '<impala>AGGREGATE' '<impala>FUNCTION' OptionalIfNotExists SchemaQualifiedIdentifier ParenthesizedImpalaArgumentList ImpalaReturns
+   HdfsLocation OptionalImpalaInitFn ImpalaUpdateFn_EDIT ImpalaMergeFn OptionalImpalaPrepareFn OptionalImpalaCloseFn OptionalImpalaSerializeFn OptionalImpalaFinalizeFn OptionalIntermediate
+ ;
+
+HiveFunctionDefinition
+ : AnyCreate '<hive>FUNCTION' SchemaQualifiedIdentifier '<hive>AS' SingleQuotedValue OptionalHiveUsing
+ ;
+
+HiveFunctionDefinition_EDIT
+ : AnyCreate '<hive>FUNCTION' SchemaQualifiedIdentifier 'CURSOR'
+   {
+     parser.suggestKeywords(['AS']);
+   }
+ | AnyCreate '<hive>FUNCTION' SchemaQualifiedIdentifier '<hive>AS' SingleQuotedValue OptionalHiveUsing_EDIT
+ | AnyCreate '<hive>FUNCTION' SchemaQualifiedIdentifier '<hive>AS' SingleQuotedValue OptionalHiveUsing 'CURSOR'
+   {
+     if (!$6) {
+       parser.suggestKeywords(['USING']);
+     } else {
+       parser.suggestKeywords(['ARCHIVE', 'FILE', 'JAR']);
+     }
    }
  ;
 
-QuotedValue
+HiveTemporaryFunction
+ : AnyCreate '<hive>TEMPORARY' '<hive>FUNCTION' RegularIdentifier '<hive>AS' SingleQuotedValue
+ ;
+
+HiveTemporaryFunction_EDIT
+ : AnyCreate '<hive>TEMPORARY' '<hive>FUNCTION' RegularIdentifier 'CURSOR'
+   {
+     parser.suggestKeywords(['AS']);
+   }
+ ;
+
+ParenthesizedImpalaArgumentList
+ : '(' ')'
+ | '(' ImpalaArgumentList OptionalVariableArguments')'
+ ;
+
+ParenthesizedImpalaArgumentList_EDIT
+ : '(' ImpalaArgumentList_EDIT RightParenthesisOrError
+   {
+     parser.suggestKeywords(parser.getTypeKeywords());
+   }
+ | '(' ImpalaArgumentList 'CURSOR' RightParenthesisOrError
+   {
+     parser.suggestKeywords(['...']);
+   }
+ ;
+
+ImpalaArgumentList
+ : PrimitiveType
+ | ImpalaArgumentList ',' PrimitiveType
+ ;
+
+ImpalaArgumentList_EDIT
+ : AnyCursor
+ | ImpalaArgumentList ',' AnyCursor
+ | AnyCursor ',' ImpalaArgumentList
+ | ImpalaArgumentList ',' AnyCursor ',' ImpalaArgumentList
+ ;
+
+OptionalVariableArguments
+ :
+ | '<impala>...'
+ ;
+
+ImpalaReturns
+ : '<impala>RETURNS' PrimitiveType
+ ;
+
+ImpalaReturns_EDIT
+ : '<impala>RETURNS' 'CURSOR'
+   {
+     parser.suggestKeywords(parser.getTypeKeywords());
+   }
+ ;
+
+ImpalaSymbol
+ : '<impala>SYMBOL' '=' SingleQuotedValue
+ ;
+
+OptionalImpalaInitFn
+ :
+ | '<impala>INIT_FN' '=' FunctionReference
+ ;
+
+OptionalImpalaInitFn_EDIT
+ : '<impala>INIT_FN' '=' FunctionReference_EDIT
+ ;
+
+ImpalaUpdateFn
+ : '<impala>UPDATE_FN' '=' FunctionReference
+ ;
+
+ImpalaUpdateFn_EDIT
+ : '<impala>UPDATE_FN' '=' FunctionReference_EDIT
+ ;
+
+ImpalaMergeFn
+ : '<impala>MERGE_FN' '=' FunctionReference
+ ;
+
+ImpalaMergeFn_EDIT
+ : '<impala>MERGE_FN' '=' FunctionReference_EDIT
+ ;
+
+OptionalImpalaPrepareFn
+ :
+ | '<impala>PREPARE_FN' '=' FunctionReference
+ ;
+
+OptionalImpalaPrepareFn_EDIT
+ : '<impala>PREPARE_FN' '=' FunctionReference_EDIT
+ ;
+
+OptionalImpalaCloseFn
+ :
+ | '<impala>CLOSE_FN' '=' FunctionReference
+ ;
+
+OptionalImpalaCloseFn_EDIT
+ : '<impala>CLOSE_FN' '=' FunctionReference_EDIT
+ ;
+
+OptionalImpalaSerializeFn
+ :
+ | '<impala>SERIALIZE_FN' '=' FunctionReference
+ ;
+
+OptionalImpalaSerializeFn_EDIT
+ : '<impala>SERIALIZE_FN' '=' FunctionReference_EDIT
+ ;
+
+OptionalImpalaFinalizeFn
+ :
+ | '<impala>FINALIZE_FN' '=' FunctionReference
+ ;
+
+OptionalImpalaFinalizeFn_EDIT
+ : '<impala>FINALIZE_FN' '=' FunctionReference_EDIT
+ ;
+
+OptionalIntermediate
+ :
+ | '<impala>INTERMEDIATE' PrimitiveType
+ ;
+
+Intermediate_EDIT
+ : '<impala>INTERMEDIATE' 'CURSOR'
+   {
+     parser.suggestKeywords(parser.getTypeKeywords());
+   }
+ ;
+
+FunctionReference
  : SingleQuotedValue
- | DoubleQuotedValue
  ;
 
-HiveOrImpalaTblproperties
- : '<hive>TBLPROPERTIES'
- | '<impala>TBLPROPERTIES'
+FunctionReference_EDIT
+ : SingleQuotedValue_EDIT
+   {
+     parser.suggestFunctions();
+     parser.suggestAggregateFunctions();
+     parser.suggestAnalyticFunctions();
+   }
  ;
 
-HiveOrImpalaPartitioned
- : '<hive>PARTITIONED'
- | '<impala>PARTITIONED'
+OptionalHiveUsing
+ :
+ | '<hive>USING' OneOrMoreFunctionResources
+ ;
+
+OptionalHiveUsing_EDIT
+ : '<hive>USING' 'CURSOR'
+   {
+     parser.suggestKeywords(['ARCHIVE', 'FILE', 'JAR']);
+   }
+ ;
+
+OneOrMoreFunctionResources
+ : FunctionResource
+ | OneOrMoreFunctionResources ',' FunctionResource
+ ;
+
+FunctionResource
+ : FunctionResourceType SingleQuotedValue
+ ;
+
+FunctionResourceType
+ : '<hive>ARCHIVE'
+ | '<hive>FILE'
+ | '<hive>JAR'
+ ;
+
+AnyView
+ : '<hive>VIEW'
+ | 'VIEW'
+ ;
+
+OptionalParenthesizedViewColumnList
+ :
+ | ParenthesizedViewColumnList
+ ;
+
+ParenthesizedViewColumnList
+ : '(' ViewColumnList ')'
+ ;
+
+ViewColumnList
+ : ColumnReference OptionalComment
+ | ViewColumnList ',' ColumnReference OptionalComment
+ ;
+
+RoleDefinition
+ : AnyCreate AnyRole RegularIdentifier
+ ;
+
+AnyRole
+ : '<hive>ROLE'
+ | '<impala>ROLE'
+ | 'ROLE'
+ ;
+
+IndexDefinition
+ : AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' ExistingTable ParenthesizedIndexColumnList
+   '<hive>AS' IndexType OptionalWithDeferredRebuild OptionalIdxProperties OptionalInTable OptionalStoredAsOrBy OptionalHdfsLocation
+   OptionalTblproperties OptionalComment
+ ;
+
+ExistingTable
+ : SchemaQualifiedTableIdentifier
+   {
+     parser.addTablePrimary($1);
+   }
+ ;
+
+ExistingTable_EDIT
+ : SchemaQualifiedTableIdentifier_EDIT
+ ;
+
+IndexDefinition_EDIT
+ : AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'CURSOR'
+   {
+     parser.suggestKeywords(['ON TABLE']);
+   }
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' 'CURSOR'
+   {
+     parser.suggestKeywords(['TABLE']);
+   }
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' 'CURSOR'
+   {
+     parser.suggestTables();
+     parser.suggestDatabases({ appendDot: true });
+   }
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' ExistingTable_EDIT
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' ExistingTable ParenthesizedIndexColumnList_EDIT
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' ExistingTable ParenthesizedIndexColumnList 'CURSOR'
+   {
+     parser.suggestKeywords(['AS']);
+   }
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' ExistingTable ParenthesizedIndexColumnList
+   '<hive>AS' 'CURSOR'
+   {
+     parser.suggestKeywords(['\'BITMAP\'', '\'COMPACT\'']);
+   }
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' ExistingTable ParenthesizedIndexColumnList
+   '<hive>AS' IndexType_EDIT OptionalWithDeferredRebuild OptionalIdxProperties OptionalInTable OptionalStoredAsOrBy OptionalHdfsLocation
+   OptionalTblproperties OptionalComment
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' ExistingTable_EDIT ParenthesizedIndexColumnList
+   '<hive>AS' IndexType OptionalWithDeferredRebuild OptionalIdxProperties OptionalInTable OptionalStoredAsOrBy OptionalHdfsLocation
+   OptionalTblproperties OptionalComment
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' ExistingTable ParenthesizedIndexColumnList_EDIT
+   '<hive>AS' IndexType OptionalWithDeferredRebuild OptionalIdxProperties OptionalInTable OptionalStoredAsOrBy OptionalHdfsLocation
+   OptionalTblproperties OptionalComment
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' ExistingTable ParenthesizedIndexColumnList
+   '<hive>AS' IndexType OptionalWithDeferredRebuild_EDIT OptionalIdxProperties OptionalInTable OptionalStoredAsOrBy OptionalHdfsLocation
+   OptionalTblproperties OptionalComment
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' ExistingTable ParenthesizedIndexColumnList
+   '<hive>AS' IndexType OptionalWithDeferredRebuild OptionalIdxProperties OptionalInTable_EDIT OptionalStoredAsOrBy OptionalHdfsLocation
+   OptionalTblproperties OptionalComment
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' ExistingTable ParenthesizedIndexColumnList
+   '<hive>AS' IndexType OptionalWithDeferredRebuild OptionalIdxProperties OptionalInTable StoredAsOrBy_EDIT OptionalHdfsLocation
+   OptionalTblproperties OptionalComment
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' ExistingTable ParenthesizedIndexColumnList
+   '<hive>AS' IndexType OptionalWithDeferredRebuild OptionalIdxProperties OptionalInTable OptionalStoredAsOrBy HdfsLocation_EDIT
+   OptionalTblproperties OptionalComment
+ | AnyCreate '<hive>INDEX' RegularOrBacktickedIdentifier 'ON' '<hive>TABLE' ExistingTable ParenthesizedIndexColumnList
+   '<hive>AS' IndexType OptionalWithDeferredRebuild OptionalIdxProperties OptionalInTable OptionalStoredAsOrBy OptionalHdfsLocation
+   OptionalTblproperties OptionalComment 'CURSOR'
+   {
+     if (!$10 && !$11 && !$12 && !$13 && !$14 && !$15 && !$16) {
+       parser.suggestKeywords([{ value: 'WITH DEFERRED REBUILD', weight: 7 }, { value: 'IDXPROPERTIES', weight: 6 }, { value: 'IN TABLE', weight: 5 }, { value: 'ROW FORMAT', weight: 4 }, { value: 'STORED AS', weight: 4 }, { value: 'STORED BY', weight: 4 }, { value: 'LOCATION', weight: 3 }, { value: 'TBLPROPERTIES', weight: 2 }, { value: 'COMMENT', weight: 1 }]);
+     } else if (!$11 && !$12 && !$13 && !$14 && !$15 && !$16) {
+       parser.suggestKeywords([{ value: 'IDXPROPERTIES', weight: 6 }, { value: 'IN TABLE', weight: 5 }, { value: 'ROW FORMAT', weight: 4 }, { value: 'STORED AS', weight: 4 }, { value: 'STORED BY', weight: 4 }, { value: 'LOCATION', weight: 3 }, { value: 'TBLPROPERTIES', weight: 2 }, { value: 'COMMENT', weight: 1 }]);
+     } else if (!$12 && !$13 && !$14 && !$15 && !$16) {
+       parser.suggestKeywords([{ value: 'IN TABLE', weight: 5 }, { value: 'ROW FORMAT', weight: 4 }, { value: 'STORED AS', weight: 4 }, { value: 'STORED BY', weight: 4 }, { value: 'LOCATION', weight: 3 }, { value: 'TBLPROPERTIES', weight: 2 }, { value: 'COMMENT', weight: 1 }]);
+     } else if (!$13 && !$14 && !$15 && !$16) {
+       parser.suggestKeywords([{ value: 'ROW FORMAT', weight: 4 }, { value: 'STORED AS', weight: 4 }, { value: 'STORED BY', weight: 4 }, { value: 'LOCATION', weight: 3 }, { value: 'TBLPROPERTIES', weight: 2 }, { value: 'COMMENT', weight: 1 }]);
+     } else if ($13 && $13.suggestKeywords && !$14 && !$15 && !$16) {
+       parser.suggestKeywords(parser.createWeightedKeywords($13.suggestKeywords, 4).concat([{ value: 'LOCATION', weight: 3 }, { value: 'TBLPROPERTIES', weight: 2 }, { value: 'COMMENT', weight: 1 }]));
+     } else if (!$14 && !$15 && !$16) {
+       parser.suggestKeywords([{ value: 'LOCATION', weight: 3 }, { value: 'TBLPROPERTIES', weight: 2 }, { value: 'COMMENT', weight: 1 }]);
+     } else if (!$15 && !$16) {
+       parser.suggestKeywords([{ value: 'TBLPROPERTIES', weight: 2 }, { value: 'COMMENT', weight: 1 }]);
+     } else if (!$16) {
+       parser.suggestKeywords([{ value: 'COMMENT', weight: 1 }]);
+     }
+   }
+ ;
+
+IndexType
+ : QuotedValue
+ ;
+
+IndexType_EDIT
+ : QuotedValue_EDIT
+   {
+     parser.suggestKeywords(['\'BITMAP\'', '\'COMPACT\'']);
+   }
+ ;
+
+OptionalWithDeferredRebuild
+ :
+ | 'WITH' '<hive>DEFERRED' '<hive>REBUILD'
+ ;
+
+OptionalWithDeferredRebuild_EDIT
+ : 'WITH' 'CURSOR'
+   {
+     parser.suggestKeywords(['DEFERRED REBUILD']);
+   }
+ | 'WITH' '<hive>DEFERRED' 'CURSOR'
+   {
+     parser.suggestKeywords(['REBUILD']);
+   }
+ ;
+
+OptionalIdxProperties
+ :
+ | '<hive>IDXPROPERTIES' ParenthesizedPropertyAssignmentList
+ ;
+
+OptionalInTable
+ :
+ | 'IN' '<hive>TABLE' SchemaQualifiedTableIdentifier
+ ;
+
+OptionalInTable_EDIT
+ : 'IN' 'CURSOR'
+   {
+     parser.suggestKeywords(['TABLE']);
+   }
+ | 'IN' '<hive>TABLE' 'CURSOR'
+   {
+     parser.suggestTables();
+     parser.suggestDatabases({ appendDot: true });
+   }
+ | 'IN' '<hive>TABLE' SchemaQualifiedTableIdentifier_EDIT
+ ;
+
+
+ParenthesizedIndexColumnList
+ : '(' IndexColumnList ')'
+ ;
+
+ParenthesizedIndexColumnList_EDIT
+ : '(' IndexColumnList_EDIT RightParenthesisOrError
+   {
+     parser.suggestColumns();
+   }
+ ;
+
+IndexColumnList
+ : ColumnReference
+ | IndexColumnList ',' ColumnReference
+ ;
+
+IndexColumnList_EDIT
+ : AnyCursor
+ | IndexColumnList ',' AnyCursor
+ | AnyCursor ',' IndexColumnList
+ | IndexColumnList ',' AnyCursor ',' IndexColumnList
+ ;
+
+MacroDefinition
+ : AnyCreate '<hive>TEMPORARY' '<hive>MACRO' RegularIdentifier MacroArguments ValueExpression
+ ;
+
+MacroDefinition_EDIT
+ : AnyCreate '<hive>TEMPORARY' '<hive>MACRO' RegularIdentifier MacroArguments_EDIT
+ | AnyCreate '<hive>TEMPORARY' '<hive>MACRO' RegularIdentifier MacroArguments_EDIT ValueExpression
+ | AnyCreate '<hive>TEMPORARY' '<hive>MACRO' RegularIdentifier MacroArguments 'CURSOR'
+   {
+     parser.suggestFunctions();
+   }
+ | AnyCreate '<hive>TEMPORARY' '<hive>MACRO' RegularIdentifier MacroArguments ValueExpression_EDIT
+ ;
+
+MacroArguments
+ : '(' ')'
+ | '(' MacroArgumentList ')'
+ ;
+
+MacroArguments_EDIT
+ : '(' MacroArgumentList_EDIT RightParenthesisOrError
+ ;
+
+
+MacroArgumentList
+ : MacroArgument
+ | MacroArgumentList ',' MacroArgument
+ ;
+
+MacroArgumentList_EDIT
+ : MacroArgument_EDIT
+ | MacroArgumentList ',' MacroArgument_EDIT
+ | MacroArgument_EDIT ',' MacroArgumentList
+ | MacroArgumentList ',' MacroArgument_EDIT ',' MacroArgumentList
+ ;
+
+MacroArgument
+ : RegularIdentifier ColumnDataType
+ ;
+
+MacroArgument_EDIT
+ : RegularIdentifier 'CURSOR'
+   {
+     parser.suggestKeywords(parser.getColumnDataTypeKeywords());
+   }
+ | RegularIdentifier ColumnDataType_EDIT
  ;

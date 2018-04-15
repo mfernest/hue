@@ -14,19 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-(function (root, factory) {
-  if(typeof define === "function" && define.amd) {
-    define([
-      'knockout',
-      'desktop/js/apiHelper',
-      'desktop/js/fileBrowser/hueFileEntry',
-      'knockout-mapping'
-    ], factory);
-  } else {
-    root.HomeViewModel = factory(ko, apiHelper, HueFileEntry);
-  }
-}(this, function (ko, ApiHelper, HueFileEntry) {
-
+var HomeViewModel = (function () {
 
   /**
    * @param {Object} options
@@ -45,9 +33,26 @@
     // Uncomment to enable the assist panel
     // self.apiHelper.withTotalStorage('assist', 'assist_panel_visible', self.isLeftPanelVisible, true);
 
+    self.serverTypeFilter = ko.observable();
+
+    var initialType = window.location.getParameter('type') !== '' ? window.location.getParameter('type') : 'all';
+
+    DOCUMENT_TYPES.some(function (docType) {
+      if (docType.type === initialType) {
+        self.serverTypeFilter(docType);
+        return true;
+      }
+    });
+
+    if (!self.serverTypeFilter()) {
+      self.serverTypeFilter(DOCUMENT_TYPES[0]);
+    }
+
     self.activeEntry = ko.observable();
     self.trashEntry = ko.observable();
-    self.activeEntry(new HueFileEntry({
+
+    self.defaultFileEntry = new HueFileEntry({
+      serverTypeFilter: self.serverTypeFilter,
       activeEntry: self.activeEntry,
       trashEntry: self.trashEntry,
       apiHelper: self.apiHelper,
@@ -58,7 +63,25 @@
       definition: {
         name: '/'
       }
-    }));
+    });
+
+    self.activeEntry(self.defaultFileEntry);
+
+    self.serverTypeFilter.subscribe(function (newVal) {
+      if (self.activeEntry()) {
+        self.activeEntry().entries([]);
+        self.activeEntry().load();
+        if (!newVal || newVal.type === 'all') {
+          if (location.getParameter('type')) {
+            hueUtils.removeURLParameter('type');
+          }
+        } else {
+          if (!location.getParameter('type') || location.getParameter('type') !== newVal.type) {
+            hueUtils.changeURLParameter('type', newVal.type);
+          }
+        }
+      }
+    });
 
     self.shareFormDocId = ko.observable('');
     self.exportFormDocIds = ko.observable('');
@@ -73,7 +96,7 @@
     var self = this;
     var entry = self.activeEntry().createNewEntry({
       definition: {
-        uuid: location.getParameter('uuid'),
+        uuid: uuid || location.getParameter('uuid'),
         name: 'unknown',
         type: 'directory',
         path: '/unknown'
@@ -84,16 +107,21 @@
 
     var lastParent = entry;
 
+    var openDefault = function () {
+      self.activeEntry(self.defaultFileEntry);
+      self.activeEntry().load();
+    }
+
     var loadParents = function () {
       if (lastParent.parent) {
         lastParent = lastParent.parent;
-        lastParent.load(loadParents);
+        lastParent.load(loadParents, openDefault);
       } else {
         self.activeEntry(entry);
       }
     };
 
-    entry.load(loadParents);
+    entry.load(loadParents, openDefault);
   };
 
   HomeViewModel.prototype.openPath = function (path) {
@@ -129,4 +157,4 @@
   };
 
   return HomeViewModel;
-}));
+})();

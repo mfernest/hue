@@ -22,9 +22,8 @@
 <%namespace name="layout" file="../navigation-bar.mako" />
 <%namespace name="utils" file="../utils.inc.mako" />
 
-${ commonheader(_("Workflows"), "oozie", user) | n,unicode }
+${ commonheader(_("Workflows"), "oozie", user, request) | n,unicode }
 ${ layout.menubar(section='workflows', is_editor=True) }
-
 
 <div id="editor">
 
@@ -77,7 +76,7 @@ ${ layout.menubar(section='workflows', is_editor=True) }
   <table id="workflowTable" class="table datatables">
     <thead>
       <tr>
-        <th width="1%"><div data-bind="click: selectAll, css: {hueCheckbox: true, 'fa': true, 'fa-check': allSelected}" class="select-all"></div></th>
+        <th width="1%"><div data-bind="click: selectAll, css: { 'hue-checkbox': true, 'fa': true, 'fa-check': allSelected}" class="select-all"></div></th>
         <th>${ _('Name') }</th>
         <th>${ _('Description') }</th>
         <th>${ _('Owner') }</th>
@@ -85,9 +84,9 @@ ${ layout.menubar(section='workflows', is_editor=True) }
       </tr>
     </thead>
     <tbody data-bind="foreach: { data: jobs }">
-      <tr>
+      <tr data-bind="attr: { 'oozie-data-id': id() }">
         <td data-bind="click: $root.handleSelect" class="center" style="cursor: default" data-row-selector-exclude="true">
-          <div data-bind="multiCheck: '#workflowTable', css: { 'hueCheckbox': true, 'fa': true, 'fa-check': isSelected }" data-row-selector-exclude="true"></div>
+          <div data-bind="multiCheck: '#workflowTable', css: { 'hue-checkbox': true, 'fa': true, 'fa-check': isSelected }" data-row-selector-exclude="true"></div>
           <!-- ko if: ! uuid() -->
             <a data-bind="attr: { 'href': '${ url('oozie:open_old_workflow') }?workflow=' + id() }" data-row-selector="true"></a>
           <!-- /ko -->
@@ -108,12 +107,7 @@ ${ layout.menubar(section='workflows', is_editor=True) }
 
 
 <div class="hueOverlay" data-bind="visible: isLoading">
-  <!--[if lte IE 9]>
-    <img src="${ static('desktop/art/spinner-big.gif') }" />
-  <![endif]-->
-  <!--[if !IE]> -->
-    <i class="fa fa-spinner fa-spin"></i>
-  <!-- <![endif]-->
+  <i class="fa fa-spinner fa-spin big-spinner"></i>
 </div>
 
 <div class="submit-modal modal hide"></div>
@@ -122,8 +116,8 @@ ${ layout.menubar(section='workflows', is_editor=True) }
   <form id="deleteWfForm" method="POST" data-bind="submit: delete2">
     ${ csrf_token(request) | n,unicode }
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3 id="deleteWfMessage">${ _('Delete the selected workflow(s)?') }</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 id="deleteWfMessage" class="modal-title">${ _('Delete the selected workflow(s)?') }</h2>
     </div>
     <div class="modal-footer">
       <a href="#" class="btn" data-dismiss="modal">${ _('No') }</a>
@@ -141,14 +135,11 @@ ${ commonimportexport(request) | n,unicode }
 
 
 <script src="${ static('desktop/ext/js/datatables-paging-0.1.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/knockout.min.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/knockout-mapping.min.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/js/ko.hue-bindings.js') }" type="text/javascript" charset="utf-8"></script>
 <script src="${ static('desktop/js/share2.vm.js') }"></script>
-<script src="${ static('oozie/js/editor2-utils.js') }" type="text/javascript" charset="utf-8"></script>
 
+${ utils.submit_popup_event() }
 
-<script type="text/javascript" charset="utf-8">
+<script type="text/javascript">
   var Editor = function () {
     var self = this;
 
@@ -176,10 +167,15 @@ ${ commonimportexport(request) | n,unicode }
       wf.isSelected(! wf.isSelected());
     }
 
-    self.selectAll = function() {
-      self.allSelected(! self.allSelected());
+    self.selectAll = function () {
+      self.allSelected(!self.allSelected());
       ko.utils.arrayForEach(self.jobs(), function (job) {
-        job.isSelected(self.allSelected());
+        if ($('[oozie-data-id=' + job.id() + ']').is(':visible')) {
+          job.isSelected(self.allSelected());
+        }
+        else {
+          job.isSelected(false);
+        }
       });
     }
 
@@ -294,5 +290,6 @@ ${ commonimportexport(request) | n,unicode }
   });
 </script>
 
-
+%if not is_embeddable:
 ${commonfooter(request, messages) | n,unicode}
+%endif

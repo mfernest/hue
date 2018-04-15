@@ -23,7 +23,6 @@ from desktop.lib.django_forms import ChoiceOrOtherField, MultiForm, SubmitButton
 from filebrowser.forms import PathField
 
 from beeswax import common
-from beeswax.server.dbms import NoSuchObjectException
 from beeswax.models import SavedQuery
 
 
@@ -45,6 +44,7 @@ class LoadDataForm(forms.Form):
   """Form used for loading data into an existing table."""
   path = PathField(label=_t("Path"))
   overwrite = forms.BooleanField(required=False, initial=False, label=_t("Overwrite?"))
+  is_embeddable = forms.BooleanField(required=False, initial=False)
 
   def __init__(self, table_obj, *args, **kwargs):
     """

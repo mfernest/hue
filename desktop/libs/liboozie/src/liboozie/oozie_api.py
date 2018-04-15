@@ -40,6 +40,7 @@ def get_oozie(user, api_version=API_VERSION):
   oozie_url = OOZIE_URL.get()
   secure = SECURITY_ENABLED.get()
   ssl_cert_ca_verify = SSL_CERT_CA_VERIFY.get()
+
   return OozieApi(oozie_url, user, security_enabled=secure, api_version=api_version, ssl_cert_ca_verify=ssl_cert_ca_verify)
 
 
@@ -88,7 +89,7 @@ class OozieApi(object):
 
     return defaults
 
-  VALID_JOB_FILTERS = ('name', 'user', 'group', 'status', 'startcreatedtime')
+  VALID_JOB_FILTERS = ('name', 'user', 'group', 'status', 'startcreatedtime', 'text')
   VALID_LOG_FILTERS = set(('recent', 'limit', 'loglevel', 'text'))
 
   def get_jobs(self, jobtype, offset=None, cnt=None, filters=None):

@@ -32,7 +32,7 @@ nv.models.lineWithBrushChart = function() {
     , legend = nv.models.legend()
     , controls = nv.models.legend()
     , interactiveLayer = nv.interactiveGuideline()
-    , brush = d3.svg.brush()
+    , brush = d3v3.svg.brush()
     ;
 
   var margin = {top: 30, right: 20, bottom: 50, left: 60}
@@ -55,12 +55,14 @@ nv.models.lineWithBrushChart = function() {
     , state = {}
     , defaultState = null
     , noData = 'No Data Available.'
-    , dispatch = d3.dispatch('tooltipShow', 'tooltipHide', 'stateChange', 'changeState', 'brush')
-    , controlWidth = function() { return showControls ? 300 : 0 }
+    , dispatch = d3v3.dispatch('tooltipShow', 'tooltipHide', 'stateChange', 'changeState', 'brush')
+    , controlWidth = function() { return showControls ? (selectionHidden ? 240 : 300) : 0 }
+    , legendWidth = 175
     , transitionDuration = 250
     , extent
     , brushExtent = null
     , selectionEnabled = false
+    , selectionHidden = false
     , onSelectRange = null
     , onStateChange = null
     , onChartUpdate = null
@@ -98,11 +100,12 @@ nv.models.lineWithBrushChart = function() {
 
   function chart(selection) {
     selection.each(function(data) {
-      var container = d3.select(this),
+      var container = d3v3.select(this),
           that = this;
 
       var availableWidth = (width  || parseInt(container.style('width')) || 960)
                              - margin.left - margin.right,
+          availableChartWidth = Math.max(availableWidth - legendWidth, 0),
           availableHeight = (height || parseInt(container.style('height')) || 400)
                              - margin.top - margin.bottom;
 
@@ -177,37 +180,44 @@ nv.models.lineWithBrushChart = function() {
       gEnter.append('g').attr('class', 'nv-x nv-axis');
       gEnter.append('g').attr('class', 'nv-y nv-axis');
       gEnter.append('g').attr('class', 'nv-linesWrap');
-      gEnter.append('g').attr('class', 'nv-legendWrap');
+      // We put the legend in an another SVG to support scrolling
+      var legendDiv = d3.select(container.node().parentNode).select('div');
+      var legendSvg = legendDiv.select('svg').size() === 0 ? legendDiv.append('svg') : legendDiv.select('svg');
+      legendSvg.style('height', (data.length * 20 + 6) + 'px').selectAll('g').remove();
+      var legendG = legendSvg.append('g').attr('class', 'nvd3 nv-wrap nv-legendWrap');
       gEnter.append('g').attr('class', 'nv-interactive');
       gEnter.append('g').attr('class', 'nv-controlsWrap');
 
       g.select("rect")
-        .attr("width",availableWidth)
+        .attr("width",availableChartWidth)
         .attr("height",(availableHeight > 0) ? availableHeight : 0);
       //------------------------------------------------------------
       // Legend
 
       if (showLegend) {
-        legend.width(availableWidth - controlWidth());
+        legend.width(legendWidth);
+        legend.height(availableHeight);
+        legend.rightAlign(false);
+        legend.margin({top: 5, right: 0, left: 10, bottom: 0});
 
-        g.select('.nv-legendWrap')
+        try {
+          legendG
             .datum(data)
-            .call(legend);
-
-        if ( margin.top != legend.height()) {
-          margin.top = legend.height();
-          availableHeight = (height || parseInt(container.style('height')) || 400)
-                             - margin.top - margin.bottom;
+            .call(legend)
+          .selectAll('text')
+          .append('title')
+          .text(function(d){
+            return d.key;
+          });
         }
-
-        wrap.select('.nv-legendWrap')
-            .attr('transform', 'translate(0,' + (-margin.top) +')')
+        catch (e){}
       }
 
       if (showControls) {
-        var controlsData = [
-          { key: LABELS.SELECT, disabled: !selectionEnabled, checkbox: true }
-        ];
+        var controlsData = [];
+        if (! selectionHidden) {
+          controlsData.push({ key: LABELS.SELECT, disabled: !selectionEnabled, checkbox: true });
+        }
 
         controls.width(controlWidth()).color(['#444', '#444', '#444']);
         g.select('.nv-controlsWrap')
@@ -223,7 +233,7 @@ nv.models.lineWithBrushChart = function() {
 
       if (rightAlignYAxis) {
           g.select(".nv-y.nv-axis")
-              .attr("transform", "translate(" + availableWidth + ",0)");
+              .attr("transform", "translate(" + availableChartWidth + ",0)");
       }
 
       //------------------------------------------------------------
@@ -234,7 +244,7 @@ nv.models.lineWithBrushChart = function() {
       //Set up interactive layer
       if (useInteractiveGuideline) {
         interactiveLayer
-           .width(availableWidth)
+           .width(availableChartWidth)
            .height(availableHeight)
            .margin({left:margin.left, top:margin.top})
            .svgContainer(container)
@@ -244,7 +254,7 @@ nv.models.lineWithBrushChart = function() {
 
 
       lines
-        .width(availableWidth)
+        .width(availableChartWidth)
         .height(availableHeight)
         .color(data.map(function(d,i) {
           return d.color || color(d, i);
@@ -313,7 +323,7 @@ nv.models.lineWithBrushChart = function() {
       if (showXAxis) {
         xAxis
           .scale(x)
-          .ticks( availableWidth / 100 )
+          .ticks( availableChartWidth / 100 )
           .tickSize(-availableHeight, 0);
 
         g.select('.nv-x.nv-axis')
@@ -327,7 +337,7 @@ nv.models.lineWithBrushChart = function() {
         yAxis
           .scale(y)
           .ticks( availableHeight / 36 )
-          .tickSize( -availableWidth, 0);
+          .tickSize( -availableChartWidth, 0);
 
         g.select('.nv-y.nv-axis')
             .transition()
@@ -493,7 +503,7 @@ nv.models.lineWithBrushChart = function() {
   chart.yAxis = yAxis;
   chart.interactiveLayer = interactiveLayer;
 
-  d3.rebind(chart, lines, 'defined', 'isArea', 'x', 'y', 'size', 'xScale', 'yScale', 'xDomain', 'yDomain', 'xRange', 'yRange'
+  d3v3.rebind(chart, lines, 'defined', 'isArea', 'x', 'y', 'size', 'xScale', 'yScale', 'xDomain', 'yDomain', 'xRange', 'yRange'
     , 'forceX', 'forceY', 'interactive', 'clipEdge', 'clipVoronoi', 'useVoronoi','id', 'interpolate');
 
   chart.options = nv.utils.optionsFunc.bind(chart);
@@ -607,6 +617,17 @@ nv.models.lineWithBrushChart = function() {
     selectionEnabled = true;
     return chart;
   };
+
+  chart.disableSelection = function() {
+    selectionEnabled = false;
+    return chart;
+  };
+
+  chart.hideSelection = function() {
+    selectionHidden = true;
+    selectionEnabled = false;
+    return chart;
+  }
 
   chart.onSelectRange = function(_) {
     if (!arguments.length) return onSelectRange;

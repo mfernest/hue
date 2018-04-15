@@ -19,8 +19,13 @@ import calendar
 import json
 import logging
 import os
-import re
+import urllib
 import uuid
+
+try:
+  from collections import OrderedDict
+except ImportError:
+  from ordereddict import OrderedDict # Python 2.6
 
 from itertools import chain
 
@@ -32,16 +37,22 @@ from django.core.urlresolvers import reverse, NoReverseMatch
 from django.db import connection, models, transaction
 from django.db.models import Q
 from django.db.models.query import QuerySet
-from django.template.defaultfilters import urlencode
 from django.utils.translation import ugettext as _, ugettext_lazy as _t
 
 from settings import HUE_DESKTOP_VERSION
 
+from aws.conf import is_enabled as is_s3_enabled, has_s3_access
+from azure.conf import is_adls_enabled, has_adls_access
+from dashboard.conf import get_engines, HAS_REPORT_ENABLED
+from notebook.conf import SHOW_NOTEBOOKS, get_ordered_interpreters
+
 from desktop import appmanager
+from desktop.conf import get_clusters, IS_EMBEDDED
 from desktop.lib.i18n import force_unicode
 from desktop.lib.exceptions_renderable import PopupException
 from desktop.lib.paths import get_run_root
 from desktop.redaction import global_redaction_engine
+from desktop.settings import DOCUMENT2_SEARCH_MAX_LENGTH
 
 
 LOG = logging.getLogger(__name__)
@@ -52,6 +63,9 @@ SAMPLE_USER_OWNERS = ['hue', 'sample']
 
 UTC_TIME_FORMAT = "%Y-%m-%dT%H:%MZ"
 HUE_VERSION = None
+
+USER_PREFERENCE_CLUSTER = 'cluster'
+
 
 def uuid_default():
   return str(uuid.uuid4())
@@ -71,14 +85,21 @@ def hue_version():
 def _version_from_properties(f):
   return dict(line.strip().split('=') for line in f.readlines() if len(line.strip().split('=')) == 2).get('version', HUE_DESKTOP_VERSION)
 
+
 ###################################################################################################
 # Custom Settings
 ###################################################################################################
+
+PREFERENCE_IS_WELCOME_TOUR_SEEN = 'is_welcome_tour_seen'
+
+
 class UserPreferences(models.Model):
   """Holds arbitrary key/value strings."""
   user = models.ForeignKey(auth_models.User)
   key = models.CharField(max_length=20)
   value = models.TextField(max_length=4096)
+
+
 
 
 class Settings(models.Model):
@@ -368,7 +389,7 @@ class DocumentManager(models.Manager):
       LOG.warn('Object %s already has documents: %s' % (content_object, content_object.doc.all()))
       return content_object.doc.all()[0]
 
-  def sync(self):
+  def sync(self, doc2_only=True):
 
     def find_jobs_with_no_doc(model):
       jobs = model.objects.filter(doc__isnull=True)
@@ -474,7 +495,7 @@ class DocumentManager(models.Manager):
       LOG.exception('error syncing Document2')
 
 
-    if Document._meta.db_table in table_names:
+    if not doc2_only and Document._meta.db_table in table_names:
       # Make sure doc have at least a tag
       try:
         for doc in Document.objects.filter(tags=None):
@@ -491,8 +512,10 @@ class DocumentManager(models.Manager):
 
             tag = DocumentTag.objects.get_example_tag(user=doc.owner)
             doc.tags.add(tag)
+            doc_last_modified = doc.last_modified
 
             doc.save()
+            Document.objects.filter(id=doc.id).update(last_modified=doc_last_modified)
       except Exception, e:
         LOG.exception('error sharing sample user documents')
 
@@ -509,64 +532,69 @@ class DocumentManager(models.Manager):
       LOG.info('Looking for documents that have no object')
 
       # Delete documents with no object.
-      with transaction.atomic():
-        # First, delete all the documents that don't have a content type
-        docs = Document.objects.filter(content_type=None)
+      try:
+        with transaction.atomic():
+          # First, delete all the documents that don't have a content type
+          docs = Document.objects.filter(content_type=None)
 
-        if docs:
-          LOG.info('Deleting %s doc(s) that do not have a content type' % docs.count())
-          docs.delete()
+          if docs:
+            LOG.info('Deleting %s doc(s) that do not have a content type' % docs.count())
+            docs.delete()
 
-        # Next, it's possible that there are documents pointing at a non-existing
-        # content_type. We need to do a left join to find these records, but we
-        # can't do this directly in django. To get around writing wrap sql (which
-        # might not be portable), we'll use an aggregate to count up all the
-        # associated content_types, and delete the documents that have a count of
-        # zero.
-        #
-        # Note we're counting `content_type__name` to force the join.
-        docs = Document.objects \
-            .values('id') \
-            .annotate(content_type_count=models.Count('content_type__name')) \
-            .filter(content_type_count=0)
+          # Next, it's possible that there are documents pointing at a non-existing
+          # content_type. We need to do a left join to find these records, but we
+          # can't do this directly in django. To get around writing wrap sql (which
+          # might not be portable), we'll use an aggregate to count up all the
+          # associated content_types, and delete the documents that have a count of
+          # zero.
+          #
+          # Note we're counting `content_type__name` to force the join.
+          docs = Document.objects \
+              .values('id') \
+              .annotate(content_type_count=models.Count('content_type__name')) \
+              .filter(content_type_count=0)
 
-        if docs:
-          LOG.info('Deleting %s doc(s) that have invalid content types' % docs.count())
-          docs.delete()
+          if docs:
+            LOG.info('Deleting %s doc(s) that have invalid content types' % docs.count())
+            docs.delete()
 
-        # Finally we need to delete documents with no associated content object.
-        # This is tricky because of our use of generic foreign keys. So to do
-        # this a bit more efficiently, we'll start with a query of all the
-        # documents, then step through each content type and and filter out all
-        # the documents it's referencing from our document query. Messy, but it
-        # works.
+          # Finally we need to delete documents with no associated content object.
+          # This is tricky because of our use of generic foreign keys. So to do
+          # this a bit more efficiently, we'll start with a query of all the
+          # documents, then step through each content type and and filter out all
+          # the documents it's referencing from our document query. Messy, but it
+          # works.
 
-        docs = Document.objects.all()
+          # TODO: This can be several 100k entries for large databases.
+          # Need to figure out a better way to handle this scenario.
+          docs = Document.objects.all()
 
-        for content_type in ContentType.objects.all():
-          model_class = content_type.model_class()
+          for content_type in ContentType.objects.all():
+            model_class = content_type.model_class()
 
-          # Ignore any types that don't have a model.
-          if model_class is None:
-            continue
+            # Ignore any types that don't have a model.
+            if model_class is None:
+              continue
 
-          # Ignore types that don't have a table yet.
-          if model_class._meta.db_table not in table_names:
-            continue
+            # Ignore types that don't have a table yet.
+            if model_class._meta.db_table not in table_names:
+              continue
 
-          # Ignore classes that don't have a 'doc'.
-          if not hasattr(model_class, 'doc'):
-            continue
+            # Ignore classes that don't have a 'doc'.
+            if not hasattr(model_class, 'doc'):
+              continue
 
-          # First create a query that grabs all the document ids for this type.
-          docs_from_content = model_class.objects.values('doc__id')
+            # First create a query that grabs all the document ids for this type.
+            docs_from_content = model_class.objects.values('doc__id')
 
-          # Next, filter these from our document query.
-          docs = docs.exclude(id__in=docs_from_content)
+            # Next, filter these from our document query.
+            docs = docs.exclude(id__in=docs_from_content)
 
-        if docs.exists():
-          LOG.info('Deleting %s documents' % docs.count())
-          docs.delete()
+          if docs.exists():
+            LOG.info('Deleting %s documents' % docs.count())
+            docs.delete()
+      except Exception, e:
+        LOG.exception('Error in sync while attempting to delete documents with no object: %s' % e)
 
 
 class Document(models.Model):
@@ -883,9 +911,7 @@ class Document2QueryMixin(object):
       docs = docs.exclude(is_managed=True)
 
     if not include_trashed:
-      # Since the Trash folder can have multiple directory levels, we need to check full path and exclude those IDs
-      trashed_ids = [doc.id for doc in docs if Document2.TRASH_DIR in doc.path]
-      docs = docs.exclude(id__in=trashed_ids)
+      docs = docs.exclude(is_trashed=True)
 
     return docs.defer('description', 'data', 'extra', 'search').distinct().order_by('-last_modified')
 
@@ -899,12 +925,11 @@ class Document2QueryMixin(object):
     """
     documents = self
 
-    if types and isinstance(types, list):
+    if types and isinstance(types, list) and types[0] != 'all':
       documents = documents.filter(type__in=types)
 
     if search_text:
-      documents = documents.filter(Q(name__icontains=search_text) | Q(description__icontains=search_text) |
-                                   Q(search__icontains=search_text))
+      documents = documents.filter(Q(name__icontains=search_text) | Q(description__icontains=search_text) | Q(search__icontains=search_text))
 
     if order_by:  # TODO: Validate that order_by is a valid sort parameter
       documents = documents.order_by(order_by)
@@ -951,14 +976,27 @@ class Document2Manager(models.Manager, Document2QueryMixin):
 
     return latest_doc
 
-  def get_history(self, user, doc_type):
-    return self.documents(user, perms='owned', include_history=True).filter(type=doc_type, is_history=True)
+  def get_history(self, user, doc_type, include_trashed=False):
+    return self.documents(user, perms='owned', include_history=True, include_trashed=include_trashed).filter(type=doc_type, is_history=True)
+
+  def get_tasks_history(self, user):
+    return self.documents(user, perms='owned', include_history=True, include_trashed=False, include_managed=True).filter(is_history=True, is_managed=True).exclude(name='pig-app-hue-script').exclude(type='oozie-workflow2')
 
   def get_home_directory(self, user):
     try:
       return self.get(owner=user, parent_directory=None, name=Document2.HOME_DIR, type='directory')
     except Document2.DoesNotExist:
       return self.create_user_directories(user)
+    except Document2.MultipleObjectsReturned:
+      LOG.error('Multiple Home directories detected. Merging all into one.')
+
+      home_dirs = list(self.filter(owner=user, parent_directory=None, name=Document2.HOME_DIR, type='directory').order_by('-last_modified'))
+      parent_home_dir = home_dirs.pop()
+      for dir in home_dirs:
+        dir.children.exclude(name='.Trash').update(parent_directory=parent_home_dir)
+        dir.delete()
+
+      return parent_home_dir
 
   def get_by_path(self, user, path):
     """
@@ -1031,7 +1069,8 @@ class Document2(models.Model):
   last_modified = models.DateTimeField(auto_now=True, db_index=True, verbose_name=_t('Time last modified'))
   version = models.SmallIntegerField(default=1, verbose_name=_t('Document version'), db_index=True)
   is_history = models.BooleanField(default=False, db_index=True)
-  is_managed = models.BooleanField(default=False, db_index=True, verbose_name=_t('If managed under the cover by Hue and never by the user'))
+  is_managed = models.BooleanField(default=False, db_index=True, verbose_name=_t('If managed under the cover by Hue and never by the user')) # Aka isTask
+  is_trashed = models.NullBooleanField(default=False, db_index=True, verbose_name=_t('True if trashed'))
 
   dependencies = models.ManyToManyField('self', symmetrical=False, related_name='dependents', db_index=True)
 
@@ -1045,7 +1084,7 @@ class Document2(models.Model):
     unique_together = ('uuid', 'version', 'is_history')
     ordering = ["-last_modified", "name"]
 
-  def __str__(self):
+  def __unicode__(self):
     res = '%s - %s - %s - %s' % (force_unicode(self.name), self.owner, self.type, self.uuid)
     return force_unicode(res)
 
@@ -1058,10 +1097,11 @@ class Document2(models.Model):
 
   @property
   def path(self):
+    quoted_name = urllib.quote(self.name.encode('utf-8'))
     if self.parent_directory:
-      return '%s/%s' % (self.parent_directory.path, self.name)
+      return '%s/%s' % (self.parent_directory.path, quoted_name)
     else:
-      return self.name
+      return quoted_name
 
   @property
   def dirname(self):
@@ -1108,7 +1148,7 @@ class Document2(models.Model):
       elif self.type == 'oozie-bundle2':
         url = reverse('oozie:edit_bundle') + '?bundle=' + str(self.id)
       elif self.type.startswith('query'):
-        url = reverse('notebook:editor') + '?editor=' + str(self.id)
+        url = '/editor' + '?editor=' + str(self.id)
       elif self.type == 'directory':
         url = '/home2' + '?uuid=' + self.uuid
       elif self.type == 'notebook':
@@ -1121,7 +1161,7 @@ class Document2(models.Model):
         url = '/jobsub/#edit-design/%s' % self.data_dict.get('object_id', '')
       else:
         url = reverse('oozie:edit_workflow') + '?workflow=' + str(self.id)
-    except NoReverseMatch, e:
+    except NoReverseMatch:
       LOG.warn('Could not perform reverse lookup for type %s, app may be blacklisted.' % self.type)
     return url
 
@@ -1129,7 +1169,7 @@ class Document2(models.Model):
     return {
       'owner': self.owner.username,
       'name': self.name,
-      'path': urlencode(self.path or '/'),
+      'path': self.path or '/',
       'description': self.description,
       'uuid': self.uuid,
       'id': self.id,
@@ -1171,17 +1211,15 @@ class Document2(models.Model):
     # Redact query if needed
     self._redact_query()
 
+    if self.search:
+      self.search = self.search[:DOCUMENT2_SEARCH_MAX_LENGTH]
+
     super(Document2, self).save(*args, **kwargs)
 
     # Inherit shared permissions from parent directory, must be done after save b/c new doc needs ID
     self.inherit_permissions()
 
   def validate(self):
-    # Validate document name
-    invalid_chars = re.compile(r"[<>/{}[\]~`]");
-    if invalid_chars.search(self.name):
-      raise FilesystemException(_('Document %s contains an invalid character.') % self.name)
-
     # Validate home and Trash directories are only created once per user and cannot be created or modified after
     if self.name in [Document2.HOME_DIR, Document2.TRASH_DIR] and self.type == 'directory' and \
           Document2.objects.filter(name=self.name, owner=self.owner, type='directory').exists():
@@ -1205,16 +1243,58 @@ class Document2(models.Model):
       raise FilesystemException(_('Target with UUID %s is not a directory') % directory.uuid)
 
     if directory.can_write_or_exception(user=user):
+      # Restore last_modified date after save
+      original_last_modified = self.last_modified
       self.parent_directory = directory
       self.save()
+      # Use update instead of save() so that last_modified date is not modified automatically
+      Document2.objects.filter(id=self.id).update(last_modified=original_last_modified)
 
     return self
 
   def trash(self):
-    trash_dir = Directory.objects.get(name=self.TRASH_DIR, owner=self.owner)
-    self.move(trash_dir, self.owner)
+    try:
+      trash_dir = Directory.objects.get(name=self.TRASH_DIR, owner=self.owner)
+      self.move(trash_dir, self.owner)
+      self.is_trashed = True
+      self.save()
 
-  # TODO: restore
+      if self.is_directory:
+        children_ids = self._get_child_ids_recursively(self.id)
+        Document2.objects.filter(id__in=children_ids).update(is_trashed=True)
+    except Document2.MultipleObjectsReturned:
+      LOG.error('Multiple Trash directories detected. Merging all into one.')
+
+      trash_dirs = list(Directory.objects.filter(name=self.TRASH_DIR, owner=self.owner).order_by('-last_modified'))
+      parent_trash_dir = trash_dirs.pop()
+      for dir in trash_dirs:
+        dir.children.update(parent_directory=parent_trash_dir)
+        dir.delete()
+
+      self.move(parent_trash_dir, self.owner)
+
+  def restore(self):
+    # Currently restoring any doucment to /home
+    home_dir = Document2.objects.get_home_directory(self.owner)
+    self.move(home_dir, self.owner)
+    self.is_trashed = False
+    self.save()
+
+    if self.is_directory:
+      children_ids = self._get_child_ids_recursively(self.id)
+      Document2.objects.filter(id__in=children_ids).update(is_trashed=False)
+
+  def _get_child_ids_recursively(self, directory_id):
+    """
+    Returns the list of all children ids for a given directory id recursively, excluding history documents
+    """
+    directory = Directory.objects.get(id=directory_id)
+    children_ids = []
+    for child in directory.children.filter(is_history=False).filter(is_managed=False):
+      children_ids.append(child.id)
+      if child.is_directory:
+        children_ids.extend(self._get_child_ids_recursively(child.id))
+    return children_ids
 
   def can_read(self, user):
     perm = self.get_permission('read')
@@ -1230,7 +1310,7 @@ class Document2(models.Model):
   def can_write(self, user):
     perm = self.get_permission('write')
     has_write_permissions = perm.user_has_access(user) if perm else False
-    return user.is_superuser or self.owner == user or has_write_permissions
+    return user.is_superuser or self.owner == user or has_write_permissions or (self.parent_directory and self.parent_directory.can_write(user))
 
   def can_write_or_exception(self, user):
     if self.can_write(user):
@@ -1245,11 +1325,14 @@ class Document2(models.Model):
       return None
 
   def share(self, user, name='read', users=None, groups=None):
-    with transaction.atomic():
-      self.update_permission(user, name, users, groups)
-      # For directories, update all children recursively with same permissions
-      for child in self.children.all():
-        child.share(user, name, users, groups)
+    try:
+      with transaction.atomic():
+        self.update_permission(user, name, users, groups)
+        # For directories, update all children recursively with same permissions
+        for child in self.children.all():
+          child.share(user, name, users, groups)
+    except Exception, e:
+      raise PopupException(_("Failed to share document: %s") % e)
     return self
 
   def update_permission(self, user, name='read', users=None, groups=None):
@@ -1273,6 +1356,24 @@ class Document2(models.Model):
       perm.groups = groups
 
     perm.save()
+
+  def _get_doc1(self, doc2_type=None):
+    if not doc2_type:
+      doc2_type = self.type
+
+    try:
+      doc = self.doc.get()
+    except Exception, e:
+      LOG.error('Exception when retrieving document object for saved query: %s' % e)
+      doc = Document.objects.link(
+        self,
+        owner=self.owner,
+        name=self.name,
+        description=self.description,
+        extra=doc2_type
+      )
+
+    return doc
 
   def _massage_permissions(self):
     """
@@ -1317,6 +1418,10 @@ class Document2(models.Model):
     Uses Floyd's cycle-detection algorithm to detect a cycle (aka Tortoise and Hare)
     https://en.wikipedia.org/wiki/Cycle_detection#Tortoise_and_hare
     """
+    # Test base case where self.uuid == self.parent_directory.uuid first
+    if self.parent_directory is not None and self.parent_directory.uuid == self.uuid:
+      return True
+
     slow = self
     fast = self
     while True:
@@ -1373,6 +1478,18 @@ class Directory(Document2):
 
     documents = documents.exclude(is_history=True).exclude(is_managed=True)
 
+    # Excluding all trashed docs across users
+    documents = documents.exclude(is_trashed=True)
+
+    # Optimizing roll up for /home by checking only with directories instead of all documents
+    # For all other directories roll up is done in _filter_documents()
+    directories_all = Document2.objects.filter(type='directory').exclude(id=self.id)
+    directories_inside_home = directories_all.filter(
+      (Q(document2permission__users=user) | Q(document2permission__groups__in=user.groups.all())) &
+        ~Q(owner=user)
+    )
+    documents = documents.exclude(parent_directory__in=directories_inside_home)
+
     return documents.defer('description', 'data', 'extra', 'search').distinct().order_by('-last_modified')
 
 
@@ -1421,6 +1538,441 @@ class Document2Permission(models.Model):
     Returns true if the given user has permissions based on users, groups, or all flag
     """
     return self.groups.filter(id__in=user.groups.all()).exists() or user in self.users.all()
+
+
+def get_cluster_config(user):
+  cluster_type = Cluster(user).get_type()
+  cluster_config = ClusterConfig(user, cluster_type=cluster_type)
+
+  return cluster_config.get_config()
+
+
+DATAENG = 'dataeng'
+ANALYTIC_DB = 'analyticdb'
+
+
+class ClusterConfig():
+
+  def __init__(self, user, apps=None, cluster_type='ini'):
+    self.user = user
+    self.apps = appmanager.get_apps_dict(self.user) if apps is None else apps
+    self.cluster_type = cluster_type
+
+
+  def refreshConfig(self):
+    # TODO: reload "some ini sections"
+    pass
+
+
+  def get_config(self):
+    app_config = self.get_apps()
+    editors = app_config.get('editor')
+    main_button_action = self.get_main_quick_action(app_config)
+
+    if main_button_action.get('is_sql'):
+      default_sql_interpreter = main_button_action['type']
+    else:
+      default_sql_interpreter = editors and editors['default_sql_interpreter']
+
+    return {
+      'app_config': app_config,
+      'main_button_action': main_button_action,
+      'button_actions': [
+        app for app in [
+          editors,
+          app_config.get('dashboard'),
+          app_config.get('scheduler')
+        ] if app is not None
+      ],
+      'default_sql_interpreter': default_sql_interpreter,
+      'cluster_type': self.cluster_type
+    }
+
+
+  def get_apps(self):
+    apps = OrderedDict([app for app in [
+      ('editor', self._get_editor()),
+      ('dashboard', self._get_dashboard()),
+      ('browser', self._get_browser()),
+      ('scheduler', self._get_scheduler()),
+      ('sdkapps', self._get_sdk_apps()),
+      ('home', self._get_home()),
+    ] if app[1]])
+
+    return apps
+
+
+  def get_main_quick_action(self, apps):
+    if not apps:
+      raise PopupException(_('No permission to any app.'))
+
+    default_app = apps.values()[0]
+    default_interpreter = default_app.get('interpreters')
+
+    try:
+      user_default_app = json.loads(UserPreferences.objects.get(user=self.user, key='default_app').value)
+      if apps.get(user_default_app['app']):
+        default_interpreter = []
+        default_app = apps[user_default_app['app']]
+        if default_app.get('interpreters'):
+          interpreters = [interpreter for interpreter in default_app['interpreters'] if interpreter['type'] == user_default_app['interpreter']]
+          if interpreters:
+            default_interpreter = interpreters
+    except UserPreferences.DoesNotExist:
+      pass
+    except Exception:
+      LOG.exception('Could not load back default app')
+
+    if default_interpreter:
+      return default_interpreter[0]
+    else:
+      return default_app
+
+
+  def _get_home(self):
+    return {
+      'name': 'home',
+      'displayName': _('Home'),
+      'buttonName': _('Documents'),
+      'interpreters': [],
+      'page': '/home'
+    }
+
+
+  def _get_editor(self):
+    interpreters = []
+
+    _interpreters = get_ordered_interpreters(self.user)
+    if self.cluster_type == DATAENG:
+      _interpreters = [interpreter for interpreter in _interpreters if interpreter['type'] in ('hive', 'spark2', 'mapreduce')]
+    elif self.cluster_type == ANALYTIC_DB:
+      _interpreters = [interpreter for interpreter in _interpreters if interpreter['type'] == 'impala']
+
+    for interpreter in _interpreters:
+      interpreters.append({
+        'name': interpreter['name'],
+        'type': interpreter['type'],
+        'displayName': interpreter['name'],
+        'buttonName': _('Query'),
+        'tooltip': _('%s Query') % interpreter['type'].title(),
+        'page': '/editor/?type=%(type)s' % interpreter,
+        'is_sql': interpreter['is_sql']
+      })
+
+    if SHOW_NOTEBOOKS.get() and (self.cluster_type not in (DATAENG, ANALYTIC_DB)):
+      try:
+        first_non_sql_index = [interpreter['is_sql'] for interpreter in interpreters].index(False)
+      except ValueError:
+        first_non_sql_index = 0
+      interpreters.insert(first_non_sql_index, {
+        'name': 'notebook',
+        'type': 'notebook',
+        'displayName': 'Notebook',
+        'buttonName': _('Notebook'),
+        'tooltip': _('Notebook'),
+        'page': '/notebook',
+        'is_sql': False
+      })
+
+    if interpreters:
+      return {
+        'name': 'editor',
+        'displayName': _('Editor'),
+        'buttonName': _('Query'),
+        'interpreters': interpreters,
+        'interpreter_names': [interpreter['type'] for interpreter in interpreters],
+        'page': interpreters[0]['page'],
+        'default_sql_interpreter': next((interpreter['type'] for interpreter in interpreters if interpreter.get('is_sql')), 'hive')
+      }
+    else:
+      return None
+
+  def _get_dashboard(self):
+    interpreters = get_engines(self.user)
+
+    if interpreters and (self.cluster_type not in (DATAENG, ANALYTIC_DB)):
+      _interpreters = [{
+          'type': interpreter['type'],
+          'displayName': interpreter['type'].title(),
+          'buttonName': interpreter['type'].title(),
+          'page': '/dashboard/new_search?engine=%(type)s' % interpreter,
+          'tooltip': _('%s Dashboard') % interpreter['type'].title(),
+          'is_sql': True
+        } for interpreter in interpreters
+      ]
+
+      if HAS_REPORT_ENABLED.get():
+        _interpreters.append({
+          'type': 'report',
+          'displayName': 'Report',
+          'buttonName': 'Report',
+          'page': '/dashboard/new_search?engine=report',
+          'tooltip': _('Report'),
+          'is_sql': False
+        })
+
+      return {
+        'name': 'dashboard',
+        'displayName': _('Dashboard'),
+        'buttonName': _('Dashboard'),
+        'interpreters': _interpreters,
+        'page': '/dashboard/new_search?engine=%(type)s' % interpreters[0]
+      }
+    else:
+      return None
+
+  def _get_browser(self):
+    interpreters = []
+
+    if 'filebrowser' in self.apps and (self.cluster_type not in (DATAENG, ANALYTIC_DB)):
+      interpreters.append({
+        'type': 'hdfs',
+        'displayName': _('Files'),
+        'buttonName': _('Browse'),
+        'tooltip': _('Files'),
+        'page': '/filebrowser/' + (not self.user.is_anonymous() and 'view=' + self.user.get_home_directory() or '')
+      })
+
+    if is_s3_enabled() and has_s3_access(self.user) and self.cluster_type != ANALYTIC_DB:
+      interpreters.append({
+        'type': 's3',
+        'displayName': _('S3'),
+        'buttonName': _('Browse'),
+        'tooltip': _('S3'),
+        'page': '/filebrowser/view=S3A://'
+      })
+
+    if is_adls_enabled() and has_adls_access(self.user) and self.cluster_type != ANALYTIC_DB:
+      interpreters.append({
+        'type': 'adls',
+        'displayName': _('ADLS'),
+        'buttonName': _('Browse'),
+        'tooltip': _('ADLS'),
+        'page': '/filebrowser/view=adl:/'
+      })
+
+    if 'metastore' in self.apps:
+      interpreters.append({
+        'type': 'tables',
+        'displayName': _('Tables'),
+        'buttonName': _('Browse'),
+        'tooltip': _('Tables'),
+        'page': '/metastore/tables'
+      })
+
+    if 'search' in self.apps and (self.cluster_type not in (DATAENG, ANALYTIC_DB)):
+      interpreters.append({
+        'type': 'indexes',
+        'displayName': _('Indexes'),
+        'buttonName': _('Dashboard'),
+        'tooltip': _('Indexes'),
+        'page': '/indexer/'
+      })
+
+    if 'jobbrowser' in self.apps:
+      if self.cluster_type == DATAENG:
+        interpreters.append({
+          'type': 'dataeng',
+          'displayName': _('Jobs'),
+          'buttonName': _('Jobs'),
+          'tooltip': _('Jobs'),
+          'page': '/jobbrowser/'
+        })
+      else:
+        from hadoop.cluster import get_default_yarncluster # Circular loop
+
+        title =  _('Jobs') if self.cluster_type != ANALYTIC_DB else _('Queries')
+
+        if get_default_yarncluster():
+          interpreters.append({
+            'type': 'yarn',
+            'displayName': title,
+            'buttonName': title,
+            'tooltip': title,
+            'page': '/jobbrowser/'
+          })
+
+    if 'hbase' in self.apps and (self.cluster_type not in (DATAENG, ANALYTIC_DB)):
+      interpreters.append({
+        'type': 'hbase',
+        'displayName': _('HBase'),
+        'buttonName': _('Browse'),
+        'tooltip': _('HBase'),
+        'page': '/hbase/'
+      })
+
+    if 'security' in self.apps and (self.cluster_type not in (DATAENG, ANALYTIC_DB)):
+      interpreters.append({
+        'type': 'security',
+        'displayName': _('Security'),
+        'buttonName': _('Browse'),
+        'tooltip': _('Security'),
+        'page': '/security/hive'
+      })
+
+    if 'sqoop' in self.apps and (self.cluster_type not in (DATAENG, ANALYTIC_DB)):
+      interpreters.append({
+        'type': 'sqoop',
+        'displayName': _('Sqoop'),
+        'buttonName': _('Browse'),
+        'tooltip': _('Sqoop'),
+        'page': '/sqoop'
+      })
+
+    if interpreters:
+      return {
+          'name': 'browser',
+          'displayName': _('Browsers'),
+          'buttonName': _('Browse'),
+          'interpreters': interpreters,
+          'interpreter_names': [interpreter['type'] for interpreter in interpreters],
+        }
+    else:
+      return None
+
+
+  def _get_scheduler(self):
+    interpreters = [{
+        'type': 'oozie-workflow',
+        'displayName': _('Workflow'),
+        'buttonName': _('Schedule'),
+        'tooltip': _('Workflow'),
+        'page': '/oozie/editor/workflow/new/'
+      }, {
+        'type': 'oozie-coordinator',
+        'displayName': _('Schedule'),
+        'buttonName': _('Schedule'),
+        'tooltip': _('Schedule'),
+        'page': '/oozie/editor/coordinator/new/'
+      }, {
+        'type': 'oozie-bundle',
+        'displayName': _('Bundle'),
+        'buttonName': _('Schedule'),
+        'tooltip': _('Bundle'),
+        'page': '/oozie/editor/bundle/new/'
+      }
+    ]
+
+    if 'oozie' in self.apps and not (self.user.has_hue_permission(action="disable_editor_access", app="oozie") and not self.user.is_superuser) and self.cluster_type != ANALYTIC_DB:
+      return {
+          'name': 'oozie',
+          'displayName': _('Scheduler'),
+          'buttonName': _('Schedule'),
+          'interpreters': interpreters,
+          'page': interpreters[0]['page']
+        }
+    else:
+      return None
+
+
+  def _get_sdk_apps(self):
+    current_app, other_apps, apps_list = _get_apps(self.user)
+
+    interpreters = []
+
+    for other in other_apps:
+      interpreters.append({
+        'type': other.display_name,
+        'displayName': other.nice_name,
+        'buttonName': other.nice_name,
+        'tooltip': other.nice_name,
+        'page': '/%s' % other.display_name
+      })
+
+    if interpreters:
+      return {
+          'name': 'other',
+          'displayName': _('Other Apps'),
+          'buttonName': _('Other'),
+          'interpreters': interpreters,
+        }
+    else:
+      return None
+
+
+class Cluster():
+
+  def __init__(self, user):
+    self.user = user
+    self.default_cluster = get_user_preferences(self.user, key=USER_PREFERENCE_CLUSTER)
+    self.data = {}
+
+    if IS_EMBEDDED.get():
+      self.data = get_clusters()['Default']
+    elif self.default_cluster:
+      clusters = get_clusters()
+      cluster_name = json.loads(self.default_cluster[USER_PREFERENCE_CLUSTER]).get('name')
+      self.data = cluster_name and clusters.get(cluster_name) and clusters[cluster_name] or None
+
+  def get_type(self):
+    return self.data and self.data['type'] or 'ini'
+
+  def get_interface(self):
+    return json.loads(self.default_cluster[USER_PREFERENCE_CLUSTER]).get('interface')
+
+  def get_id(self):
+    return json.loads(self.default_cluster[USER_PREFERENCE_CLUSTER]).get('id')
+
+  def get_list_interface_indexes(self):
+    default_cluster_index = 0
+    default_cluster_interface = ''
+
+    clusters = get_clusters()
+    default_cluster = get_user_preferences(self.user, key=USER_PREFERENCE_CLUSTER)
+
+    if clusters and default_cluster:
+      if len(clusters) == 1:
+        default_cluster = clusters.values()[0]
+        default_cluster_index = 0
+        default_cluster_interface = ANALYTIC_DB
+      else:
+        default_cluster_json = json.loads(default_cluster[USER_PREFERENCE_CLUSTER])
+        default_cluster_name = default_cluster_json.get('name')
+
+        default_cluster_index = default_cluster_name in clusters.keys() and clusters.keys().index(default_cluster_name) or 0
+        default_cluster_interface = default_cluster_json.get('interface', '')
+
+    return default_cluster_index, default_cluster_interface
+
+
+def _get_apps(user, section=None):
+  current_app = None
+  other_apps = []
+  if user.is_authenticated():
+    apps = appmanager.get_apps(user)
+    apps_list = appmanager.get_apps_dict(user)
+    for app in apps:
+      if app.display_name not in [
+          'beeswax', 'impala', 'pig', 'jobsub', 'jobbrowser', 'metastore', 'hbase', 'sqoop', 'oozie', 'filebrowser',
+          'useradmin', 'search', 'help', 'about', 'zookeeper', 'proxy', 'rdbms', 'spark', 'indexer', 'security', 'notebook'] and app.menu_index != -1:
+        other_apps.append(app)
+      if section == app.display_name:
+        current_app = app
+  else:
+    apps_list = []
+
+  return current_app, other_apps, apps_list
+
+
+def get_user_preferences(user, key=None):
+  if key is not None:
+    try:
+      x = UserPreferences.objects.get(user=user, key=key)
+      return {key: x.value}
+    except UserPreferences.DoesNotExist:
+      return None
+  else:
+    return dict((x.key, x.value) for x in UserPreferences.objects.filter(user=user))
+
+
+def set_user_preferences(user, key, value):
+  try:
+    x = UserPreferences.objects.get(user=user, key=key)
+  except UserPreferences.DoesNotExist:
+    x = UserPreferences(user=user, key=key)
+  x.value = value
+  x.save()
+  return x
 
 
 def get_data_link(meta):

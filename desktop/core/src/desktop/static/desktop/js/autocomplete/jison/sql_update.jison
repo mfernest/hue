@@ -23,29 +23,44 @@ DataManipulation_EDIT
  ;
 
 UpdateStatement
- : 'UPDATE' TargetTable 'SET' SetClauseList OptionalWhereClause
+ : 'UPDATE' TargetTable 'SET' SetClauseList OptionalFromJoinedTable OptionalWhereClause
  ;
 
 UpdateStatement_EDIT
- : 'UPDATE' TargetTable_EDIT 'SET' SetClauseList OptionalWhereClause
- | 'UPDATE' TargetTable 'SET' SetClauseList_EDIT OptionalWhereClause
- | 'UPDATE' TargetTable 'SET' SetClauseList OptionalWhereClause_EDIT
- | 'UPDATE' TargetTable 'SET' SetClauseList OptionalWhereClause 'CURSOR'
+ : 'UPDATE' TargetTable_EDIT 'SET' SetClauseList OptionalFromJoinedTable OptionalWhereClause
+ | 'UPDATE' TargetTable 'SET' SetClauseList_EDIT OptionalFromJoinedTable OptionalWhereClause
+ | 'UPDATE' TargetTable 'SET' SetClauseList FromJoinedTable_EDIT OptionalWhereClause
+ | 'UPDATE' TargetTable 'SET' SetClauseList OptionalFromJoinedTable WhereClause_EDIT
+ | 'UPDATE' TargetTable 'SET' SetClauseList OptionalFromJoinedTable OptionalWhereClause 'CURSOR'
    {
-     if (!$5) {
-       suggestKeywords([ 'WHERE' ]);
+     if (parser.isImpala() && !$6 && !$5) {
+       parser.suggestKeywords([{ value: 'FROM', weight: 2 }, { value: 'WHERE', weight: 1 }]);
+     } else if (parser.isImpala() && !$6 && $5) {
+       var keywords = [{ value: 'FULL JOIN', weight: 2 }, { value: 'FULL OUTER JOIN', weight: 2 }, { value: 'JOIN', weight: 2 }, { value: 'LEFT JOIN', weight: 2 }, { value: 'LEFT OUTER JOIN', weight: 2 }, { value: 'RIGHT JOIN', weight: 2 }, { value: 'RIGHT OUTER JOIN', weight: 2 }, { value: 'INNER JOIN', weight: 2 },  { value: 'LEFT ANTI JOIN', weight: 2 }, { value: 'LEFT SEMI JOIN', weight: 2 }, { value: 'RIGHT ANTI JOIN', weight: 2 }, { value: 'RIGHT SEMI JOIN', weight: 2 }, { value: 'WHERE', weight: 1 }];
+       if ($5.suggestJoinConditions) {
+         parser.suggestJoinConditions($5.suggestJoinConditions);
+       }
+       if ($5.suggestJoins) {
+         parser.suggestJoins($5.suggestJoins);
+       }
+       if ($5.suggestKeywords) {
+         keywords = keywords.concat(parser.createWeightedKeywords($5.suggestKeywords, 3));
+       }
+       parser.suggestKeywords(keywords);
+     } else if (!$6) {
+       parser.suggestKeywords([ 'WHERE' ]);
      }
    }
  | 'UPDATE' TargetTable 'CURSOR'
    {
-     suggestKeywords([ 'SET' ]);
+     parser.suggestKeywords([ 'SET' ]);
    }
  | 'UPDATE' TargetTable_EDIT
  | 'UPDATE' TargetTable
  | 'UPDATE' 'CURSOR'
    {
-     suggestTables();
-     suggestDatabases({ appendDot: true });
+     parser.suggestTables();
+     parser.suggestDatabases({ appendDot: true });
    }
  ;
 
@@ -60,7 +75,7 @@ TargetTable_EDIT
 TableName
  : LocalOrSchemaQualifiedName
    {
-     addTablePrimary($1);
+     parser.addTablePrimary($1);
    }
  ;
 
@@ -88,11 +103,11 @@ SetClause_EDIT
  : SetTarget '=' UpdateSource_EDIT
  | SetTarget 'CURSOR'
    {
-     suggestKeywords([ '=' ]);
+     parser.suggestKeywords([ '=' ]);
    }
  | 'CURSOR'
    {
-     suggestColumns();
+     parser.suggestColumns();
    }
  ;
 
@@ -106,4 +121,18 @@ UpdateSource
 
 UpdateSource_EDIT
  : ValueExpression_EDIT
+ ;
+
+OptionalFromJoinedTable
+ :
+ | 'FROM' TableReference  -> $2
+ ;
+
+FromJoinedTable_EDIT
+ : 'FROM' 'CURSOR'
+   {
+     parser.suggestTables();
+     parser.suggestDatabases({ appendDot: true });
+   }
+ | 'FROM' TableReference_EDIT
  ;

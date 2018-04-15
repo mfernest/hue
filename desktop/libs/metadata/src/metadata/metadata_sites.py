@@ -19,8 +19,6 @@ import errno
 import logging
 import os
 
-from metadata.conf import NAVIGATOR
-
 
 LOG = logging.getLogger(__name__)
 
@@ -30,7 +28,7 @@ _SITE_DICT = None
 _CONF_NAVIGATOR_SERVER_URL = 'navigator.server.url'
 _CONF_NAVIGATOR_AUDIT_LOG_DIR = 'audit_event_log_dir'
 _CONF_NAVIGATOR_AUDIT_MAX_FILE_SIZE = 'navigator.audit_log_max_file_size'
-
+_CONF_NAVIGATOR_HUE_SERVER_NAME = 'navigator.client.clusterName'
 
 
 def reset():
@@ -44,23 +42,35 @@ def get_conf(name='navigator'):
   return _SITE_DICT[name]
 
 
-
 def get_navigator_server_url():
-  return get_conf().get(_CONF_NAVIGATOR_SERVER_URL, 'http://localhost:7187')
+  """Returns the navigator.server.url"""
+  return get_conf('navigator-lineage').get(_CONF_NAVIGATOR_SERVER_URL, 'http://localhost:7187')
+
 
 def get_navigator_audit_log_dir():
-  return get_conf().get(_CONF_NAVIGATOR_AUDIT_LOG_DIR)
+  """Returns audit_event_log_dir"""
+  return get_conf().get(_CONF_NAVIGATOR_AUDIT_LOG_DIR, '')
+
 
 def get_navigator_audit_max_file_size():
-  return get_conf().get(_CONF_NAVIGATOR_AUDIT_MAX_FILE_SIZE, '100')
+  """Returns navigator.audit_log_max_file_size in MB"""
+  size = get_conf().get(_CONF_NAVIGATOR_AUDIT_MAX_FILE_SIZE, '100')
+  return '%sMB' % size.strip() if size else "100MB"
+
+
+def get_navigator_hue_server_name():
+  return get_conf('navigator-lineage').get(_CONF_NAVIGATOR_HUE_SERVER_NAME, '')
 
 
 def _parse_sites():
+  from metadata.conf import NAVIGATOR
+
   global _SITE_DICT
   _SITE_DICT ={}
 
   paths = [
-    ('navigator', os.path.join(NAVIGATOR.CONF_DIR.get(), 'navigator.client.properties')),
+    ('navigator', os.path.join(NAVIGATOR.CONF_DIR.get(), 'navigator.client.properties')), # 'audit'
+    ('navigator-lineage', os.path.join(NAVIGATOR.CONF_DIR.get(), 'navigator.lineage.client.properties')),
   ]
 
   for name, path in paths:

@@ -47,6 +47,10 @@ class OozieApi(Api):
   LOG_END_PATTERN = '<<< Invocation of Main class completed <<<'
   RESULTS_PATTERN = "(?P<results>>>> Invoking Beeline command line now >>>.+<<< Invocation of Beeline command completed <<<)"
   RESULTS_PATTERN_GENERIC = "(?P<results>>>> Invoking Main class now >>>.+<<< Invocation of Main class completed <<<)"
+  RESULTS_PATTERN_MAPREDUCE = "(?P<results>.+)"
+  RESULTS_PATTERN_PIG = "(?P<results>>>> Invoking Pig command line now >>>.+<<< Invocation of Pig command completed <<<)"
+  BATCH_JOB_PREFIX = 'Batch'
+  SCHEDULE_JOB_PREFIX = 'Schedule'
 
   def __init__(self, *args, **kwargs):
     Api.__init__(self, *args, **kwargs)
@@ -60,11 +64,15 @@ class OozieApi(Api):
     if not notebook.get('uuid', ''):
       raise PopupException(_('Notebook is missing a uuid, please save the notebook before executing as a batch job.'))
 
-    notebook_doc = Document2.objects.get_by_uuid(user=self.user, uuid=notebook['uuid'], perm_type='read')
-
-    # Create a managed workflow from the notebook doc
-    workflow_doc = WorkflowBuilder().create_workflow(document=notebook_doc, user=self.user, managed=True, name=_("Batch job for %s") % notebook_doc.name or notebook_doc.type)
-    workflow = Workflow(document=workflow_doc, user=self.user)
+    if notebook['type'] == 'notebook' or notebook['type'] == 'query-java':
+      # Convert notebook to workflow
+      workflow_doc = WorkflowBuilder().create_notebook_workflow(notebook=notebook, user=self.user, managed=True, name=_("%s for %s") % (OozieApi.BATCH_JOB_PREFIX, notebook['name'] or notebook['type']))
+      workflow = Workflow(document=workflow_doc, user=self.user)
+    else:
+      notebook_doc = Document2.objects.get_by_uuid(user=self.user, uuid=notebook['uuid'], perm_type='read')
+      # Create a managed workflow from the notebook doc
+      workflow_doc = WorkflowBuilder().create_workflow(document=notebook_doc, user=self.user, managed=True, name=_("Batch job for %s") % (notebook_doc.name or notebook_doc.type))
+      workflow = Workflow(document=workflow_doc, user=self.user)
 
     # Submit workflow
     job_id = _submit_workflow(user=self.user, fs=self.fs, jt=self.jt, workflow=workflow, mapping=None)
@@ -76,14 +84,26 @@ class OozieApi(Api):
 
 
   def check_status(self, notebook, snippet):
-    response = {}
+    response = {'status': 'running'}
+
     job_id = snippet['result']['handle']['id']
     oozie_job = check_job_access_permission(self.request, job_id)
 
-    if oozie_job.status in ('KILLED', 'FAILED'):
+    if oozie_job.is_running():
+      return response
+    elif oozie_job.status in ('KILLED', 'FAILED'):
       raise QueryError(_('Job was %s') % oozie_job.status)
-
-    response['status'] = 'running' if oozie_job.is_running() else 'available'
+    else:
+      # Check if job results are actually available, since YARN takes a while to move logs to JHS,
+      log_output = self.get_log(notebook, snippet)
+      if log_output:
+        results = self._get_results(log_output, snippet['type'])
+        if results:
+          response['status'] = 'available'
+        else:
+          LOG.warn('No log result could be matched for %s' % job_id)
+      else:
+        response['status'] = 'failed'
 
     return response
 
@@ -115,14 +135,16 @@ class OozieApi(Api):
     job_id = snippet['result']['handle']['id']
 
     oozie_job = check_job_access_permission(self.request, job_id)
-    return self._get_log_output(oozie_job)
+    logs = self._get_log_output(oozie_job)
+
+    return logs if logs else oozie_job.log
 
 
   def progress(self, snippet, logs):
     job_id = snippet['result']['handle']['id']
 
     oozie_job = check_job_access_permission(self.request, job_id)
-    return oozie_job.get_progress(),
+    return oozie_job.get_progress()
 
 
   def get_jobs(self, notebook, snippet, logs):
@@ -152,36 +174,43 @@ class OozieApi(Api):
 
   def _get_log_output(self, oozie_workflow):
     log_output = ''
-
     q = QueryDict(self.request.GET, mutable=True)
     q['format'] = 'python'  # Hack for triggering the good section in single_task_attempt_logs
     self.request.GET = q
 
-    logs, workflow_actions, is_really_done = get_workflow_logs(self.request, oozie_workflow, make_links=False,
+    attempts = 0
+    max_attempts = 10
+    logs_found = False
+    while not logs_found and attempts < max_attempts:
+      logs, workflow_actions, is_really_done = get_workflow_logs(self.request, oozie_workflow, make_links=False,
                                                                  log_start_pattern=self.LOG_START_PATTERN,
                                                                  log_end_pattern=self.LOG_END_PATTERN)
+      if logs:
+        log_output = logs.values()[0]
+        if log_output.startswith('Unable to locate'):
+          LOG.debug('Failed to get job attempt logs, possibly due to YARN archiving job to JHS. Will sleep and try again.')
+          time.sleep(2.0)
+        else:
+          logs_found = True
 
-    if len(logs) > 0:
-      log_output = logs.values()[0]
-      if log_output.startswith('Unable to locate'):
-        LOG.debug('Failed to get job attempt logs, possibly due to YARN archiving job to JHS. Will sleep and try again.')
-        time.sleep(5.0)
-        logs, workflow_actions, is_really_done = get_workflow_logs(self.request, oozie_workflow, make_links=False,
-                                                                   log_start_pattern=self.LOG_START_PATTERN,
-                                                                   log_end_pattern=self.LOG_END_PATTERN)
-        if len(logs) > 0:
-          log_output = logs.values()[0]
-
+      attempts += 1
     return log_output
-
 
 
   def _get_results(self, log_output, action_type):
     results = ''
 
-    pattern = self.RESULTS_PATTERN if action_type == 'hive' else self.RESULTS_PATTERN_GENERIC
+    if action_type == 'hive':
+      pattern = self.RESULTS_PATTERN
+    elif action_type == 'pig':
+      pattern = self.RESULTS_PATTERN_PIG
+    elif action_type == 'mapreduce':
+      pattern = self.RESULTS_PATTERN_MAPREDUCE
+    else:
+      pattern = self.RESULTS_PATTERN_GENERIC
 
     re_results = re.compile(pattern, re.M | re.DOTALL)
     if re_results.search(log_output):
       results = re.search(re_results, log_output).group('results').strip()
+
     return results

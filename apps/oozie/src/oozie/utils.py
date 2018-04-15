@@ -43,8 +43,10 @@ FREQUENCY_REGEX = r'^\$\{coord:(?P<frequency_unit>\w+)\((?P<frequency_number>\d+
 
 def format_field_value(field, value):
   if field in JSON_FIELDS:
-    if not isinstance(value, basestring):
-      return json.dumps(value)
+    if isinstance(value, basestring):
+      value = json.loads(value)
+    value = [item for item in value if isinstance(item, dict) and item.get('name')]
+    return json.dumps(value)
   if field in NUMBER_FIELDS_OR_NULL:
     if not isinstance(value, int) and value is not None:
       return int(value)
@@ -97,11 +99,14 @@ def workflow_to_dict(workflow):
   return workflow_dict
 
 
-def smart_path(path, mapping, is_coordinator=False):
+def smart_path(path, mapping=None, is_coordinator=False):
   # Try to prepend home_dir and FS scheme if needed.
   # If path starts by a parameter try to get its value from the list of parameters submitted by the user or the coordinator.
   # This dynamic checking enable the use of <prepares> statements in a workflow scheduled manually of by a coordinator.
   # The logic is a bit complicated but Oozie is not consistent with data paths, prepare, coordinator paths and Fs action.
+  if mapping is None:
+    mapping = {}
+
   if not path.startswith('$') and not path.startswith('/') and not urlparse.urlsplit(path).scheme:
     path = '/user/%(username)s/%(path)s' % {
         'username': '${coord:user()}' if is_coordinator else '${wf:user()}',
@@ -187,12 +192,11 @@ def convert_to_server_timezone(date, local_tz='UTC', server_tz=None, user=DEFAUL
     date_local_tz = date_local_tz.replace(tzinfo=tz.gettz(local_tz))
     date_server_tz = date_local_tz.astimezone(tz.gettz(server_tz))
 
-    date_server_tz = date_server_tz.strftime('%Y-%m-%dT%H:%M')
     # Oozie timezone is either UTC or GMT(+/-)####
     if 'UTC' == server_tz:
-      return date_server_tz + u'Z'
+      return date_server_tz.strftime('%Y-%m-%dT%H:%M') + u'Z'
     else:
-      return date_server_tz + u'+' + re.split('[+-]', server_tz)[1]
+      return date_server_tz.strftime('%Y-%m-%dT%H:%M') + date_server_tz.strftime('%z')
   except TypeError, ValueError:
     LOG.error("Failed to convert Oozie timestamp: %s" % date)
   return None

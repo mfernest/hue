@@ -280,6 +280,8 @@ def update_app_permissions(**kwargs):
            not (new_dp.app == 'metastore' and new_dp.action == 'write') and \
            not (new_dp.app == 'hbase' and new_dp.action == 'write') and \
            not (new_dp.app == 'security' and new_dp.action == 'impersonate') and \
+           not (new_dp.app == 'filebrowser' and new_dp.action == 's3_access') and \
+           not (new_dp.app == 'filebrowser' and new_dp.action == 'adls_access') and \
            not (new_dp.app == 'oozie' and new_dp.action == 'disable_editor_access'):
           GroupPermission.objects.create(group=default_group, hue_permission=new_dp)
 
@@ -300,25 +302,32 @@ def install_sample_user():
   Setup the de-activated sample user with a certain id. Do not create a user profile.
   """
   user = None
+
   try:
-    user = auth_models.User.objects.get(id=SAMPLE_USER_ID)
-    LOG.info('Sample user found: %s' % user.username)
+    if auth_models.User.objects.filter(id=SAMPLE_USER_ID).exists():
+      user = auth_models.User.objects.get(id=SAMPLE_USER_ID)
+      LOG.info('Sample user found with username "%s" and User ID: %s' % (user.username, user.id))
+    elif auth_models.User.objects.filter(username=SAMPLE_USER_INSTALL).exists():
+      user = auth_models.User.objects.get(username=SAMPLE_USER_INSTALL)
+      LOG.info('Sample user found: %s' % user.username)
+    else:
+      user, created = auth_models.User.objects.get_or_create(
+        username=SAMPLE_USER_INSTALL,
+        password='!',
+        is_active=False,
+        is_superuser=False,
+        id=SAMPLE_USER_ID,
+        pk=SAMPLE_USER_ID)
+
+      if created:
+        LOG.info('Installed a user called "%s"' % SAMPLE_USER_INSTALL)
+
     if user.username != SAMPLE_USER_INSTALL:
+      LOG.warn('Sample user does not have username "%s", will attempt to modify the username.' % SAMPLE_USER_INSTALL)
       with transaction.atomic():
         user = auth_models.User.objects.get(id=SAMPLE_USER_ID)
         user.username = SAMPLE_USER_INSTALL
         user.save()
-  except auth_models.User.DoesNotExist:
-    user, created = auth_models.User.objects.get_or_create(
-      username=SAMPLE_USER_INSTALL,
-      password='!',
-      is_active=False,
-      is_superuser=False,
-      id=SAMPLE_USER_ID,
-      pk=SAMPLE_USER_ID)
-
-    if created:
-      LOG.info('Installed a user called "%s"' % SAMPLE_USER_INSTALL)
   except Exception, ex:
     LOG.exception('Failed to get or create sample user')
 

@@ -66,10 +66,11 @@ variables.
 pytype = type
 
 from django.utils.encoding import smart_str
+from django.utils.translation import ugettext as _
 
 from desktop.lib.paths import get_desktop_root, get_build_dir
 
-import configobj
+from configobj import ConfigObj, ConfigObjError
 import json
 import logging
 import os
@@ -133,12 +134,18 @@ class BoundConfig(object):
     'present' is whether the data was found in self.bind_to
     'data' is the data itself, or None whenever present is False
     """
-    if self.grab_key is not _ANONYMOUS:
-      present = self.grab_key in self.bind_to
-      data = self.bind_to.get(self.grab_key)
-    else:
+    try:
+      if self.grab_key is not _ANONYMOUS:
+        present = self.grab_key in self.bind_to
+        data = self.bind_to.get(self.grab_key)
+      else:
+        present = True
+        data = self.bind_to
+    except AttributeError:
+      LOG.exception("Error value of key '%s' in configuration." % self.grab_key)
+      data = _("Possible misconfiguration")
       present = True
-      data = self.bind_to
+
     return data, present
 
   def get(self):
@@ -501,8 +508,8 @@ def _configs_from_dir(conf_dir):
       continue
     LOG.debug("Loading configuration from: %s" % filename)
     try:
-      conf = configobj.ConfigObj(os.path.join(conf_dir, filename))
-    except configobj.ConfigObjError, ex:
+      conf = ConfigObj(os.path.join(conf_dir, filename))
+    except ConfigObjError, ex:
       LOG.error("Error in configuration file '%s': %s" % (os.path.join(conf_dir, filename), ex))
       raise
     conf['DEFAULT'] = dict(desktop_root=get_desktop_root(), build_dir=get_build_dir())
@@ -519,7 +526,7 @@ def load_confs(conf_source=None):
   if conf_source is None:
     conf_source = _configs_from_dir(get_desktop_root("conf"))
 
-  conf = configobj.ConfigObj()
+  conf = ConfigObj()
   for in_conf in conf_source:
     conf.merge(in_conf)
   return conf
@@ -708,6 +715,8 @@ def coerce_password_from_script(script):
   stdout, stderr = p.communicate()
 
   if p.returncode != 0:
+    if stderr:
+      LOG.error("Failed to read password from script:\n%s" % stderr)
     if os.environ.get('HUE_IGNORE_PASSWORD_SCRIPT_ERRORS') is None:
       raise subprocess.CalledProcessError(p.returncode, script)
     else:

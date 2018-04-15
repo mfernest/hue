@@ -19,13 +19,16 @@ These methods should never be placed in 'desktop.lib.exceptions'.
 This file exists to remove circular reference caused by importing django_util.
 """
 
+import logging
 import sys
 import traceback
 
 from django.utils.encoding import force_unicode
 
-# Need full import statement
 import desktop.lib.django_util
+
+
+LOG = logging.getLogger(__name__)
 
 
 class PopupException(Exception):
@@ -40,14 +43,23 @@ class PopupException(Exception):
     self.detail = detail
     self.error_code = error_code
 
+    if self.detail:
+      LOG.error('Potential detail: %s' % self.detail)
+
     # Traceback is only relevant if an exception was thrown, caught, and we reraise with this exception.
     (type, value, tb) = sys.exc_info()
     self.traceback = traceback.extract_tb(tb)
+    if self.traceback:
+      LOG.error('Potential trace: %s' % self.traceback)
 
   def response(self, request):
     data = dict(title=force_unicode(self.title), message=force_unicode(self.message), detail=force_unicode(self.detail) if self.detail else None, traceback=self.traceback)
+    data['is_embeddable'] = request.GET.get('is_embeddable', False)
     if not request.ajax:
       data['request'] = request
     response = desktop.lib.django_util.render("popup_error.mako", request, data)
-    response.status_code = self.error_code
+    if self.error_code == 500 and data['is_embeddable']: # Hue 4
+      response.status_code = 200
+    else:
+      response.status_code = self.error_code
     return response

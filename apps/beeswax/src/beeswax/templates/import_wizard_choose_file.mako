@@ -19,26 +19,25 @@ from desktop.views import commonheader, commonfooter
 from django.utils.translation import ugettext as _
 %>
 
+<%namespace name="assist" file="/assist.mako" />
 <%namespace name="comps" file="beeswax_components.mako" />
 <%namespace name="layout" file="layout.mako" />
-<%namespace name="assist" file="/assist.mako" />
-<%namespace name="tableStats" file="/table_stats.mako" />
-<%namespace name="require" file="/require.mako" />
 
-
-${ commonheader(_('Create table from file'), 'metastore', user) | n,unicode }
+${ commonheader(_('Create table from file'), 'metastore', user, request) | n,unicode }
+<span class="notebook">
 ${ layout.metastore_menubar() }
 
-${ require.config() }
+<script src="${ static('desktop/ext/js/jquery/plugins/jquery-ui-1.10.4.custom.min.js') }"></script>
+<script src="${ static('desktop/ext/js/selectize.min.js') }"></script>
+<script src="${ static('metastore/js/metastore.ko.js') }"></script>
+<script src="${ static('desktop/ext/js/knockout-sortable.min.js') }"></script>
+<script src="${ static('desktop/js/ko.editable.js') }"></script>
 
-${ tableStats.tableStats() }
-${ assist.assistPanel() }
-
-
-<script src="${ static('desktop/ext/js/d3.v3.js') }" type="text/javascript" charset="utf-8"></script>
+${ assist.assistJSModels() }
 
 <link rel="stylesheet" href="${ static('metastore/css/metastore.css') }" type="text/css">
 <link rel="stylesheet" href="${ static('notebook/css/notebook.css') }">
+<link rel="stylesheet" href="${ static('notebook/css/notebook-layout.css') }">
 <style type="text/css">
 % if conf.CUSTOM.BANNER_TOP_HTML.get():
   .show-assist {
@@ -50,11 +49,11 @@ ${ assist.assistPanel() }
 % endif
 </style>
 
+${ assist.assistPanel() }
 
 <a title="${_('Toggle Assist')}" class="pointer show-assist" data-bind="visible: !$root.isLeftPanelVisible() && $root.assistAvailable(), click: function() { $root.isLeftPanelVisible(true); }">
   <i class="fa fa-chevron-right"></i>
 </a>
-
 
 <div class="main-content">
   <div class="vertical-full container-fluid" data-bind="style: { 'padding-left' : $root.isLeftPanelVisible() ? '0' : '20px' }">
@@ -70,10 +69,6 @@ ${ assist.assistPanel() }
               params: {
                 user: '${user.username}',
                 sql: {
-                  sourceTypes: [{
-                    name: 'hive',
-                    type: 'hive'
-                  }],
                   navigationSettings: {
                     openItem: false,
                     showStats: true
@@ -85,7 +80,7 @@ ${ assist.assistPanel() }
         </div>
         <div class="resizer" data-bind="visible: $root.isLeftPanelVisible() && $root.assistAvailable(), splitDraggable : { appName: 'notebook', leftPanelVisible: $root.isLeftPanelVisible }"><div class="resize-bar">&nbsp;</div></div>
 
-        <div class="right-panel">
+        <div class="content-panel">
 
           <div class="metastore-main">
             <h3>
@@ -93,7 +88,7 @@ ${ assist.assistPanel() }
                 <a href="${ url('beeswax:create_table', database=database) }" title="${_('Create a new table manually')}" class="inactive-action margin-left-10"><i class="fa fa-plus"></i></a>
               </div>
 
-              <ul id="breadcrumbs" class="nav nav-pills hueBreadcrumbBar">
+              <ul id="breadcrumbs" class="nav nav-pills hue-breadcrumbs-bar">
                 <li>
                   <a href="${url('metastore:databases')}">${_('Databases')}</a><span class="divider">&gt;</span>
                 </li>
@@ -182,20 +177,6 @@ ${ assist.assistPanel() }
 
 
 
-<div id="chooseFile" class="modal hide fade">
-    <div class="modal-header">
-        <a href="#" class="close" data-dismiss="modal">&times;</a>
-        <h3>${_('Choose a file')}</h3>
-    </div>
-    <div class="modal-body">
-        <div id="filechooser">
-        </div>
-    </div>
-    <div class="modal-footer">
-    </div>
-</div>
-
-
 <style type="text/css">
   #filechooser {
     min-height: 100px;
@@ -208,25 +189,15 @@ ${ assist.assistPanel() }
   }
 </style>
 
-<script type="text/javascript" charset="utf-8">
+<script type="text/javascript">
+  (function () {
+    if (ko.options) {
+      ko.options.deferUpdates = true;
+    }
 
-  require([
-    "knockout",
-    "ko.charts",
-    "desktop/js/apiHelper",
-    "assistPanel",
-    "tableStats",
-    "knockout-mapping",
-    "knockout-sortable",
-    "ko.editable",
-    "ko.hue-bindings"
-  ], function (ko, charts, ApiHelper) {
-
-    ko.options.deferUpdates = true;
-
-    function MetastoreViewModel(options) {
+    function ImportWizardChooseFileViewModel() {
       var self = this;
-      self.apiHelper = ApiHelper.getInstance(options);
+      self.apiHelper = ApiHelper.getInstance();
       self.assistAvailable = ko.observable(true);
       self.isLeftPanelVisible = ko.observable();
       self.apiHelper.withTotalStorage('assist', 'assist_panel_visible', self.isLeftPanelVisible, true);
@@ -243,15 +214,7 @@ ${ assist.assistPanel() }
 
     $(document).ready(function () {
 
-      var options = {
-        user: '${ user.username }',
-        i18n: {
-          errorLoadingDatabases: "${ _('There was a problem loading the databases') }",
-          errorLoadingTablePreview: "${ _('There was a problem loading the table preview.') }"
-        }
-      }
-
-      var viewModel = new MetastoreViewModel(options);
+      var viewModel = new ImportWizardChooseFileViewModel();
 
       ko.applyBindings(viewModel);
 
@@ -262,27 +225,27 @@ ${ assist.assistPanel() }
       $(".fileChooserBtn").click(function (e) {
         e.preventDefault();
         var _destination = $(this).attr("data-filechooser-destination");
-        var initialLoadValue = $('#id_load_data').val();
-        function handleChoice(filePath){
+        function handleChoice(filePath, isFile){
+          if (filePath.toLowerCase().indexOf('s3a://') === 0 && isFile) {
+            filePath = filePath.split('/');
+            filePath.pop();
+            filePath = filePath.join('/');
+          }
           $("input[name='" + _destination + "']").val(filePath);
           $("#chooseFile").modal("hide");
-          if (filePath.toLowerCase().indexOf('s3') === 0){
-            $('#id_load_data').val('EXTERNAL').trigger('change').find('option[value="IMPORT"]').attr('disabled', 'disabled');
-          }
-          else {
-            $('#id_load_data').val(initialLoadValue).trigger('change').find('option[value="IMPORT"]').removeAttr('disabled');
-          }
+          $('.pathChooser').trigger('change');
         }
         $("#filechooser").jHueFileChooser({
           initialPath: $("input[name='" + _destination + "']").val(),
-          onFileChoose: handleChoice,
-          onFolderChoose: handleChoice,
+          onFileChoose: function(path){ handleChoice(path, true) },
+          onFolderChoose: function(path){ handleChoice(path, false) },
           createFolder: $('#id_load_data').val() === 'EXTERNAL',
-          selectFolder: $('#id_load_data').val() === 'EXTERNAL',
+          selectFolder: true,
           displayOnlyFolders: $('#id_load_data').val() === 'EXTERNAL'
         });
         $("#chooseFile").modal("show");
       });
+
       $("#id_load_data").change(function () {
         if ($(this).val() === 'IMPORT') {
           $("#fileWillBeMoved").show();
@@ -291,21 +254,30 @@ ${ assist.assistPanel() }
           $("#fileWillBeMoved").hide();
         }
       });
+
+      $('.pathChooser').change(function () {
+        var initialLoadValue = $('#id_load_data').val();
+        if ($(this).val().toLowerCase().indexOf('s3a://') === 0) {
+          $('#id_load_data').val('EXTERNAL').trigger('change').find('option[value="IMPORT"]').attr('disabled', 'disabled');
+        }
+        else {
+          $('#id_load_data').val(initialLoadValue).trigger('change').find('option[value="IMPORT"]').removeAttr('disabled');
+        }
+      });
+
       $("#step2").click(function (e) {
         e.preventDefault();
         $("input[name='submit_file']").click();
       });
+
       $("body").keypress(function (e) {
         if (e.which == 13) {
           e.preventDefault();
           $("input[name='submit_file']").click();
         }
       });
-
     });
-  });
-
+  })();
 </script>
-
-
+</span>
 ${ commonfooter(request, messages) | n,unicode }

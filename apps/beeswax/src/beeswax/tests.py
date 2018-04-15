@@ -21,9 +21,11 @@ import gzip
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import socket
+import string
 import tempfile
 import threading
 
@@ -56,6 +58,7 @@ from desktop.lib.security_util import get_localhost_name
 from desktop.lib.test_export_csvxls import _read_xls_sheet_data
 from hadoop.fs.hadoopfs import Hdfs
 
+from hadoop import ssl_client_site
 from hadoop.pseudo_hdfs4 import is_live_cluster
 
 import desktop.conf as desktop_conf
@@ -68,7 +71,7 @@ import beeswax.views
 from beeswax import conf, hive_site
 from beeswax.common import apply_natural_sort
 from beeswax.conf import HIVE_SERVER_HOST, AUTH_USERNAME, AUTH_PASSWORD, AUTH_PASSWORD_SCRIPT
-from beeswax.views import collapse_whitespace, _save_design
+from beeswax.views import collapse_whitespace, _save_design, parse_out_jobs
 from beeswax.test_base import make_query, wait_for_query_to_finish, verify_history, get_query_server_config,\
   fetch_query_result_data
 from beeswax.design import hql_query, strip_trailing_semicolon
@@ -79,7 +82,7 @@ from beeswax.server.dbms import QueryServerException
 from beeswax.server.hive_server2_lib import HiveServerClient,\
   PartitionKeyCompatible, PartitionValueCompatible, HiveServerTable,\
   HiveServerTColumnValue2
-from beeswax.test_base import BeeswaxSampleProvider, is_hive_on_spark
+from beeswax.test_base import BeeswaxSampleProvider, is_hive_on_spark, get_available_execution_engines
 from beeswax.hive_site import get_metastore, hiveserver2_jdbc_url
 
 
@@ -106,6 +109,8 @@ def _make_query(client, query, submission_type="Execute",
 
   return res
 
+def random_generator(size=8, chars=string.ascii_uppercase + string.digits):
+    return ''.join(random.choice(chars) for _ in range(size))
 
 def get_csv(client, result_response):
   """Get the csv for a query result"""
@@ -125,7 +130,7 @@ class TestBeeswaxWithHadoop(BeeswaxSampleProvider):
     self.db = dbms.get(self.user, get_query_server_config())
     self.cluster.fs.do_as_user('test', self.cluster.fs.create_home_dir, '/user/test')
 
-  def _verify_query_state(self, state):
+  def _verify_query_state(self, state, *extra_states):
     """
     Verify the state of the latest query.
     Return the id of that query
@@ -133,7 +138,7 @@ class TestBeeswaxWithHadoop(BeeswaxSampleProvider):
     resp = self.client.get('/beeswax/query_history')
     history = resp.context['page'].object_list[0]
     last_state = history.last_state
-    assert_equal(beeswax.models.QueryHistory.STATE[last_state], state)
+    assert_true(beeswax.models.QueryHistory.STATE[last_state] in (state,) + extra_states)
     return history.id
 
 
@@ -224,7 +229,7 @@ for x in sys.stdin:
 
     # Check that we report this query as "running" (this query should take a little while).
     if not is_hive_on_spark():
-      self._verify_query_state(beeswax.models.QueryHistory.STATE.running)
+      self._verify_query_state(beeswax.models.QueryHistory.STATE.running, beeswax.models.QueryHistory.STATE.available)
 
     response = wait_for_query_to_finish(self.client, response, max=180.0)
     content = fetch_query_result_data(self.client, response)
@@ -362,20 +367,22 @@ for x in sys.stdin:
     """
     Testing query with udf
     """
-    response = _make_query(self.client, "SELECT my_sqrt(foo), my_float(foo) FROM test where foo=4 GROUP BY foo", # Force MR job with GROUP BY
-      udfs=[('my_sqrt', 'org.apache.hadoop.hive.ql.udf.UDFSqrt'),
-            ('my_float', 'org.apache.hadoop.hive.ql.udf.UDFToFloat')], local=False, database=self.db_name)
-    response = wait_for_query_to_finish(self.client, response, max=60.0)
-    content = fetch_query_result_data(self.client, response)
+    execution_engines = get_available_execution_engines()
 
-    assert_equal([2.0, 4.0], content["results"][0])
-    log = content['log']
+    for engine in execution_engines:
+      response = _make_query(self.client, "SELECT my_sqrt(foo), my_float(foo) FROM test where foo=4 GROUP BY foo", # Force MR job with GROUP BY
+        udfs=[('my_sqrt', 'org.apache.hadoop.hive.ql.udf.UDFSqrt'),
+              ('my_float', 'org.apache.hadoop.hive.ql.udf.UDFToFloat')],
+        local=False, database=self.db_name, settings=[('hive.execution.engine', engine)])
+      response = wait_for_query_to_finish(self.client, response, max=60.0)
+      content = fetch_query_result_data(self.client, response)
 
-    if not is_hive_on_spark():
-      assert_true(search_log_line('map = 100%', log), log)
-      assert_true(search_log_line('reduce = 100%', log), log)
+      assert_equal([2.0, 4.0], content["results"][0])
+      log = content['log']
+
+      assert_true(search_log_line('Completed executing command', log), log)
       # Test job extraction while we're at it
-      assert_equal(1, len(content["hadoop_jobs"]), "Should have started 1 job and extracted it.")
+      assert_equal(1, len(parse_out_jobs(log, engine)), "Should have started 1 job and extracted it.")
 
 
   def test_query_with_remote_udf(self):
@@ -537,7 +544,7 @@ for x in sys.stdin:
     response = _make_query(c, CREATE_TABLE, database=self.db_name)
     wait_for_query_to_finish(c, response)
 
-    response = _make_query(c, "SELECT SUM(foo) FROM `%(db)s`.`test_explain`" % {'db': self.db_name}, submission_type="Explain") # Need to prefix database in Explain
+    response = _make_query(c, "SELECT SUM(foo) FROM `%(db)s`.`test_explain`" % {'db': self.db_name}, settings=[('hive.explain.user', 'false')], submission_type="Explain") # Need to prefix database in Explain
     explanation = json.loads(response.content)['explanation']
     assert_true('STAGE DEPENDENCIES:' in explanation, explanation)
     assert_true('STAGE PLANS:' in explanation, explanation)
@@ -548,7 +555,7 @@ for x in sys.stdin:
       raise SkipTest('HUE-2884: Skipping test because we cannot guarantee live cluster supports utf8')
 
     query = u"SELECT foo FROM `%(db)s`.`test_utf8` WHERE bar='%(val)s'" % {'val': unichr(200), 'db': self.db_name}
-    response = _make_query(self.client, query, submission_type="Explain")
+    response = _make_query(self.client, query, settings=[('hive.explain.user', 'false')], submission_type="Explain")
     explanation = json.loads(response.content)['explanation']
     assert_true('STAGE DEPENDENCIES:' in explanation, explanation)
     assert_true('STAGE PLANS:' in explanation, explanation)
@@ -826,7 +833,7 @@ for x in sys.stdin:
     assert_equal(sheet_data, csv_data)
 
     # Test max cell limit truncation
-    finish = conf.DOWNLOAD_CELL_LIMIT.set_for_testing(num_cols * 5)
+    finish = conf.DOWNLOAD_ROW_LIMIT.set_for_testing(5)
     try:
       hql = 'SELECT * FROM `%(db)s`.`test`' % {'db': self.db_name}
       query = hql_query(hql)
@@ -835,6 +842,17 @@ for x in sys.stdin:
       sheet_data = _read_xls_sheet_data(resp)
       # It should have 5 lines
       assert_equal(len(sheet_data), 5, sheet_data)
+    finally:
+      finish()
+
+    finish = conf.DOWNLOAD_BYTES_LIMIT.set_for_testing(1024)
+    try:
+      hql = 'SELECT * FROM `%(db)s`.`test`' % {'db': self.db_name}
+      query = hql_query(hql)
+      handle = self.db.execute_and_wait(query)
+      resp = download(handle, 'csv', self.db)
+      content = "".join(resp.streaming_content)
+      assert_true(len(content) <= 1024)
     finally:
       finish()
 
@@ -1215,7 +1233,7 @@ for x in sys.stdin:
     resp = self.client.get('/beeswax/install_examples')
     assert_true('POST request is required.' in json.loads(resp.content)['message'])
 
-    self.client.post('/beeswax/install_examples')
+    self.client.post('/beeswax/install_examples', {'db_name': self.db_name})
 
     # New tables exists
     resp = self.client.get('/metastore/tables/%s?format=json' % self.db_name)
@@ -1257,7 +1275,7 @@ for x in sys.stdin:
       assert_true('Sample: Customers' in resp.content)
 
       # Now install it a second time, and no error
-      resp = self.client.post('/beeswax/install_examples')
+      resp = self.client.post('/beeswax/install_examples', {'db_name': self.db_name})
       assert_equal(0, json.loads(resp.content)['status'])
       assert_equal('', json.loads(resp.content)['message'])
 
@@ -1281,6 +1299,7 @@ for x in sys.stdin:
       'table-map_key_terminator_0': r'\003',
       'table-file_format': 'TextFile',
       'table-use_default_location': 'False',
+      'table-skip_header': 'False',
       'table-external_location': '/tmp/foo',
       'columns-0-column_name': 'my_col',
       'columns-0-column_type': 'string',
@@ -1336,6 +1355,7 @@ for x in sys.stdin:
       'table-map_key_terminator_0': r'\003',
       'table-file_format': 'TextFile',
       'table-use_default_location': 'True',
+      'table-skip_header': 'False',
       'columns-0-column_name': 'my_col',
       'columns-0-column_type': 'string',
       'columns-0-_exists': 'True',
@@ -1752,7 +1772,7 @@ for x in sys.stdin:
     finish = conf.QUERY_PARTITIONS_LIMIT.set_for_testing(1)
     try:
       table_name = 'test_partitions'
-      partition_spec = "(`baz`='baz_one' AND `boom`='boom_two')"
+      partition_spec = "(`baz`='baz_one' AND `boom`=12345)"
       table = self.db.get_table(database=self.db_name, table_name=table_name)
       hql = self.db._get_sample_partition_query(self.db_name, table, limit=10)
       assert_equal(hql, 'SELECT * FROM `%s`.`%s` WHERE %s LIMIT 10' % (self.db_name, table_name, partition_spec))
@@ -1763,7 +1783,7 @@ for x in sys.stdin:
     finish = conf.QUERY_PARTITIONS_LIMIT.set_for_testing(2)
     try:
       table_name = 'test_partitions'
-      partition_spec = "(`baz`='baz_one' AND `boom`='boom_two') OR (`baz`='baz_foo' AND `boom`='boom_bar')"
+      partition_spec = "(`baz`='baz_one' AND `boom`=12345) OR (`baz`='baz_foo' AND `boom`=67890)"
       table = self.db.get_table(database=self.db_name, table_name=table_name)
       hql = self.db._get_sample_partition_query(self.db_name, table, limit=10)
       assert_equal(hql, 'SELECT * FROM `%s`.`%s` WHERE %s LIMIT 10' % (self.db_name, table_name, partition_spec))
@@ -1857,7 +1877,7 @@ for x in sys.stdin:
       # Retrieve stats before analyze
       resp = self.client.get(reverse('beeswax:get_table_stats', kwargs={'database': self.db_name, 'table': 'test'}))
       stats = json.loads(resp.content)['stats']
-      assert_true(any([stat for stat in stats if stat['data_type'] == 'numRows' and stat['comment'] == '0']), resp.content)
+      assert_false([stat for stat in stats if stat['data_type'] == 'numRows'], resp.content)
 
       resp = self.client.get(reverse('beeswax:get_table_stats', kwargs={'database': self.db_name, 'table': 'test', 'column': 'foo'}))
       stats = json.loads(resp.content)['stats']
@@ -1913,6 +1933,8 @@ for x in sys.stdin:
   def test_get_top_terms(self):
     if is_live_cluster():
       raise SkipTest('HUE-2902: Skipping because test is not reentrant')
+    else:
+      raise SkipTest('HUE-2902: Skipping because test is slow currently and API is not used')
 
     resp = self.client.get(reverse("beeswax:get_top_terms", kwargs={'database': self.db_name, 'table': 'test', 'column': 'foo'}))
 
@@ -2041,18 +2063,18 @@ for x in sys.stdin:
     """
     Test that the HS2 logs send back the ql.Driver log output with JobID
     """
-    if is_hive_on_spark():
-      raise SkipTest
+    execution_engines = get_available_execution_engines()
 
-    hql = "SELECT foo FROM `%(db)s`.`test` GROUP BY foo" % {'db': self.db_name}  # GROUP BY forces the MR job
-    response = _make_query(self.client, hql, wait=True, local=False, max=180.0, database=self.db_name)
-    content = fetch_query_result_data(self.client, response)
+    for engine in execution_engines:
+      hql = "SELECT foo FROM `%(db)s`.`test` GROUP BY foo" % {'db': self.db_name}  # GROUP BY forces the MR job
+      response = _make_query(self.client, hql, wait=True, local=False, max=180.0, database=self.db_name,
+                             settings=[('hive.execution.engine', engine)])
+      content = fetch_query_result_data(self.client, response)
 
-    log = content['log']
-    assert_true(search_log_line('Starting Job = ', log), log)
-    assert_true(search_log_line('Ended Job = ', log), log)
-    # Test job extraction while we're at it
-    assert_equal(1, len(content["hadoop_jobs"]), "Should have started 1 job and extracted it.")
+      log = content['log']
+      assert_true(search_log_line('Completed executing command', log), log)
+      # Test job extraction while we're at it
+      assert_equal(1, len(parse_out_jobs(log, engine)), "Should have started 1 job and extracted it.")
 
 
 
@@ -2171,8 +2193,8 @@ Starting Job = job_201003191517_0003, Tracking URL = http://localhost:50030/jobd
 """
   assert_equal(
     ["job_201003191517_0002", "job_201003191517_0003", "job_1402420825148_0001"],
-    beeswax.views._parse_out_hadoop_jobs(sample_log))
-  assert_equal([], beeswax.views._parse_out_hadoop_jobs("nothing to see here"))
+    parse_out_jobs(sample_log))
+  assert_equal([], parse_out_jobs("nothing to see here"))
 
   sample_log_no_direct_url = """
 14/06/09 08:40:38 INFO impl.YarnClientImpl: Submitted application application_1402269517321_0003
@@ -2183,7 +2205,18 @@ Starting Job = job_201003191517_0003, Tracking URL = http://localhost:50030/jobd
 """
   assert_equal(
       ["job_1402269517321_0003"],
-      beeswax.views._parse_out_hadoop_jobs(sample_log_no_direct_url))
+      parse_out_jobs(sample_log_no_direct_url))
+
+
+def test_tez_job_extraction():
+  sample_log = """
+16/07/12 05:47:08 INFO SessionState:
+16/07/12 05:47:08 INFO SessionState: Status: Running (Executing on YARN cluster with App id application_1465862139975_0002)
+16/07/12 05:47:08 INFO SessionState: Map 1: -/-	Reducer 2: 0/1
+"""
+
+  assert_equal(["application_1465862139975_0002"], parse_out_jobs(sample_log, 'tez'))
+  assert_equal([], parse_out_jobs("Tez job doesn't exist.", 'tez'))
 
 
 def test_hive_site():
@@ -2393,6 +2426,7 @@ class MockHiveServerTable(HiveServerTable):
             {'comment': '\\n                  ', 'col_name': '', 'data_type': 'line.delim          '},
             {'comment': '\\t                  ', 'col_name': '', 'data_type': 'serialization.format'}
         ]
+    self.is_impala_only = False
 
 
 class MockHiveServerTableForPartitions(HiveServerTable):
@@ -2461,7 +2495,8 @@ class MockHiveServerTableForPartitions(HiveServerTable):
         {'comment': 'NULL', 'col_name': 'Sort Columns:       ', 'data_type': '[]                  '},
         {'comment': 'NULL', 'col_name': 'Storage Desc Params:', 'data_type': 'NULL'},
         {'comment': '1       ', 'col_name': '', 'data_type': 'serialization.format'},
-  ]
+      ]
+    self.is_impala_only = False
 
 
 
@@ -2950,7 +2985,6 @@ class TestDesign():
 def search_log_line(expected_log, all_logs):
   return re.compile('%(expected_log)s' % {'expected_log': expected_log}).search(all_logs)
 
-
 def test_hiveserver2_get_security():
   make_logged_in_client()
   user = User.objects.get(username='test')
@@ -3406,13 +3440,111 @@ def test_hiveserver2_jdbc_url():
     url = hiveserver2_jdbc_url()
     assert_equal(url, 'jdbc:hive2://server-with-ssl-enabled.com:10000/default;ssl=true;sslTrustStore=/path/to/truststore.jks;trustStorePassword=password')
 
+    beeswax.hive_site.reset()
+    beeswax.hive_site.get_conf()[hive_site._CNF_HIVESERVER2_USE_SSL] = 'TRUE'
+    hadoop.ssl_client_site.reset()
+    hadoop.ssl_client_site.get_conf()[ssl_client_site._CNF_TRUSTORE_LOCATION] = '/etc/ssl-conf/CA_STANDARD/truststore.jks'
+    url = hiveserver2_jdbc_url() # Pick-up trustore from ssl-client.xml
+    assert_equal(url, 'jdbc:hive2://server-with-ssl-enabled.com:10000/default;ssl=true;sslTrustStore=/etc/ssl-conf/CA_STANDARD/truststore.jks')
+
     beeswax.hive_site.get_conf()[hive_site._CNF_HIVESERVER2_USE_SSL] = 'FALSE'
     url = hiveserver2_jdbc_url()
     assert_equal(url, 'jdbc:hive2://server-with-ssl-enabled.com:10000/default')
   finally:
     beeswax.hive_site.reset()
+    hadoop.ssl_client_site.reset()
     for reset in resets:
         reset()
 
+def test_sasl_auth_in_large_download():
+  db = None
+  failed = False
+  max_rows = 10000
 
+  if hive_site.get_hiveserver2_thrift_sasl_qop() != "auth-conf" or \
+     hive_site.get_hiveserver2_authentication() != 'KERBEROS':
+    raise SkipTest
 
+  client = make_logged_in_client(username="systest", groupname="systest", recreate=False, is_superuser=False)
+  user = User.objects.get(username='systest')
+  add_to_group('systest')
+  grant_access("systest", "systest", "beeswax")
+
+  desktop_conf.SASL_MAX_BUFFER.set_for_testing(2*1024*1024)
+
+  # Create a big table
+  table_info = {'db': 'default', 'table_name': 'dummy_'+random_generator().lower()}
+  drop_sql = "DROP TABLE IF EXISTS %(db)s.%(table_name)s" % table_info
+  create_sql = "CREATE TABLE IF NOT EXISTS %(db)s.%(table_name)s (w0 CHAR(8),w1 CHAR(8),w2 CHAR(8),w3 CHAR(8),w4 CHAR(8),w5 CHAR(8),w6 CHAR(8),w7 CHAR(8),w8 CHAR(8),w9 CHAR(8))" % table_info
+  hql = cStringIO.StringIO()
+  hql.write("INSERT INTO %(db)s.%(table_name)s VALUES " % (table_info))
+  for i in xrange(max_rows-1):
+    w = random_generator(size=7)
+    hql.write("('%s0','%s1','%s2','%s3','%s4','%s5','%s6','%s7','%s8','%s9')," % (w,w,w,w,w,w,w,w,w,w))
+  w = random_generator(size=7)
+  hql.write("('%s0','%s1','%s2','%s3','%s4','%s5','%s6','%s7','%s8','%s9')" % (w,w,w,w,w,w,w,w,w,w))
+
+  try:
+    db = dbms.get(user, get_query_server_config())
+    db.use(table_info['db'])
+    query = hql_query(drop_sql)
+    handle = db.execute_and_wait(query, timeout_sec=120)
+    query = hql_query(create_sql)
+    handle = db.execute_and_wait(query, timeout_sec=120)
+    query = hql_query(hql.getvalue())
+    handle = db.execute_and_wait(query, timeout_sec=300)
+    hql.close()
+  except Exception, ex:
+    failed = True
+
+  # Big table creation (data upload) is successful
+  assert_false(failed)
+
+  # Fetch large data set
+  hql = "SELECT w0,w1,w2,w3,w4,w5,w6,w7,w8,w9,w0,w1,w2,w3,w4,w5,w6,w7,w8,w9 FROM %(db)s.%(table_name)s" % table_info
+
+  # large rows
+  max_rows = 8745
+
+  try:
+    query = hql_query(hql)
+    handle = db.execute_and_wait(query)
+    results = db.fetch(handle, True, max_rows-20)
+  except QueryServerException, ex:
+    if 'Invalid OperationHandle' in ex.message and 'EXECUTE_STATEMENT' in ex.message:
+      failed = True
+  except:
+      failed = True
+
+  # Fetch large data set is successful because SASL_MAX_BUFFER > RESULT_DATA
+  assert_false(failed)
+
+  # Test case when SASL_MAX_BUFFER < RESULT_DATA
+  try:
+    query = hql_query(hql)
+    handle = db.execute_and_wait(query)
+    results = db.fetch(handle, True, max_rows)
+  except QueryServerException, ex:
+    if 'Invalid OperationHandle' in ex.message and 'EXECUTE_STATEMENT' in ex.message:
+      failed = True
+  except:
+      failed = True
+
+  # Fetch large data set fails because SASL_MAX_BUFFER < RESULT_DATA In your log file you will see following log lines
+  # thrift_util  INFO     Thrift exception; retrying: Error in sasl_decode (-1) SASL(-1): generic failure: Unable to find a callback: 32775
+  # thrift_util  INFO     Increase the SASL_MAX_BUFFER value in hue.ini
+  assert_true(failed)
+  failed = False
+
+  # Cleanup
+  hql = "DROP TABLE %(db)s.%(table_name)s" % table_info
+
+  try:
+    query = hql_query(hql)
+    handle = db.execute_and_wait(query)
+  except QueryServerException, ex:
+    if 'Invalid OperationHandle' in ex.message and 'EXECUTE_STATEMENT' in ex.message:
+      failed = True
+  except:
+      failed = True
+  assert_false(failed)

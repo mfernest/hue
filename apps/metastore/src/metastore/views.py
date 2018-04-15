@@ -29,18 +29,21 @@ from django.views.decorators.http import require_http_methods
 from desktop.context_processors import get_app_name
 from desktop.lib.django_util import JsonResponse, render
 from desktop.lib.exceptions_renderable import PopupException
-from desktop.models import Document, Document2
-
-from metadata.conf import has_optimizer, has_navigator, get_optimizer_url, get_navigator_url
+from desktop.models import Document2, get_cluster_config
 
 from beeswax.design import hql_query
-from beeswax.models import SavedQuery, MetaInstall
+from beeswax.models import SavedQuery
 from beeswax.server import dbms
 from beeswax.server.dbms import get_query_server_config
 from filebrowser.views import location_to_url
+from urlparse import urlparse
+from metadata.conf import has_optimizer, has_navigator, get_optimizer_url, get_navigator_url
+from notebook.connectors.base import Notebook, QueryError
+from notebook.models import make_notebook
+
+from metastore.conf import FORCE_HS2_METADATA
 from metastore.forms import LoadDataForm, DbForm
 from metastore.settings import DJANGO_APPS
-from notebook.connectors.base import Notebook
 
 
 LOG = logging.getLogger(__name__)
@@ -71,7 +74,7 @@ Database Views
 def databases(request):
   search_filter = request.GET.get('filter', '')
 
-  db = dbms.get(request.user)
+  db = _get_db(user=request.user)
   databases = db.get_databases(search_filter)
 
   return render("metastore.mako", request, {
@@ -81,37 +84,85 @@ def databases(request):
     'partitions': [],
     'has_write_access': has_write_access(request.user),
     'is_optimizer_enabled': has_optimizer(),
-    'is_navigator_enabled': has_navigator(),
+    'is_navigator_enabled': has_navigator(request.user),
     'optimizer_url': get_optimizer_url(),
     'navigator_url': get_navigator_url(),
+    'is_embeddable': request.GET.get('is_embeddable', False),
+    'source_type': _get_servername(db),
   })
 
 
 @check_has_write_access_permission
 def drop_database(request):
-  db = dbms.get(request.user)
+  source_type = request.POST.get('source_type', 'hive')
+  db = _get_db(user=request.user, source_type=source_type)
 
   if request.method == 'POST':
     databases = request.POST.getlist('database_selection')
 
     try:
-      # Can't be simpler without an important refactoring
-      design = SavedQuery.create_empty(app_name='beeswax', owner=request.user, data=hql_query('').dumps())
-      query_history = db.drop_databases(databases, design)
-      url = reverse('beeswax:watch_query_history', kwargs={'query_history_id': query_history.id}) + '?on_success_url=' + reverse('metastore:databases')
-      return redirect(url)
+      if request.POST.get('is_embeddable'):
+        design = SavedQuery.create_empty(app_name=source_type if source_type != 'hive' else 'beeswax', owner=request.user, data=hql_query('').dumps())
+        last_executed = json.loads(request.POST.get('start_time'), '-1')
+        sql = db.drop_databases(databases, design, generate_ddl_only=True)
+        job = make_notebook(
+            name=_('Drop database %s') % ', '.join(databases)[:100],
+            editor_type=source_type,
+            statement=sql.strip(),
+            status='ready',
+            database=None,
+            on_success_url='assist.db.refresh',
+            is_task=True,
+            last_executed=last_executed
+        )
+        return JsonResponse(job.execute(request))
+      else:
+        design = SavedQuery.create_empty(app_name='beeswax', owner=request.user, data=hql_query('').dumps())
+        query_history = db.drop_databases(databases, design)
+        url = reverse('beeswax:watch_query_history', kwargs={'query_history_id': query_history.id}) + '?on_success_url=' + reverse('metastore:databases')
+        return redirect(url)
     except Exception, ex:
       error_message, log = dbms.expand_exception(ex, db)
       error = _("Failed to remove %(databases)s.  Error: %(error)s") % {'databases': ','.join(databases), 'error': error_message}
-      raise PopupException(error, title=_("Hive Error"), detail=log)
+      raise PopupException(error, title=_("DB Error"), detail=log)
   else:
     title = _("Do you really want to delete the database(s)?")
     return render('confirm.mako', request, {'url': request.path, 'title': title})
 
 
-def get_database_metadata(request, database):
-  db = dbms.get(request.user)
+@check_has_write_access_permission
+@require_http_methods(["POST"])
+def alter_database(request, database):
   response = {'status': -1, 'data': ''}
+
+  source_type = request.POST.get('source_type', 'hive')
+  db = _get_db(user=request.user, source_type=source_type)
+
+  try:
+    properties = request.POST.get('properties')
+
+    if not properties:
+      raise PopupException(_("Alter database requires a properties value of key-value pairs."))
+
+    properties = json.loads(properties)
+    db.alter_database(database, properties=properties)
+
+    db_metadata = db.get_database(database)
+    db_metadata['hdfs_link'] = location_to_url(db_metadata['location'])
+    response['status'] = 0
+    response['data'] = db_metadata
+  except Exception, ex:
+    response['status'] = 1
+    response['data'] = _("Failed to alter database `%s`: %s") % (database, ex)
+
+  return JsonResponse(response)
+
+
+def get_database_metadata(request, database):
+  response = {'status': -1, 'data': ''}
+  source_type = request.POST.get('source_type', 'hive')
+  db = _get_db(user=request.user, source_type=source_type)
+
   try:
     db_metadata = db.get_database(database)
     response['status'] = 0
@@ -144,12 +195,12 @@ def table_queries(request, database, table):
 Table Views
 """
 def show_tables(request, database=None):
+  db = _get_db(user=request.user)
+
   if database is None:
     database = 'default' # Assume always 'default'
 
   if request.REQUEST.get("format", "html") == "json":
-    db = dbms.get(request.user)
-
     try:
       databases = db.get_databases()
 
@@ -184,16 +235,18 @@ def show_tables(request, database=None):
     'partitions': [],
     'has_write_access': has_write_access(request.user),
     'is_optimizer_enabled': has_optimizer(),
-    'is_navigator_enabled': has_navigator(),
+    'is_navigator_enabled': has_navigator(request.user),
     'optimizer_url': get_optimizer_url(),
     'navigator_url': get_navigator_url(),
+    'is_embeddable': request.REQUEST.get('is_embeddable', False),
+    'source_type': _get_servername(db),
     })
 
   return resp
 
 
 def get_table_metadata(request, database, table):
-  db = dbms.get(request.user)
+  db = _get_db(user=request.user)
   response = {'status': -1, 'data': ''}
   try:
     table_metadata = db.get_table(database, table)
@@ -203,26 +256,24 @@ def get_table_metadata(request, database, table):
       'hdfs_link': table_metadata.hdfs_link,
       'is_view': table_metadata.is_view
     }
-  except Exception, ex:
+  except:
+    msg = "Cannot get metadata for table: `%s`.`%s`"
+    LOG.exception(msg) % (database, table)
     response['status'] = 1
-    response['data'] = _("Cannot get metadata for table: `%s`.`%s`") % (database, table)
+    response['data'] = _(msg) % (database, table)
 
   return JsonResponse(response)
 
 
 def describe_table(request, database, table):
   app_name = get_app_name(request)
-  query_server = get_query_server_config(app_name)
-  db = dbms.get(request.user, query_server)
+  db = _get_db(user=request.user)
 
   try:
     table = db.get_table(database, table)
   except Exception, e:
     LOG.exception("Describe table error")
-    if hasattr(e, 'message') and e.message:
-      raise PopupException(_("Hive Error"), detail=e.message)
-    else:
-      raise PopupException(_("Hive Error"), detail=e)
+    raise PopupException(_("DB Error"), detail=e.message if hasattr(e, 'message') and e.message else e)
 
   if request.REQUEST.get("format", "html") == "json":
     return JsonResponse({
@@ -243,7 +294,10 @@ def describe_table(request, database, table):
 
     partitions = None
     if app_name != 'impala' and table.partition_keys:
-      partitions = [_massage_partition(database, table, partition) for partition in db.get_partitions(database, table)]
+      try:
+        partitions = [_massage_partition(database, table, partition) for partition in db.get_partitions(database, table)]
+      except:
+        LOG.exception('Table partitions could not be retrieved')
 
     return render(renderable, request, {
       'breadcrumbs': [{
@@ -259,17 +313,22 @@ def describe_table(request, database, table):
       'database': database,
       'has_write_access': has_write_access(request.user),
       'is_optimizer_enabled': has_optimizer(),
-      'is_navigator_enabled': has_navigator(),
+      'is_navigator_enabled': has_navigator(request.user),
       'optimizer_url': get_optimizer_url(),
       'navigator_url': get_navigator_url(),
+      'is_embeddable': request.REQUEST.get('is_embeddable', False),
+      'source_type': _get_servername(db),
     })
 
 
 @check_has_write_access_permission
 @require_http_methods(["POST"])
 def alter_table(request, database, table):
-  db = dbms.get(request.user)
   response = {'status': -1, 'data': ''}
+
+  source_type = request.POST.get('source_type', 'hive')
+  db = _get_db(user=request.user, source_type=source_type)
+
   try:
     new_table_name = request.POST.get('new_table_name', None)
     comment = request.POST.get('comment', None)
@@ -298,8 +357,11 @@ def alter_table(request, database, table):
 @check_has_write_access_permission
 @require_http_methods(["POST"])
 def alter_column(request, database, table):
-  db = dbms.get(request.user)
   response = {'status': -1, 'message': ''}
+
+  source_type = request.POST.get('source_type', 'hive')
+  db = _get_db(user=request.user, source_type=source_type)
+
   try:
     column = request.POST.get('column', None)
 
@@ -332,26 +394,45 @@ def alter_column(request, database, table):
 
 @check_has_write_access_permission
 def drop_table(request, database):
-  db = dbms.get(request.user)
+  source_type = request.POST.get('source_type', 'hive')
+  db = _get_db(user=request.user, source_type=source_type)
 
   if request.method == 'POST':
-    tables = request.POST.getlist('table_selection')
-    tables_objects = [db.get_table(database, table) for table in tables]
     try:
-      # Can't be simpler without an important refactoring
-      design = SavedQuery.create_empty(app_name='beeswax', owner=request.user, data=hql_query('').dumps())
-      query_history = db.drop_tables(database, tables_objects, design)
-      url = reverse('beeswax:watch_query_history', kwargs={'query_history_id': query_history.id}) + '?on_success_url=' + reverse('metastore:show_tables', kwargs={'database': database})
-      return redirect(url)
+      tables = request.POST.getlist('table_selection')
+      tables_objects = [db.get_table(database, table) for table in tables]
+      skip_trash = request.POST.get('skip_trash') == 'on'
+
+      if request.POST.get('is_embeddable'):
+        last_executed = json.loads(request.POST.get('start_time'), '-1')
+        sql = db.drop_tables(database, tables_objects, design=None, skip_trash=skip_trash, generate_ddl_only=True)
+        job = make_notebook(
+            name=_('Drop table %s') % ', '.join([table.name for table in tables_objects])[:100],
+            editor_type=source_type,
+            statement=sql.strip(),
+            status='ready',
+            database=database,
+            on_success_url='assist.db.refresh',
+            is_task=True,
+            last_executed=last_executed
+        )
+        return JsonResponse(job.execute(request))
+      else:
+        # Can't be simpler without an important refactoring
+        design = SavedQuery.create_empty(app_name='beeswax', owner=request.user, data=hql_query('').dumps())
+        query_history = db.drop_tables(database, tables_objects, design, skip_trash=skip_trash)
+        url = reverse('beeswax:watch_query_history', kwargs={'query_history_id': query_history.id}) + '?on_success_url=' + reverse('metastore:show_tables', kwargs={'database': database})
+        return redirect(url)
     except Exception, ex:
       error_message, log = dbms.expand_exception(ex, db)
       error = _("Failed to remove %(tables)s.  Error: %(error)s") % {'tables': ','.join(tables), 'error': error_message}
-      raise PopupException(error, title=_("Hive Error"), detail=log)
+      raise PopupException(error, title=_("DB Error"), detail=log)
   else:
     title = _("Do you really want to delete the table(s)?")
     return render('confirm.mako', request, {'url': request.path, 'title': title})
 
 
+# Deprecated
 def read_table(request, database, table):
   db = dbms.get(request.user)
 
@@ -364,24 +445,50 @@ def read_table(request, database, table):
   except Exception, e:
     raise PopupException(_('Cannot read table'), detail=e)
 
-
 @check_has_write_access_permission
 def load_table(request, database, table):
-  db = dbms.get(request.user)
-  table = db.get_table(database, table)
   response = {'status': -1, 'data': 'None'}
+
+  source_type = request.POST.get('source_type', 'hive')
+  db = _get_db(user=request.user, source_type=source_type)
+
+  table = db.get_table(database, table)
 
   if request.method == "POST":
     load_form = LoadDataForm(table, request.POST)
 
     if load_form.is_valid():
       on_success_url = reverse('metastore:describe_table', kwargs={'database': database, 'table': table.name})
+      generate_ddl_only = request.POST.get('is_embeddable', 'false') == 'true'
       try:
-        design = SavedQuery.create_empty(app_name='beeswax', owner=request.user, data=hql_query('').dumps())
-        query_history = db.load_data(database, table, load_form, design)
-        url = reverse('beeswax:watch_query_history', kwargs={'query_history_id': query_history.id}) + '?on_success_url=' + on_success_url
-        response['status'] = 0
-        response['data'] = url
+        design = SavedQuery.create_empty(app_name=source_type if source_type != 'hive' else 'beeswax', owner=request.user, data=hql_query('').dumps())
+        form_data = {
+          'path': load_form.cleaned_data['path'],
+          'overwrite': load_form.cleaned_data['overwrite'],
+          'partition_columns': [(column_name, load_form.cleaned_data[key]) for key, column_name in load_form.partition_columns.iteritems()],
+        }
+        query_history = db.load_data(database, table.name, form_data, design, generate_ddl_only=generate_ddl_only)
+        if generate_ddl_only:
+          last_executed = json.loads(request.POST.get('start_time'), '-1')
+          job = make_notebook(
+            name=_('Load data in %s.%s') % (database, table.name),
+            editor_type=source_type,
+            statement=query_history.strip(),
+            status='ready',
+            database=database,
+            on_success_url='assist.db.refresh',
+            is_task=True,
+            last_executed=last_executed
+          )
+          response = job.execute(request)
+        else:
+          url = reverse('beeswax:watch_query_history', kwargs={'query_history_id': query_history.id}) + '?on_success_url=' + on_success_url
+          response['status'] = 0
+          response['data'] = url
+          response['query_history_id'] = query_history.id
+      except QueryError, ex:
+        response['status'] = 1
+        response['data'] = _("Can't load the data: ") + ex.message
       except Exception, e:
         response['status'] = 1
         response['data'] = _("Can't load the data: ") + str(e)
@@ -401,7 +508,7 @@ def load_table(request, database, table):
 
 
 def describe_partitions(request, database, table):
-  db = dbms.get(request.user)
+  db = _get_db(user=request.user)
 
   table_obj = db.get_table(database, table)
 
@@ -419,7 +526,11 @@ def describe_partitions(request, database, table):
   else:
     partition_spec = ''
 
-  partitions = db.get_partitions(database, table_obj, partition_spec, reverse_sort=reverse_sort)
+  try:
+    partitions = db.get_partitions(database, table_obj, partition_spec, reverse_sort=reverse_sort)
+  except:
+    LOG.exception('Table partitions could not be retrieved')
+    partitions = []
   massaged_partitions = [_massage_partition(database, table_obj, partition) for partition in partitions]
 
   if request.method == "POST" or request.GET.get('format', 'html') == 'json':
@@ -428,7 +539,7 @@ def describe_partitions(request, database, table):
       'partition_values_json': massaged_partitions,
     })
   else:
-    return render("describe_partitions.mako", request, {
+    return render("metastore.mako", request, {
       'breadcrumbs': [{
             'name': database,
             'url': reverse('metastore:show_tables', kwargs={'database': database})
@@ -448,7 +559,11 @@ def describe_partitions(request, database, table):
         'request': request,
         'has_write_access': has_write_access(request.user),
         'is_optimizer_enabled': has_optimizer(),
-        'is_navigator_enabled': has_navigator(),
+        'is_navigator_enabled': has_navigator(request.user),
+        'optimizer_url': get_optimizer_url(),
+        'navigator_url': get_navigator_url(),
+        'is_embeddable': request.REQUEST.get('is_embeddable', False),
+        'source_type': _get_servername(db),
     })
 
 
@@ -465,21 +580,30 @@ def _massage_partition(database, table, partition):
         'database': database,
         'table': table.name,
         'partition_spec': urllib.quote(partition.partition_spec)
+    }),
+   'notebookUrl': reverse('notebook:browse', kwargs={
+        'database': database,
+        'table': table.name,
+        'partition_spec': urllib.quote(partition.partition_spec)
     })
   }
 
 
 def browse_partition(request, database, table, partition_spec):
-  db = dbms.get(request.user)
+  db = _get_db(user=request.user)
   try:
     decoded_spec = urllib.unquote(partition_spec)
     partition_table = db.describe_partition(database, table, decoded_spec)
     uri_path = location_to_url(partition_table.path_location)
-    return redirect(uri_path)
+    if request.REQUEST.get("format", "html") == "json":
+      return JsonResponse({'uri_path': uri_path})
+    else:
+      return redirect(uri_path)
   except Exception, e:
     raise PopupException(_('Cannot browse partition'), detail=e.message)
 
 
+# Deprecated
 def read_partition(request, database, table, partition_spec):
   db = dbms.get(request.user)
   try:
@@ -490,24 +614,41 @@ def read_partition(request, database, table, partition_spec):
   except Exception, e:
     raise PopupException(_('Cannot read partition'), detail=e.message)
 
+
 @require_http_methods(["GET", "POST"])
 @check_has_write_access_permission
 def drop_partition(request, database, table):
-  db = dbms.get(request.user)
+  source_type = request.POST.get('source_type', 'hive')
+  db = _get_db(user=request.user, source_type=source_type)
 
   if request.method == 'POST':
     partition_specs = request.POST.getlist('partition_selection')
     partition_specs = [spec for spec in partition_specs]
     try:
-      design = SavedQuery.create_empty(app_name='beeswax', owner=request.user, data=hql_query('').dumps())
-      query_history = db.drop_partitions(database, table, partition_specs, design)
-      url = reverse('beeswax:watch_query_history', kwargs={'query_history_id': query_history.id}) + '?on_success_url=' + \
-            reverse('metastore:describe_partitions', kwargs={'database': database, 'table': table})
-      return redirect(url)
+      if request.REQUEST.get("format", "html") == "json":
+        last_executed = json.loads(request.POST.get('start_time'), '-1')
+        sql = db.drop_partitions(database, table, partition_specs, design=None, generate_ddl_only=True)
+        job = make_notebook(
+            name=_('Drop partition %s') % ', '.join(partition_specs)[:100],
+            editor_type=source_type,
+            statement=sql.strip(),
+            status='ready',
+            database=None,
+            on_success_url='assist.db.refresh',
+            is_task=True,
+            last_executed=last_executed
+        )
+        return JsonResponse(job.execute(request))
+      else:
+        design = SavedQuery.create_empty(app_name='beeswax', owner=request.user, data=hql_query('').dumps())
+        query_history = db.drop_partitions(database, table, partition_specs, design)
+        url = reverse('beeswax:watch_query_history', kwargs={'query_history_id': query_history.id}) + '?on_success_url=' + \
+              reverse('metastore:describe_partitions', kwargs={'database': database, 'table': table})
+        return redirect(url)
     except Exception, ex:
       error_message, log = dbms.expand_exception(ex, db)
       error = _("Failed to remove %(partition)s.  Error: %(error)s") % {'partition': '\n'.join(partition_specs), 'error': error_message}
-      raise PopupException(error, title=_("Hive Error"), detail=log)
+      raise PopupException(error, title=_("DB Error"), detail=log)
   else:
     title = _("Do you really want to delete the partition(s)?")
     return render('confirm.mako', request, {'url': request.path, 'title': title})
@@ -515,3 +656,20 @@ def drop_partition(request, database, table):
 
 def has_write_access(user):
   return user.is_superuser or user.has_hue_permission(action="write", app=DJANGO_APPS[0])
+
+
+
+def _get_db(user, source_type=None):
+  if source_type is None:
+    cluster_config = get_cluster_config(user)
+    if FORCE_HS2_METADATA.get() and cluster_config['app_config'].get('editor') and 'hive' in cluster_config['app_config'].get('editor')['interpreter_names']:
+      source_type = 'hive'
+    else:
+      source_type = cluster_config['default_sql_interpreter']
+
+  query_server = get_query_server_config(name=source_type if source_type != 'hive' else 'beeswax')
+  return dbms.get(user, query_server)
+
+
+def _get_servername(db):
+  return 'hive' if db.server_name == 'beeswax' else db.server_name

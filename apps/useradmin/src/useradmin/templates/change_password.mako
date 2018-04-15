@@ -21,10 +21,10 @@ from useradmin.password_policy import is_password_policy_enabled, get_password_h
 
 <%namespace name="layout" file="layout.mako" />
 
-${ commonheader(_('Hue Users'), "useradmin", user) | n,unicode }
+${ commonheader(_('Hue Users'), "useradmin", user, request) | n,unicode }
 ${ layout.menubar(section='users') }
 
-<div class="container-fluid">
+<div class="useradmin container-fluid">
   <div class="card card-small">
     <h1 class="card-heading simple">${_('Hue Users - Change password: %(username)s') % dict(username=username)}</h1>
 
@@ -65,9 +65,13 @@ ${ layout.menubar(section='users') }
   </div>
 </div>
 
-<script src="${ static('desktop/ext/js/routie-0.3.0.min.js') }" type="text/javascript" charset="utf-8"></script>
+<script src="${ static('desktop/js/hue.routie.js') }" type="text/javascript" charset="utf-8"></script>
+<script>
+  routie.setPathname('/useradmin');
+</script>
 
-<script type="text/javascript" charset="utf-8">
+
+<script type="text/javascript">
 
 $(document).ready(function(){
  var currentStep = "step1";

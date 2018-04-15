@@ -22,15 +22,28 @@
 <%namespace name="layout" file="../navigation-bar.mako" />
 <%namespace name="utils" file="../utils.inc.mako" />
 
-${ commonheader(_("Oozie Information"), "oozie", user) | n,unicode }
+%if not is_embeddable:
+${ commonheader(_("Oozie Information"), "oozie", user, request) | n,unicode }
 ${ layout.menubar(section='oozie', dashboard=True) }
+%endif
+
+<style type="text/css">
+  .oozie-info .form-search {
+    margin: 0 0 20px !important;
+  }
+  .oozie-info .tab-content {
+    padding: 0 !important;
+  }
+  .oozie-info .dataTables_wrapper table tbody tr, .oozie-info table th {
+    background-color: #FFFFFF;
+  }
+</style>
 
 
-<div class="container-fluid">
+<div class="oozie-info container-fluid">
 
   <div class="card card-small">
   <div class="card-body">
-  <p>
 
   <h1 class="card-heading card-heading-noborder simple pull-right" style="margin-top: -4px;">
   ${ _('Oozie status') }
@@ -39,7 +52,7 @@ ${ layout.menubar(section='oozie', dashboard=True) }
   </div>
   </h1>
 
-  <ul class="nav nav-tabs">
+  <ul class="nav nav-pills">
     % if instrumentation:
     <li class="active"><a href="#instrumentation" data-toggle="tab">${ _('Instrumentation') }</a></li>
     % else:
@@ -56,7 +69,7 @@ ${ layout.menubar(section='oozie', dashboard=True) }
         <input type="text" class="searchFilter input-xlarge search-query" placeholder="${_('Text Filter')}">
       </form>
       <div class="tabbable">
-        <ul class="nav nav-pills">
+        <ul class="nav nav-tabs nav-tabs-border">
             % for category in instrumentation.iterkeys():
             <li
             % if loop.first:
@@ -77,12 +90,8 @@ ${ layout.menubar(section='oozie', dashboard=True) }
             " id="${ category }">
 
               % for index, group in enumerate(instrumentation[category]):
-                <p class="nav-header">${ group['group'] }</p>
-              <table id="intrumentationTable-${ category }-${ index }" class="table table-striped table-condensed">
-                <thead>
-                <th></th>
-                <th></th>
-                </thead>
+              <div class="nav-header">${ group['group'] }</div>
+              <table id="intrumentationTable-${ category }-${ index }" class="table table-condensed">
               <tbody>
                 % for item in group['data']:
                 <tr>
@@ -121,7 +130,7 @@ ${ layout.menubar(section='oozie', dashboard=True) }
         <form class="form-search">
           <input type="text" class="searchFilter input-xlarge search-query" placeholder="${_('Text Filter')}">
         </form>
-        <ul class="nav nav-pills">
+        <ul class="nav nav-tabs nav-tabs-border">
         % for obj in metrics:
           % if obj != 'version':
           <li
@@ -153,13 +162,13 @@ ${ layout.menubar(section='oozie', dashboard=True) }
     <%def name="recurse(metric)">
         % if metric:
           % if isinstance(metric, basestring):
-            <table class="table table-striped">
+            <table class="table table-condensed">
               <tr>
                 <th>${metric}</th>
               </tr>
             </table>
           % else:
-            <table class="table table-striped metricsTable">
+            <table class="table table-condensed metricsTable">
             <thead>
             <tr>
               <th>${_('Name')}</th>
@@ -192,7 +201,7 @@ ${ layout.menubar(section='oozie', dashboard=True) }
             </table>
           % endif
         % else:
-          <table class="table table-striped">
+          <table class="table table-condensed">
           <tr>
             <td>${ _('No metrics available for this section.') }</td>
           </tr>
@@ -209,15 +218,16 @@ ${ layout.menubar(section='oozie', dashboard=True) }
       ${ utils.display_conf(configuration, "configurationTable") }
     </div>
 
-
+    %if not is_embeddable:
     <div style="margin-bottom: 16px; margin-top: 10px">
       <a href="${ url('oozie:list_oozie_bundles') }" class="btn">${ _('Back') }</a>
     </div>
+    %endif
 
-    </p>
     </div>
     </div>
   </div>
+</div>
 
 <script>
   $(document).ready(function(){
@@ -237,7 +247,8 @@ ${ layout.menubar(section='oozie', dashboard=True) }
         "oLanguage": {
            "sEmptyTable": "${_('No data available')}",
            "sZeroRecords": "${_('No matching records')}",
-        }
+        },
+        "asStripeClasses": []
    });
   var metricsTables = [];
 % if metrics:
@@ -254,7 +265,8 @@ ${ layout.menubar(section='oozie', dashboard=True) }
         "oLanguage": {
            "sEmptyTable": "${_('No data available')}",
            "sZeroRecords": "${_('No matching records')}",
-        }
+        },
+        "asStripeClasses": []
       });
      metricsTables.push(_table);
    });
@@ -276,7 +288,8 @@ ${ layout.menubar(section='oozie', dashboard=True) }
             "oLanguage": {
                 "sEmptyTable": "${_('No data available')}",
                 "sZeroRecords": "${_('No matching records')}"
-            }
+            },
+            "asStripeClasses": []
         });
         $("#intrumentationTable-${ category }-${ index } th").removeClass();
         instrumentationTables.push(table);
@@ -307,4 +320,6 @@ ${ layout.menubar(section='oozie', dashboard=True) }
   });
 </script>
 
+%if not is_embeddable:
 ${ commonfooter(request, messages) | n,unicode }
+%endif

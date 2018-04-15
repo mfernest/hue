@@ -17,6 +17,7 @@
 
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -24,11 +25,12 @@ import uuid
 from datetime import datetime, timedelta
 from dateutil.parser import parse
 from string import Template
+from xml.sax.saxutils import escape
 
 from django.core.urlresolvers import reverse
+from django.db.models import Q
 from django.utils.encoding import force_unicode
 from django.utils.translation import ugettext as _
-from django.contrib.auth.models import User
 
 from desktop.conf import USE_DEFAULT_CONFIGURATION
 from desktop.lib import django_mako
@@ -40,6 +42,7 @@ from desktop.models import DefaultConfiguration, Document2, Document
 from hadoop.fs.hadoopfs import Hdfs
 from hadoop.fs.exceptions import WebHdfsException
 
+from liboozie.conf import SECURITY_ENABLED
 from liboozie.oozie_api import get_oozie
 from liboozie.submission2 import Submission
 from liboozie.submission2 import create_directories
@@ -49,7 +52,7 @@ from oozie.conf import REMOTE_SAMPLE_DIR
 from oozie.utils import utc_datetime_format, UTC_TIME_FORMAT, convert_to_server_timezone
 from oozie.importlib.workflows import generate_v2_graph_nodes, MalformedWfDefException, InvalidTagWithNamespaceException
 
-
+WORKFLOW_DEPTH_LIMIT = 24
 LOG = logging.getLogger(__name__)
 
 
@@ -74,18 +77,10 @@ class Job(object):
 
   @property
   def validated_name(self):
-    good_name = []
-
-    for c in self.name[:40]:
-      if not good_name:
-        if not re.match('[a-zA-Z_\{\$\}]', c):
-          c = '_'
-      else:
-        if not re.match('[\-_a-zA-Z0-9\{\$\}]', c):
-          c = '_'
-      good_name.append(c)
-
-    return ''.join(good_name)
+    return ''.join(escape(self.name[:40], entities={
+        "'": "&apos;",
+        "\"": "&quot;"
+    }))
 
   def __str__(self):
     return '%s' % force_unicode(self.name)
@@ -210,6 +205,8 @@ class WorkflowConfiguration(object):
     }
   ]
 
+class WorkflowDepthReached(Exception):
+  pass
 
 class Workflow(Job):
   XML_FILE_NAME = 'workflow.xml'
@@ -265,19 +262,28 @@ class Workflow(Job):
     adj_list = _create_graph_adjaceny_list(node_list)
 
     node_hierarchy = ['start']
-    _get_hierarchy_from_adj_list(adj_list, adj_list['start']['ok_to'], node_hierarchy)
 
-    _update_adj_list(adj_list)
-
-    wf_rows = _create_workflow_layout(node_hierarchy, adj_list)
+    try:
+      _get_hierarchy_from_adj_list(adj_list, adj_list['start']['ok_to'], node_hierarchy)
+    except WorkflowDepthReached:
+      LOG.warn("The Workflow: %s with id: %s, has reached the maximum allowed depth for Graph display " % (oozie_workflow.appName, oozie_workflow.id))
+      # Hide graph same as when total nodes > 30
+      return {}
 
     data = {'layout': [{}], 'workflow': {}}
+    data['workflow']['nodes'] = []
+    _update_adj_list(adj_list)
+
+    nodes_uuid_set = set()
+    wf_rows = _create_workflow_layout(node_hierarchy, adj_list, nodes_uuid_set)
     if wf_rows:
       data['layout'][0]['rows'] = wf_rows
 
     wf_nodes = []
-    _dig_nodes(node_hierarchy, adj_list, user, wf_nodes)
+    nodes_uuid_set = set()
+    _dig_nodes(node_hierarchy, adj_list, user, wf_nodes, nodes_uuid_set)
     data['workflow']['nodes'] = wf_nodes
+
     data['workflow']['id'] = '123'
     data['workflow']['properties'] = cls.get_workflow_properties_for_user(user, workflow=None)
     data['workflow']['properties'].update({
@@ -332,7 +338,7 @@ class Workflow(Job):
 
   @property
   def id(self):
-    return self.document.id
+    return self.document.id if self.document else None
 
   @property
   def uuid(self):
@@ -382,14 +388,31 @@ class Workflow(Job):
     for param in find_dollar_braced_variables(self.name):
       params.add(param)
 
-    if self.sla_enabled:
+    if self.has_some_slas:
       for param in find_json_parameters(self.sla):
         params.add(param)
 
-    for node in self.nodes:
-      params.update(node.find_parameters())
+    parameters = dict([(param, '') for param in list(params)])
 
-    return dict([(param, '') for param in list(params)])
+    for node in self.nodes:
+      if 'document' in node.data['type']:
+        for param in node.data['properties']['arguments'] if node.data['type'] == 'java-document' else node.data['properties']['parameters']:
+          if param['value'] and '=' in param['value']:
+            name, val = param['value'].split('=', 1)
+            parameters[name] = val
+        extra_fields = []
+        if node.data['properties'].get('key_tab_path'):
+          extra_fields.append('key_tab_path')
+        if node.data['properties'].get('user_principal'):
+          extra_fields.append('user_principal')
+        extra = find_parameters(node, fields=extra_fields)
+      else:
+        extra = node.find_parameters()
+
+      if extra:
+        parameters.update(dict([(param, '') for param in list(extra)]))
+
+    return parameters
 
   def get_json(self):
     _data = self.get_data()
@@ -430,9 +453,8 @@ class Workflow(Job):
     tmpl = 'editor2/gen/workflow.xml.mako'
 
     data = self.get_data()
-    nodes = [node for node in self.nodes if node.name != 'End'] + [node for node in self.nodes if
-                                                                   node.name == 'End']  # End at the end
-    node_mapping = dict([(node.id, node) for node in nodes]) 
+    nodes = [node for node in self.nodes if node.name != 'End'] + [node for node in self.nodes if node.name == 'End']  # End at the end
+    node_mapping = dict([(node.id, node) for node in nodes])
     sub_wfs_ids = [node.data['properties']['workflow'] for node in nodes if node.data['type'] == 'subworkflow']
     workflow_mapping = dict(
       [(workflow.uuid, Workflow(document=workflow, user=self.user)) for workflow in Document2.objects.filter(uuid__in=sub_wfs_ids)])
@@ -448,7 +470,7 @@ class Workflow(Job):
     return force_unicode(xml.strip())
 
   def get_absolute_url(self):
-    return reverse('oozie:edit_workflow') + '?workflow=%s' % self.id
+    return reverse('oozie:edit_workflow') + '?workflow=%s' % self.id if self.document else ''
 
   def override_subworkflow_id(self, sub_wf_action, workflow_id):
     _data = self.get_data()
@@ -462,6 +484,11 @@ class Workflow(Job):
   def update_name(self, name):
     _data = self.get_data()
     _data['workflow']['name'] = name
+    self.data = json.dumps(_data)
+
+  def update_uuid(self, uuid):
+    _data = self.get_data()
+    _data['workflow']['uuid'] = uuid
     self.data = json.dumps(_data)
 
   def set_workspace(self, user):
@@ -562,84 +589,88 @@ def _update_adj_list(adj_list):
     id += 1
   return adj_list
 
-def _dig_nodes(nodes, adj_list, user, wf_nodes):
+def _dig_nodes(nodes, adj_list, user, wf_nodes, nodes_uuid_set):
   for node in nodes:
     if type(node) != list:
       node = adj_list[node]
-      properties = {}
-      if '%s-widget' % node['node_type'] in NODES:
-        properties = dict(NODES['%s-widget' % node['node_type']].get_fields())
+      if node['uuid'] not in nodes_uuid_set:
+        properties = {}
+        if _get_widget_type(node['node_type']) in NODES:
+          properties = dict(NODES[_get_widget_type(node['node_type'])].get_fields())
 
-      if node['node_type'] == 'pig':
-        properties['script_path'] = node.get('pig').get('script_path')
-      elif node['node_type'] == 'spark':
-        properties['class'] = node.get('spark').get('class')
-        properties['jars'] = node.get('spark').get('jar')
-      elif node['node_type'] == 'hive' or node['node_type'] == 'hive2':
-        properties['script_path'] = node.get('hive').get('script')
-      elif node['node_type'] == 'java':
-        properties['main_class'] = node.get('java').get('main-class')
-      elif node['node_type'] == 'sqoop':
-        properties['command'] = node.get('sqoop').get('command')
-      elif node['node_type'] == 'mapreduce':
-        properties['job_properties'] = node.get('job_properties')
-      elif node['node_type'] == 'shell':
-        properties['shell_command'] = node.get('shell').get('command')
-      elif node['node_type'] == 'ssh':
-        properties['user'] = '%s@%s' % (node.get('ssh').get('user'), node.get('ssh').get('host'))
-        properties['ssh_command'] = node.get('ssh').get('command')
-      elif node['node_type'] == 'fs':
-        fs_props = node.get('fs')
-        # TBD: gather props for different fs operations
-      elif node['node_type'] == 'email':
-        properties['to'] = node.get('email').get('to')
-        properties['subject'] = node.get('email').get('subject')
-        #TBD: body doesn't show up
-        properties['body'] = node.get('email').get('body')
-      elif node['node_type'] == 'streaming':
-        properties['mapper'] = node.get('streaming').get('mapper')
-        properties['reducer'] = node.get('streaming').get('reducer')
-      elif node['node_type'] == 'distcp':
-        properties['distcp_parameters'] = node.get('params')
-      elif node['node_type'] == 'subworkflow':
-        properties['app-path'] = node.get('subworkflow').get('app-path')
-        properties['workflow'] = node.get('uuid')
-        properties['job_properties'] = []
-        properties['sla'] = ''
+        if node['node_type'] == 'pig':
+          properties['script_path'] = node.get('pig').get('script_path')
+        elif node['node_type'] == 'spark':
+          properties['class'] = node.get('spark').get('class')
+          properties['jars'] = node.get('spark').get('jar')
+        elif node['node_type'] == 'hive' or node['node_type'] == 'hive2':
+          properties['script_path'] = node.get('hive').get('script')
+        elif node['node_type'] == 'java':
+          properties['main_class'] = node.get('java').get('main-class')
+        elif node['node_type'] == 'sqoop':
+          properties['command'] = node.get('sqoop').get('command')
+        elif node['node_type'] == 'mapreduce':
+          properties['job_properties'] = node.get('job_properties')
+        elif node['node_type'] == 'shell':
+          properties['shell_command'] = node.get('shell').get('command')
+        elif node['node_type'] == 'ssh':
+          properties['user'] = '%s@%s' % (node.get('ssh').get('user'), node.get('ssh').get('host'))
+          properties['ssh_command'] = node.get('ssh').get('command')
+        elif node['node_type'] == 'fs':
+          properties['touchzs'] = node.get('fs').get('touchzs')
+          properties['mkdirs'] = node.get('fs').get('mkdirs')
+          properties['moves'] = node.get('fs').get('moves')
+          properties['deletes'] = node.get('fs').get('deletes')
+        elif node['node_type'] == 'email':
+          properties['to'] = node.get('email').get('to')
+          properties['subject'] = node.get('email').get('subject')
+        elif node['node_type'] == 'streaming':
+          properties['mapper'] = node.get('streaming').get('mapper')
+          properties['reducer'] = node.get('streaming').get('reducer')
+        elif node['node_type'] == 'distcp':
+          properties['distcp_parameters'] = node.get('params')
+        elif node['node_type'] == 'subworkflow':
+          properties['app-path'] = node.get('subworkflow').get('app-path')
+          properties['workflow'] = node.get('uuid')
+          properties['job_properties'] = []
+          properties['sla'] = ''
 
-      children = []
-      if node['node_type'] in ('fork', 'decision'):
-        for key in node.keys():
-          if key.startswith('path'):
-            children.append({'to': adj_list[node[key]]['uuid'], 'condition': '${ 1 gt 0 }'})
-        if node['node_type'] == 'decision':
-          children.append({'to': adj_list[node['default']]['uuid'], 'condition': '${ 1 gt 0 }'})
-      else:
-        if node.get('ok_to'):
-          children.append({'to': adj_list[node['ok_to']]['uuid']})
-        if node.get('error_to'):
-          children.append({'error': adj_list[node['error_to']]['uuid']})
+        children = []
+        if node['node_type'] in ('fork', 'decision'):
+          for key in node.keys():
+            if key.startswith('path'):
+              children.append({'to': adj_list[node[key]]['uuid'], 'condition': '${ 1 gt 0 }'})
+          if node['node_type'] == 'decision':
+            children.append({'to': adj_list[node['default']]['uuid'], 'condition': '${ 1 gt 0 }'})
+        else:
+          if node.get('ok_to'):
+            children.append({'to': adj_list[node['ok_to']]['uuid']})
+          if node.get('error_to'):
+            children.append({'error': adj_list[node['error_to']]['uuid']})
 
-      wf_nodes.append({
-          "id": node['uuid'],
-          "name": '%s-%s' % (node['node_type'].split('-')[0], node['uuid'][:4]),
-          "type": "%s-widget" % node['node_type'],
-          "properties": properties,
-          "children": children
-      })
+        nodes_uuid_set.add(node['uuid'])
+        wf_nodes.append({
+            "id": node['uuid'],
+            "name": '%s-%s' % (node['node_type'].split('-')[0], node['uuid'][:4]),
+            "type": _get_widget_type(node['node_type']),
+            "properties": properties,
+            "children": children
+        })
     else:
-      _dig_nodes(node, adj_list, user, wf_nodes)
+      _dig_nodes(node, adj_list, user, wf_nodes, nodes_uuid_set)
 
-def _create_workflow_layout(nodes, adj_list, size=12):
+def _create_workflow_layout(nodes, adj_list, nodes_uuid_set, size=12):
   wf_rows = []
   for node in nodes:
     if type(node) == list and len(node) == 1:
       node = node[0]
     if type(node) != list:
-      wf_rows.append({"widgets":[{"size":size, "name": adj_list[node]['node_type'], "id":  adj_list[node]['uuid'], "widgetType": "%s-widget" % adj_list[node]['node_type'], "properties":{}, "offset":0, "isLoading":False, "klass":"card card-widget span%s" % size, "columns":[]}]})
+      _append_to_wf_rows(wf_rows, nodes_uuid_set, row_id=adj_list[node]['uuid'],
+        row={"widgets":[{"size":size, "name": adj_list[node]['node_type'], "id":  adj_list[node]['uuid'], "widgetType": _get_widget_type(adj_list[node]['node_type']), "properties":{}, "offset":0, "isLoading":False, "klass":"card card-widget span%s" % size, "columns":[]}]})
     else:
       if adj_list[node[0]]['node_type'] in ('fork', 'decision'):
-        wf_rows.append({"widgets":[{"size":size, "name": adj_list[node[0]]['name'], "id":  adj_list[node[0]]['uuid'], "widgetType": "%s-widget" % adj_list[node[0]]['node_type'], "properties":{}, "offset":0, "isLoading":False, "klass":"card card-widget span%s" % size, "columns":[]}]})
+        _append_to_wf_rows(wf_rows, nodes_uuid_set, row_id=adj_list[node[0]]['uuid'],
+          row={"widgets":[{"size":size, "name": adj_list[node[0]]['name'], "id":  adj_list[node[0]]['uuid'], "widgetType": _get_widget_type(adj_list[node[0]]['node_type']), "properties":{}, "offset":0, "isLoading":False, "klass":"card card-widget span%s" % size, "columns":[]}]})
 
         wf_rows.append({
           "id": str(uuid.uuid4()),
@@ -658,18 +689,29 @@ def _create_workflow_layout(nodes, adj_list, size=12):
                     } for c in col],
                 "klass":"card card-home card-column span%s" % (size / len(node[1]))
              }
-             for col in [_create_workflow_layout(item, adj_list, size) for item in node[1]]
+             for col in [_create_workflow_layout(item, adj_list, nodes_uuid_set, size) for item in node[1]]
           ]
         })
         if adj_list[node[0]]['node_type'] == 'fork':
-          wf_rows.append({"widgets":[{"size":size, "name": adj_list[node[2]]['name'], "id":  adj_list[node[2]]['uuid'], "widgetType": "%s-widget" % adj_list[node[2]]['node_type'], "properties":{}, "offset":0, "isLoading":False, "klass":"card card-widget span%s" % size, "columns":[]}]})
+          wf_rows.append({"widgets":[{"size":size, "name": adj_list[node[2]]['name'], "id":  adj_list[node[2]]['uuid'], "widgetType": _get_widget_type(adj_list[node[2]]['node_type']), "properties":{}, "offset":0, "isLoading":False, "klass":"card card-widget span%s" % size, "columns":[]}]})
       else:
-        wf_rows.append(_create_workflow_layout(node, adj_list, size))
+        wf_rows.append(_create_workflow_layout(node, adj_list, nodes_uuid_set, size))
   return wf_rows
+
+
+def _get_widget_type(node_type):
+  widget_name = "%s-widget" % node_type
+  return widget_name if widget_name in NODES.keys() else 'generic-widget'
+
+# Prevent duplicate nodes in graph layout
+def _append_to_wf_rows(wf_rows, nodes_uuid_set, row_id, row):
+  if row['widgets'][0]['id'] not in nodes_uuid_set:
+    nodes_uuid_set.add(row['widgets'][0]['id'])
+    wf_rows.append(row)
 
 def _get_hierarchy_from_adj_list(adj_list, curr_node, node_hierarchy):
 
-  _get_hierarchy_from_adj_list_helper(adj_list, curr_node, node_hierarchy)
+  _get_hierarchy_from_adj_list_helper(adj_list, curr_node, node_hierarchy, WORKFLOW_DEPTH_LIMIT)
 
   # Add End and Kill nodes to node_hierarchy
   for key in adj_list.keys():
@@ -678,7 +720,10 @@ def _get_hierarchy_from_adj_list(adj_list, curr_node, node_hierarchy):
   node_hierarchy.append([adj_list[key]['name'] for key in adj_list.keys() if adj_list[key]['node_type'] == 'end'])
 
 
-def _get_hierarchy_from_adj_list_helper(adj_list, curr_node, node_hierarchy):
+def _get_hierarchy_from_adj_list_helper(adj_list, curr_node, node_hierarchy, workflow_depth):
+
+  if workflow_depth <= 0:
+    raise WorkflowDepthReached()
 
   if not curr_node or adj_list[curr_node]['node_type'] in ('join', 'end', 'kill'):
     return curr_node
@@ -690,9 +735,9 @@ def _get_hierarchy_from_adj_list_helper(adj_list, curr_node, node_hierarchy):
     join_node = None
     children = []
     for key in adj_list[curr_node].keys():
-      if key.startswith('path'):
+      if key.startswith('path') or key == 'default':
         child = []
-        return_node = _get_hierarchy_from_adj_list_helper(adj_list, adj_list[curr_node][key], child)
+        return_node = _get_hierarchy_from_adj_list_helper(adj_list, adj_list[curr_node][key], child, workflow_depth - 1)
         join_node = return_node if not join_node else join_node
         if child:
           children.append(child)
@@ -701,15 +746,14 @@ def _get_hierarchy_from_adj_list_helper(adj_list, curr_node, node_hierarchy):
     if adj_list[curr_node]['node_type'] == 'fork':
       branch_nodes.append(join_node)
       node_hierarchy.append(branch_nodes)
-      return _get_hierarchy_from_adj_list_helper(adj_list, adj_list[join_node]['ok_to'], node_hierarchy)
+      return _get_hierarchy_from_adj_list_helper(adj_list, adj_list[join_node]['ok_to'], node_hierarchy, workflow_depth - 1)
 
     node_hierarchy.append(branch_nodes)
     return join_node
 
   else:
     node_hierarchy.append(curr_node)
-    return _get_hierarchy_from_adj_list_helper(adj_list, adj_list[curr_node]['ok_to'], node_hierarchy)
-
+    return _get_hierarchy_from_adj_list_helper(adj_list, adj_list[curr_node]['ok_to'], node_hierarchy, workflow_depth - 1)
 
 def _create_graph_adjaceny_list(nodes):
   start_node = [node for node in nodes if node.get('node_type') == 'start'][0]
@@ -740,6 +784,7 @@ class Node():
     if self.data['type'] in ('hive2', 'hive-document') and not self.data['properties']['jdbc_url']:
       self.data['properties']['jdbc_url'] = _get_hiveserver2_url()
 
+
     if self.data['type'] == 'fork':
       links = [link for link in self.data['children'] if link['to'] in node_mapping]
       if len(links) != len(self.data['children']):
@@ -755,6 +800,111 @@ class Node():
       self.data['properties']['app_jar'] = properties['app_jar'] # Not used here
       self.data['properties']['files'] = [{'value': f['path']} for f in properties['files']]
       self.data['properties']['arguments'] = [{'value': prop} for prop in properties['arguments']]
+    elif self.data['type'] == SparkDocumentAction.TYPE or self.data['type'] == 'spark-document':
+      notebook = Notebook(document=Document2.objects.get_by_uuid(user=self.user, uuid=self.data['properties']['uuid']))
+      properties = notebook.get_data()['snippets'][0]['properties']
+
+      if self.data['type'] == 'spark-document': # Oozie Document Action
+        self.data['properties']['app_name'] = properties['app_name']
+
+      self.data['properties']['class'] = properties['class']
+      self.data['properties']['jars'] = os.path.basename(properties['jars'][0])
+      self.data['properties']['files'] = [{'value': f} for f in properties['jars']] + [{'value': f['path']} for f in properties['files']]
+      self.data['properties']['spark_arguments'] = [{'value': prop} for prop in properties['spark_arguments']]
+      self.data['properties']['spark_opts'] = ' '.join(properties['spark_opts'])
+      if len(properties['jars']) > 1:
+        self.data['properties']['spark_opts'] += ' --py-files ' + ','.join([os.path.basename(f) for f in properties['jars'][1:]])
+    elif self.data['type'] == PigDocumentAction.TYPE:
+      notebook = Notebook(document=Document2.objects.get_by_uuid(user=self.user, uuid=self.data['properties']['uuid']))
+      action = notebook.get_data()['snippets'][0]
+
+      name = '%s-%s' % (self.data['type'].split('-')[0], self.data['id'][:4])
+      self.data['properties']['script_path'] = "${wf:appPath()}/" + name + ".pig"
+      if 'parameters' not in self.data['properties']:
+        self.data['properties']['parameters'] = []
+      for param in action['variables']:
+        self.data['properties']['parameters'].insert(0, {'value': '%(name)s=%(value)s' % param})
+      self.data['properties']['arguments'] = [] # Not Picked yet
+
+      job_properties = []
+      for prop in action['properties']['hadoopProperties']:
+        name, value = prop.split('=', 1)
+        job_properties.append({'name': name, 'value': value})
+      self.data['properties']['job_properties'] = job_properties
+      self.data['properties']['files'] = [{'value': prop} for prop in action['properties']['resources']]
+
+    elif self.data['type'] == SqoopDocumentAction.TYPE:
+      notebook = Notebook(document=Document2.objects.get_by_uuid(user=self.user, uuid=self.data['properties']['uuid']))
+      action = notebook.get_data()['snippets'][0]
+
+      name = '%s-%s' % (self.data['type'].split('-')[0], self.data['id'][:4])
+
+      command = action['statement']
+      if command.startswith('sqoop '):
+        _ignore, command = command.split('sqoop ', 1)
+      self.data['properties']['command'] = command
+
+      self.data['properties']['files'] = [{'value': f['path']} for f in action['properties']['files']]
+      self.data['properties']['arguments'] = []
+
+    elif self.data['type'] == DistCpDocumentAction.TYPE:
+      notebook = Notebook(document=Document2.objects.get_by_uuid(user=self.user, uuid=self.data['properties']['uuid']))
+      action = notebook.get_data()['snippets'][0]
+
+      name = '%s-%s' % (self.data['type'].split('-')[0], self.data['id'][:4])
+      self.data['properties']['source_path'] = action['properties']['source_path']
+      self.data['properties']['destination_path'] = action['properties']['destination_path']
+
+    elif self.data['type'] == ShellDocumentAction.TYPE:
+      if self.data['properties'].get('uuid'):
+        notebook = Notebook(document=Document2.objects.get_by_uuid(user=self.user, uuid=self.data['properties']['uuid']))
+        action = notebook.get_data()['snippets'][0]
+
+        name = '%s-%s' % (self.data['type'].split('-')[0], self.data['id'][:4])
+        self.data['properties']['shell_command'] = action['properties']['command_path']
+        self.data['properties']['env_var'] = [{'value': prop} for prop in action['properties']['env_var']]
+        self.data['properties']['capture_output'] = action['properties']['capture_output']
+        self.data['properties']['arguments'] = [{'value': prop} for prop in action['properties']['arguments']]
+
+        self.data['properties']['files'] = ([{'value': action['properties']['command_path']}] if not action['properties'].get('command_path', '').startswith('/') else []) + [{'value': prop.get('path', prop)} for prop in action['properties']['files']]
+        self.data['properties']['archives'] = [{'value': prop} for prop in action['properties']['archives']]
+
+    elif self.data['type'] == MapReduceDocumentAction.TYPE:
+      notebook = Notebook(document=Document2.objects.get_by_uuid(user=self.user, uuid=self.data['properties']['uuid']))
+      action = notebook.get_data()['snippets'][0]
+
+      name = '%s-%s' % (self.data['type'].split('-')[0], self.data['id'][:4])
+      self.data['properties']['app_jar'] = action['properties']['app_jar']
+      self.data['properties']['arguments'] = []
+      self.data['properties']['parameters'] = []
+
+      job_properties = []
+      for prop in action['properties']['hadoopProperties']:
+        name, value = prop.split('=', 1)
+        job_properties.append({'name': name, 'value': value})
+      self.data['properties']['job_properties'] = job_properties
+
+      self.data['properties']['files'] = [{'value': prop} for prop in action['properties']['files']]
+      self.data['properties']['archives'] = [{'value': prop} for prop in action['properties']['archives']]
+
+    elif self.data['type'] == ImpalaAction.TYPE or self.data['type'] == ImpalaDocumentAction.TYPE:
+      shell_command_name = self.data['name'] + '.sh'
+      self.data['properties']['shell_command'] = shell_command_name
+      self.data['properties']['env_var'] = []
+      self.data['properties']['capture_output'] = False
+      self.data['properties']['arguments'] = []
+
+      if self.data['type'] == ImpalaAction.TYPE:
+        script_path = self.data['properties'].get('script_path')
+      else:
+        script_path = self.data['name'] + '.sql'
+
+      files = [{'value': shell_command_name}, {'value': script_path}]
+      if self.data['properties']['key_tab_path']:
+        files.append({'value': self.data['properties']['key_tab_path']})
+
+      self.data['properties']['files'] = files
+      self.data['properties']['archives'] = []
 
     data = {
       'node': self.data,
@@ -762,6 +912,22 @@ class Node():
       'node_mapping': node_mapping,
       'workflow_mapping': workflow_mapping
     }
+
+    if mapping.get('send_email'):
+      if self.data['type'] == KillAction.TYPE and not self.data['properties'].get('enableMail'):
+        self.data['properties']['enableMail'] = True
+        self.data['properties']['to'] = self.user.email
+        self.data['properties']['subject'] = _("${wf:name()} execution failure")
+        self.data['properties']['body'] = _("Action failed, error message[${wf:errorMessage(wf:lastErrorNode())}]")
+
+      if self.data['type'] == EndNode.TYPE:
+        self.data['properties']['enableMail'] = True
+        self.data['properties']['to'] = self.user.email
+        self.data['properties']['subject'] = _("${wf:name()} execution successful")
+
+      if mapping.get('send_result_path'):
+        if self.data['type'] == EndNode.TYPE:
+          self.data['properties']['body'] = 'View result file at %(send_result_browse_url)s' % mapping
 
     return django_mako.render_to_string(self.get_template_name(), data)
 
@@ -810,6 +976,8 @@ class Node():
     node_type = self.data['type']
     if self.data['type'] == JavaDocumentAction.TYPE:
       node_type = JavaAction.TYPE
+    elif self.data['type'] == ImpalaAction.TYPE or self.data['type'] == ImpalaDocumentAction.TYPE:
+      node_type = ShellAction.TYPE
 
     return 'editor2/gen/workflow-%s.xml.mako' % node_type
 
@@ -828,6 +996,15 @@ def _upgrade_older_node(node):
     node['properties']['subject'] = ''
     node['properties']['body'] = ''
 
+  if node['type'] in ('end', 'end-widget') and 'to' not in node['properties']:
+    node['properties']['enableMail'] = False
+    node['properties']['to'] = ''
+    node['properties']['cc'] = ''
+    node['properties']['subject'] = ''
+    node['properties']['body'] = ''
+    node['properties']['content_type'] = 'text/plain'
+    node['properties']['attachment'] = ''
+
   if node['type'] == 'email-widget' and 'bcc' not in node['properties']:
     node['properties']['bcc'] = ''
     node['properties']['content_type'] = 'text/plain'
@@ -836,12 +1013,15 @@ def _upgrade_older_node(node):
   if node['type'] == 'spark-widget' and 'files' not in node['properties']:
     node['properties']['files'] = []
 
+  if (node['type'] == 'hive2-widget' or node['type'] == 'hive-document-widget') and 'arguments' not in node['properties']:
+    node['properties']['arguments'] = []
+
 
 class Action(object):
 
   @classmethod
   def get_fields(cls):
-    credentials = [cls.DEFAULT_CREDENTIALS] if hasattr(cls, 'DEFAULT_CREDENTIALS') else []
+    credentials = [cls.DEFAULT_CREDENTIALS] if hasattr(cls, 'DEFAULT_CREDENTIALS') and cls.DEFAULT_CREDENTIALS else []
     return [(f['name'], f['value']) for f in cls.FIELDS.itervalues()] + [('sla', WorkflowConfiguration.SLA_DEFAULT), ('credentials', credentials)]
 
 
@@ -1116,7 +1296,7 @@ def _get_hiveserver2_url():
     return hiveserver2_jdbc_url()
   except Exception, e:
     # Might fail is Hive is disabled
-    LOG.warn('Could not guess HiveServer2 URL: %s' % smart_str(e))
+    LOG.exception('Could not guess HiveServer2 URL: %s' % smart_str(e))
     return 'jdbc:hive2://localhost:10000/default'
 
 
@@ -1138,7 +1318,13 @@ class HiveServer2Action(Action):
           'help_text': _('The %(type)s parameters of the script. E.g. N=5, INPUT=${inputDir}')  % {'type': TYPE.title()},
           'type': ''
      },
-     # Common
+     'arguments': {
+          'name': 'arguments',
+          'label': _('Arguments'),
+          'value': [],
+          'help_text': _('Arguments for beeline. E.g. --showHeader=true, -Djavax.net.ssl.trustStore=/etc/cdep-ssl-conf/CA_STANDARD/truststore.jks'),
+          'type': []
+     },
      'jdbc_url': {
           'name': 'jdbc_url',
           'label': _('HiveServer2 URL'),
@@ -1154,6 +1340,7 @@ class HiveServer2Action(Action):
                          'something requiring a password (e.g. LDAP); non-secured Hive Server 2 or Kerberized Hive Server 2 don\'t require a password.'),
           'type': ''
      },
+     # Common
      'files': {
           'name': 'files',
           'label': _('Files'),
@@ -1208,6 +1395,47 @@ class HiveServer2Action(Action):
   @classmethod
   def get_mandatory_fields(cls):
     return [cls.FIELDS['script_path']]
+
+
+def _get_impala_url():
+  try:
+    from impala.dbms import get_query_server_config
+    return get_query_server_config()['server_host']
+  except Exception, e:
+    # Might fail is Impala is disabled
+    LOG.exception('Could not get Impalad URL: %s' % smart_str(e))
+    return 'localhost'
+
+
+class ImpalaAction(HiveServer2Action):
+  # Executed as shell action until Oozie supports an Impala Action
+  TYPE = 'impala'
+  DEFAULT_CREDENTIALS = '' # None at this time, need to upload user keytab
+
+  FIELDS = HiveServer2Action.FIELDS.copy()
+  del FIELDS['jdbc_url']
+  del FIELDS['password']
+  FIELDS['impalad_host'] = {
+      'name': 'impalad_host',
+      'label': _('Impalad hostname'),
+      'value': "",
+      'help_text': _('e.g. impalad-001.cluster.com. The hostname of the Impalad to send the query to.'),
+      'type': ''
+  }
+  FIELDS['key_tab_path'] = {
+      'name': 'key_tab_path',
+      'label': _('Keytab path'),
+      'value': '${key_tab_path}' if SECURITY_ENABLED.get() else '',
+      'help_text': _('Path to the keytab to use when on a secure cluster, e.g. /user/joe/joe.keytab.'),
+      'type': ''
+  }
+  FIELDS['user_principal'] = {
+      'name': 'user_principal',
+      'label': _('User principal'),
+      'value': '${user_principal}' if SECURITY_ENABLED.get() else '',
+      'help_text': _('Name of the principal to use in the kinit, e.g.: kinit -k -t /home/joe/joe.keytab joe@PROD.EDH.'),
+      'type': ''
+  }
 
 
 class SubWorkflowAction(Action):
@@ -1810,7 +2038,7 @@ class SparkAction(Action):
      'spark_master': {
           'name': 'spark_master',
           'label': _('Spark Master'),
-          'value': 'local[*]',
+          'value': 'yarn',
           'help_text': _('Ex: spark://host:port, mesos://host:port, yarn, or local.'),
           'type': ''
      },
@@ -1818,7 +2046,7 @@ class SparkAction(Action):
           'name': 'mode',
           'label': _('Mode'),
           'value': 'client',
-          'help_text': _('e.g. client,cluster'),
+          'help_text': _('e.g. Client cluster'),
           'type': ''
      },
      'app_name': {
@@ -1832,22 +2060,22 @@ class SparkAction(Action):
           'name': 'files',
           'label': _('Files'),
           'value': [],
-          'help_text': _('Files put in the running directory.'),
+          'help_text': _('Path to file to put in the running directory.'),
           'type': ''
      },
     'class': {
           'name': 'class',
           'label': _('Main class'),
           'value': '',
-          'help_text': _("e.g. org.apache.spark.examples.mllib.JavaALS."),
+          'help_text': _("Only if using jars, e.g. org.apache.spark.examples.mllib.JavaALS"),
           'type': 'text'
      },
      'jars': {
           'name': 'jars',
-          'label': _('Jars/py files'),
+          'label': _('Jar/py name'),
           'value': '',
-          'help_text': _('Comma separated list of jars or python HDFS files.'),
-          'type': ''
+          'help_text': _('Name of main file added in Files.'),
+          'type': 'text'
      },
      'spark_opts': {
           'name': 'spark_opts',
@@ -1900,7 +2128,7 @@ class SparkAction(Action):
 
   @classmethod
   def get_mandatory_fields(cls):
-    return [cls.FIELDS['spark_master'], cls.FIELDS['mode'], cls.FIELDS['jars']]
+    return [cls.FIELDS['files'], cls.FIELDS['jars']]
 
 
 class KillAction(Action):
@@ -1970,7 +2198,7 @@ class HiveDocumentAction(Action):
           'name': 'parameters',
           'label': _('Parameters'),
           'value': [],
-          'help_text': _('The %(type)s parameters of the script. E.g. N=5, INPUT=${inputDir}')  % {'type': TYPE.title()},
+          'help_text': _('The parameters of the script. E.g. N=5, INPUT=${inputDir}'),
           'type': ''
      },
      # Common
@@ -2043,6 +2271,44 @@ class HiveDocumentAction(Action):
   @classmethod
   def get_mandatory_fields(cls):
     return [cls.FIELDS['uuid']]
+
+
+class ImpalaDocumentAction(HiveDocumentAction):
+  TYPE = 'impala-document'
+  DEFAULT_CREDENTIALS = '' # None at this time, need to upload user keytab
+
+  FIELDS = HiveServer2Action.FIELDS.copy()
+  del FIELDS['jdbc_url']
+  del FIELDS['password']
+
+  FIELDS['impalad_host'] = {
+      'name': 'impalad_host',
+      'label': _('Impalad hostname'),
+      'value': "",
+      'help_text': _('e.g. impalad-001.cluster.com (optional)'),
+      'type': ''
+  }
+  FIELDS['key_tab_path'] = {
+      'name': 'key_tab_path',
+      'label': _('Keytab path'),
+      'value': '${key_tab_path}' if SECURITY_ENABLED.get() else '',
+      'help_text': _('Path to the keytab to use when on a secure cluster, e.g. /user/joe/joe.keytab.'),
+      'type': ''
+  }
+  FIELDS['user_principal'] = {
+      'name': 'user_principal',
+      'label': _('User principal'),
+      'value': '${user_principal}' if SECURITY_ENABLED.get() else '',
+      'help_text': _('Name of the principal to use in the kinit, e.g.: kinit -k -t /home/joe/joe.keytab joe@PROD.EDH.'),
+      'type': ''
+  }
+  FIELDS['uuid'] = {
+      'name': 'uuid',
+      'label': _('Impala query'),
+      'value': '',
+      'help_text': _('Select a saved Impala query you want to schedule.'),
+      'type': 'impala'
+  }
 
 
 class JavaDocumentAction(Action):
@@ -2137,6 +2403,444 @@ class JavaDocumentAction(Action):
     return [cls.FIELDS['uuid']]
 
 
+class SparkDocumentAction(Action):
+  TYPE = 'spark2-document'
+  FIELDS = {
+    'uuid': {
+        'name': 'uuid',
+        'label': _('Spark program'),
+        'value': '',
+        'help_text': _('Select a saved Spark program you want to schedule.'),
+        'type': 'spark'
+     },
+     'spark_master': {
+          'name': 'spark_master',
+          'label': _('Spark Master'),
+          'value': 'yarn',
+          'help_text': _('Ex: spark://host:port, mesos://host:port, yarn, or local.'),
+          'type': ''
+     },
+     'mode': {
+          'name': 'mode',
+          'label': _('Mode'),
+          'value': 'client',
+          'help_text': _('e.g. Client cluster'),
+          'type': ''
+     },
+     'files': {
+          'name': 'files',
+          'label': _('Files'),
+          'value': [],
+          'help_text': _('Path to file to put in the running directory.'),
+          'type': ''
+     },
+     'spark_arguments': {
+          'name': 'spark_arguments',
+          'label': _('Arguments'),
+          'value': [],
+          'help_text': _('Arguments, one by one, e.g. 1000, /path/a.')
+     },
+     'parameters': { # For Oozie Action Document
+          'name': 'parameters',
+          'label': _('Parameters'),
+          'value': [],
+          'help_text': _('The %(type)s parameters of the script. E.g. N=5, INPUT=${inputDir}')  % {'type': TYPE.title()},
+          'type': ''
+     },
+     # Common
+     'job_properties': {
+          'name': 'job_properties',
+          'label': _('Hadoop job properties'),
+          'value': [],
+          'help_text': _('value, e.g. production')
+     },
+     'prepares': {
+          'name': 'prepares',
+          'label': _('Prepares'),
+          'value': [],
+          'help_text': _('Path to manipulate before starting the application.')
+     },
+     'job_xml': {
+          'name': 'job_xml',
+          'label': _('Job XML'),
+          'value': '',
+          'help_text': _('Refer to a Hadoop JobConf job.xml'),
+          'type': ''
+     },
+     'retry_max': {
+          'name': 'retry_max',
+          'label': _('Max retry'),
+          'value': [],
+          'help_text': _('Number of times, default is 3'),
+          'type': ''
+     },
+     'retry_interval': {
+          'name': 'retry_interval',
+          'label': _('Retry interval'),
+          'value': [],
+          'help_text': _('Wait time in minutes, default is 10'),
+          'type': ''
+     }
+  }
+
+  @classmethod
+  def get_mandatory_fields(cls):
+    return [cls.FIELDS['uuid']]
+
+
+class PigDocumentAction(Action):
+  TYPE = 'pig-document'
+  FIELDS = {
+    'uuid': {
+        'name': 'uuid',
+        'label': _('Pig script'),
+        'value': '',
+        'help_text': _('Select a saved Spark program you want to schedule.'),
+        'type': 'pig'
+     },
+     'parameters': {
+          'name': 'parameters',
+          'label': _('Parameters'),
+          'value': [],
+          'help_text': _('The %(type)s parameters of the script. E.g. N=5, INPUT=${inputDir}')  % {'type': TYPE.title()},
+          'type': ''
+     },
+     # Common
+     'files': {
+          'name': 'files',
+          'label': _('Files'),
+          'value': [],
+          'help_text': _('Files put in the running directory.'),
+          'type': ''
+     },
+     'archives': {
+          'name': 'archives',
+          'label': _('Archives'),
+          'value': [],
+          'help_text': _('zip, tar and tgz/tar.gz uncompressed into the running directory.'),
+          'type': ''
+     },
+     'job_properties': {
+          'name': 'job_properties',
+          'label': _('Hadoop job properties'),
+          'value': [],
+          'help_text': _('value, e.g. production'),
+          'type': ''
+     },
+     'prepares': {
+          'name': 'prepares',
+          'label': _('Prepares'),
+          'value': [],
+          'help_text': _('Path to manipulate before starting the application.'),
+          'type': ''
+     },
+     'job_xml': {
+          'name': 'job_xml',
+          'label': _('Job XML'),
+          'value': [],
+          'help_text': _('Refer to a Hadoop JobConf job.xml'),
+          'type': ''
+     },
+     'retry_max': {
+          'name': 'retry_max',
+          'label': _('Max retry'),
+          'value': [],
+          'help_text': _('Number of times, default is 3'),
+          'type': ''
+     },
+     'retry_interval': {
+          'name': 'retry_interval',
+          'label': _('Retry interval'),
+          'value': [],
+          'help_text': _('Wait time in minutes, default is 10'),
+          'type': ''
+     }
+  }
+
+  @classmethod
+  def get_mandatory_fields(cls):
+    return [cls.FIELDS['uuid']]
+
+
+class SqoopDocumentAction(Action):
+  TYPE = 'sqoop-document'
+  FIELDS = {
+    'uuid': {
+        'name': 'uuid',
+        'label': _('Sqoop command'),
+        'value': '',
+        'help_text': _('Select a saved Sqoop program you want to schedule.'),
+        'type': 'sqoop'
+     },
+     'parameters': {
+          'name': 'parameters',
+          'label': _('Parameters'),
+          'value': [],
+          'help_text': _('The %(type)s parameters of the script. E.g. N=5, INPUT=${inputDir}')  % {'type': TYPE.title()},
+          'type': ''
+     },
+     # Common
+     'files': {
+          'name': 'files',
+          'label': _('Files'),
+          'value': [],
+          'help_text': _('Files put in the running directory.'),
+          'type': ''
+     },
+     'archives': {
+          'name': 'archives',
+          'label': _('Archives'),
+          'value': [],
+          'help_text': _('zip, tar and tgz/tar.gz uncompressed into the running directory.'),
+          'type': ''
+     },
+     'job_properties': {
+          'name': 'job_properties',
+          'label': _('Hadoop job properties'),
+          'value': [],
+          'help_text': _('value, e.g. production'),
+          'type': ''
+     },
+     'prepares': {
+          'name': 'prepares',
+          'label': _('Prepares'),
+          'value': [],
+          'help_text': _('Path to manipulate before starting the application.'),
+          'type': ''
+     },
+     'job_xml': {
+          'name': 'job_xml',
+          'label': _('Job XML'),
+          'value': '',
+          'help_text': _('Refer to a Hadoop JobConf job.xml'),
+          'type': ''
+     },
+     'retry_max': {
+          'name': 'retry_max',
+          'label': _('Max retry'),
+          'value': [],
+          'help_text': _('Number of times, default is 3'),
+          'type': ''
+     },
+     'retry_interval': {
+          'name': 'retry_interval',
+          'label': _('Retry interval'),
+          'value': [],
+          'help_text': _('Wait time in minutes, default is 10'),
+          'type': ''
+     }
+  }
+
+  @classmethod
+  def get_mandatory_fields(cls):
+    return [cls.FIELDS['uuid']]
+
+
+class DistCpDocumentAction(Action):
+  TYPE = 'distcp-document'
+  FIELDS = {
+    'uuid': {
+        'name': 'uuid',
+        'label': _('DistCp program'),
+        'value': '',
+        'help_text': _('Select a saved DistCp program you want to schedule.'),
+        'type': 'distcp-doc'
+     },
+     'parameters': {
+          'name': 'parameters',
+          'label': _('Parameters'),
+          'value': [],
+          'help_text': _('The %(type)s parameters of the script. E.g. N=5, INPUT=${inputDir}')  % {'type': TYPE.title()},
+          'type': ''
+     },
+      # Common
+     'prepares': {
+          'name': 'prepares',
+          'label': _('Prepares'),
+          'value': [],
+          'help_text': _('Path to manipulate before starting the application.')
+     },
+     'job_properties': {
+          'name': 'job_properties',
+          'label': _('Hadoop job properties'),
+          'value': [],
+          'help_text': _('value, e.g. production')
+     },
+     'java_opts': {
+          'name': 'java_opts',
+          'label': _('Java options'),
+          'value': '',
+          'help_text': _('Parameters for the JVM, e.g. -Dprop1=a -Dprop2=b')
+     },
+     'retry_max': {
+          'name': 'retry_max',
+          'label': _('Max retry'),
+          'value': [],
+          'help_text': _('Number of times, default is 3'),
+          'type': ''
+     },
+     'retry_interval': {
+          'name': 'retry_interval',
+          'label': _('Retry interval'),
+          'value': [],
+          'help_text': _('Wait time in minutes, default is 10'),
+          'type': ''
+     }
+  }
+
+  @classmethod
+  def get_mandatory_fields(cls):
+    return [cls.FIELDS['uuid']]
+
+
+class ShellDocumentAction(Action):
+  TYPE = 'shell-document'
+  FIELDS = {
+    'uuid': {
+        'name': 'uuid',
+        'label': _('Shell program'),
+        'value': '',
+        'help_text': _('Select a saved Shell program you want to schedule.'),
+        'type': 'shell-doc'
+     },
+     'parameters': {
+          'name': 'parameters',
+          'label': _('Parameters'),
+          'value': [],
+          'help_text': _('The %(type)s parameters of the script. E.g. N=5, INPUT=${inputDir}')  % {'type': TYPE.title()},
+          'type': ''
+     },
+     # Common
+     'files': {
+          'name': 'files',
+          'label': _('Files'),
+          'value': [],
+          'help_text': _('Files put in the running directory.'),
+          'type': ''
+     },
+     'archives': {
+          'name': 'archives',
+          'label': _('Archives'),
+          'value': [],
+          'help_text': _('zip, tar and tgz/tar.gz uncompressed into the running directory.'),
+          'type': ''
+     },
+     'job_properties': {
+          'name': 'job_properties',
+          'label': _('Hadoop job properties'),
+          'value': [],
+          'help_text': _('value, e.g. production'),
+          'type': ''
+     },
+     'prepares': {
+          'name': 'prepares',
+          'label': _('Prepares'),
+          'value': [],
+          'help_text': _('Path to manipulate before starting the application.'),
+          'type': ''
+     },
+     'job_xml': {
+          'name': 'job_xml',
+          'label': _('Job XML'),
+          'value': '',
+          'help_text': _('Refer to a Hadoop JobConf job.xml'),
+          'type': ''
+     },
+     'retry_max': {
+          'name': 'retry_max',
+          'label': _('Max retry'),
+          'value': [],
+          'help_text': _('Number of times, default is 3'),
+          'type': ''
+     },
+     'retry_interval': {
+          'name': 'retry_interval',
+          'label': _('Retry interval'),
+          'value': [],
+          'help_text': _('Wait time in minutes, default is 10'),
+          'type': ''
+     }
+  }
+
+  @classmethod
+  def get_mandatory_fields(cls):
+    return [cls.FIELDS['uuid']]
+
+
+class MapReduceDocumentAction(Action):
+  TYPE = 'mapreduce-document'
+  FIELDS = {
+    'uuid': {
+        'name': 'uuid',
+        'label': _('MapReduce program'),
+        'value': '',
+        'help_text': _('Select a saved MapReduce program you want to schedule.'),
+        'type': 'mapreduce-doc'
+     },
+     'parameters': {
+          'name': 'parameters',
+          'label': _('Parameters'),
+          'value': [],
+          'help_text': _('The %(type)s parameters of the script. E.g. N=5, INPUT=${inputDir}')  % {'type': TYPE.title()},
+          'type': ''
+     },
+     # Common
+     'files': {
+          'name': 'files',
+          'label': _('Files'),
+          'value': [],
+          'help_text': _('Files put in the running directory.'),
+          'type': ''
+     },
+     'archives': {
+          'name': 'archives',
+          'label': _('Archives'),
+          'value': [],
+          'help_text': _('zip, tar and tgz/tar.gz uncompressed into the running directory.'),
+          'type': ''
+     },
+     'job_properties': {
+          'name': 'job_properties',
+          'label': _('Hadoop job properties'),
+          'value': [],
+          'help_text': _('value, e.g. production'),
+          'type': ''
+     },
+     'prepares': {
+          'name': 'prepares',
+          'label': _('Prepares'),
+          'value': [],
+          'help_text': _('Path to manipulate before starting the application.'),
+          'type': ''
+     },
+     'job_xml': {
+          'name': 'job_xml',
+          'label': _('Job XML'),
+          'value': '',
+          'help_text': _('Refer to a Hadoop JobConf job.xml'),
+          'type': ''
+     },
+     'retry_max': {
+          'name': 'retry_max',
+          'label': _('Max retry'),
+          'value': [],
+          'help_text': _('Number of times, default is 3'),
+          'type': ''
+     },
+     'retry_interval': {
+          'name': 'retry_interval',
+          'label': _('Retry interval'),
+          'value': [],
+          'help_text': _('Wait time in minutes, default is 10'),
+          'type': ''
+     }
+  }
+
+  @classmethod
+  def get_mandatory_fields(cls):
+    return [cls.FIELDS['uuid']]
+
+
 class DecisionNode(Action):
   TYPE = 'decision'
   FIELDS = {}
@@ -2153,6 +2857,7 @@ NODES = {
   'java-widget': JavaAction,
   'hive-widget': HiveAction,
   'hive2-widget': HiveServer2Action,
+  'impala-widget': ImpalaAction,
   'sqoop-widget': SqoopAction,
   'mapreduce-widget': MapReduceAction,
   'subworkflow-widget': SubWorkflowAction,
@@ -2169,7 +2874,14 @@ NODES = {
   'spark-widget': SparkAction,
   'generic-widget': GenericAction,
   'hive-document-widget': HiveDocumentAction,
-  'java-document-widget': JavaDocumentAction
+  'impala-document-widget': ImpalaDocumentAction,
+  'java-document-widget': JavaDocumentAction,
+  'spark-document-widget': SparkDocumentAction,
+  'pig-document-widget': PigDocumentAction,
+  'sqoop-document-widget': SqoopDocumentAction,
+  'distcp-document-widget': DistCpDocumentAction,
+  'shell-document-widget': ShellDocumentAction,
+  'mapreduce-document-widget': MapReduceDocumentAction
 }
 
 
@@ -2491,7 +3203,7 @@ class Coordinator(Job):
       self._data = {
           'id': None,
           'uuid': None,
-          'name': 'My Coordinator',
+          'name': 'My Schedule',
           'variables': [], # Aka workflow parameters
           'properties': {
               'description': '',
@@ -2505,6 +3217,7 @@ class Coordinator(Job):
               'start': '${start_date}',
               'end': '${end_date}',
               'workflow': None,
+              'document': None,
               'timeout': None,
               'concurrency': None,
               'execution': None,
@@ -2558,11 +3271,19 @@ class Coordinator(Job):
     if self.document is not None:
       self._data['id'] = self.document.id
 
+    if 'document' not in self._data['properties']:
+      self._data['properties']['document'] = None
+
     return self._data
 
   @property
   def name(self):
-    return self.data['name']
+    from notebook.connectors.oozie_batch import OozieApi # Import dependency
+
+    if self.data['properties']['document']:
+      return _("%s for %s") % (OozieApi.SCHEDULE_JOB_PREFIX, self.data['name'] or self.data['type'])
+    else:
+      return self.data['name']
 
   def set_workspace(self, user):
     self.data['properties']['deployment_dir'] = Job.get_workspace(user)
@@ -2675,8 +3396,17 @@ class Coordinator(Job):
   def workflow(self):
     if self.document is None:
       raise PopupException(_('Cannot return workflow since document attribute is None.'))
-    wf_doc = Document2.objects.get_by_uuid(user=self.document.owner, uuid=self.data['properties']['workflow'])
-    return Workflow(document=wf_doc)
+
+    # Integrated scheduler
+    if self.data['properties']['document']:
+      document = Document2.objects.get_by_uuid(user=self.document.owner, uuid=self.data['properties']['document'])
+      wf_doc = WorkflowBuilder().create_workflow(document=document, user=self.document.owner, managed=True)
+      wf = Workflow(data=wf_doc.data)
+      wf_doc.delete()
+      return wf
+    else:
+      wf_doc = Document2.objects.get_by_uuid(user=self.document.owner, uuid=self.data['properties']['workflow'])
+      return Workflow(document=wf_doc)
 
   def get_absolute_url(self):
     return reverse('oozie:edit_coordinator') + '?coordinator=%s' % self.id
@@ -2914,45 +3644,245 @@ class History(object):
       pass
 
 
+def _import_workspace(fs, user, job):
+  source_workspace_dir = job.deployment_dir
+
+  job.set_workspace(user)
+  job.check_workspace(fs, user)
+  job.import_workspace(fs, source_workspace_dir, user)
+
+
+def _save_workflow(workflow, layout, user, fs=None):
+  if workflow.get('id'):
+    workflow_doc = Document2.objects.get(id=workflow['id'])
+  else:
+    workflow_doc = Document2.objects.create(name=workflow['name'], uuid=workflow['uuid'], type='oozie-workflow2', owner=user, description=workflow['properties']['description'])
+    Document.objects.link(workflow_doc, owner=workflow_doc.owner, name=workflow_doc.name, description=workflow_doc.description, extra='workflow2')
+
+  # Excludes all the sub-workflow and Hive dependencies. Contains list of history and coordinator dependencies.
+  workflow_doc.dependencies = workflow_doc.dependencies.exclude(Q(is_history=False) & Q(type__in=['oozie-workflow2', 'query-hive', 'query-java']))
+
+  dependencies = \
+      [node['properties']['workflow'] for node in workflow['nodes'] if node['type'] == 'subworkflow-widget'] + \
+      [node['properties']['uuid'] for node in workflow['nodes'] if 'document-widget' in node['type'] and node['properties'].get('uuid')]
+  if dependencies:
+    dependency_docs = Document2.objects.filter(uuid__in=dependencies)
+    workflow_doc.dependencies.add(*dependency_docs)
+
+  if workflow['properties'].get('imported'): # We convert from and old workflow format (3.8 <) to the latest
+    workflow['properties']['imported'] = False
+    workflow_instance = Workflow(workflow=workflow, user=user)
+    _import_workspace(fs, user, workflow_instance)
+    workflow['properties']['deployment_dir'] = workflow_instance.deployment_dir
+
+  workflow_doc.update_data({'workflow': workflow})
+  workflow_doc.update_data({'layout': layout})
+  workflow_doc1 = workflow_doc.doc.get()
+  workflow_doc.name = workflow_doc1.name = workflow['name']
+  workflow_doc.description = workflow_doc1.description = workflow['properties']['description']
+  workflow_doc.save()
+  workflow_doc1.save()
+
+  return workflow_doc
+
+
 class WorkflowBuilder():
   """
-  Focus on building nodes, not the UI layout (should be graphed automatically in dashboard).
-  Only support Hive document currently, but then will have Pig, PySpark, MapReduce...
+  Building a workflow that has saved Documents for nodes (e.g Saved Hive query, saved Pig script...).
   """
 
-  def create_workflow(self, document, user, name=None, managed=False):
+  def create_workflow(self, user, document=None, name=None, managed=False):
+    nodes = []
+    documents = [document]
 
     if name is None:
-      name = _('Schedule of ') + document.name or document.type
+      name = _('Task of ') + ','.join([document.name or document.type for document in documents])
 
-    if document.type == 'query-java':
-      node = self.get_java_document_node(document, name)
-    else:
-      node = self.get_hive_document_node(document, name, user)
+    for document in documents:
+      if document.type == 'query-java':
+        node = self.get_java_document_node(document)
+      elif document.type == 'query-hive':
+        node = self.get_hive_document_node(document, user)
+      elif document.type == 'query-impala':
+        node = self.get_impala_document_node(document, user)
+      elif document.type == 'query-spark2':
+        node = self.get_spark_document_node(document, user)
+      elif document.type == 'query-pig':
+        node = self.get_pig_document_node(document, user)
+      elif document.type == 'query-sqoop1':
+        node = self.get_sqoop_document_node(document, user)
+      elif document.type == 'query-distcp':
+        node = self.get_distcp_document_node(document, user)
+      elif document.type == 'query-shell':
+        node = self.get_shell_document_node(document, user)
+      elif document.type == 'query-mapreduce':
+        node = self.get_mapreduce_document_node(document, user)
+      else:
+        raise PopupException(_('Snippet type %s is not supported in batch execution.') % document.type)
 
-    workflow_doc = self.get_workflow(node, name, document.uuid, user, managed=managed)
-    workflow_doc.dependencies.add(document)
+      nodes.append(node)
+
+    workflow_doc = self.get_workflow(nodes, name, document.uuid, user, managed=managed)
+    workflow_doc.dependencies.add(*documents)
 
     return workflow_doc
 
 
-  def get_hive_document_node(self, document, name, user):
+  def create_notebook_workflow(self, user, notebook=None, name=None, managed=False):
+    nodes = []
+
+    if name is None:
+      name = _('Task of ') + ','.join([snippet['name'] or snippet['type'] for snippet in notebook['snippets']])
+
+    for snippet in notebook['snippets']:
+      if snippet['type'] == 'java':
+        node = self.get_java_snippet_node(snippet)
+      elif snippet['type'] == 'hive':
+        node = self.get_hive_snippet_node(snippet, user)
+      elif snippet['type'] == 'impala':
+        node = self.get_impala_snippet_node(snippet, user)
+      elif snippet['type'] == 'shell':
+        node = self.get_shell_snippet_node(snippet)
+      else:
+        raise PopupException(_('Snippet type %s is not supported in batch execution.') % snippet)
+
+      nodes.append(node)
+
+    workflow_doc = self.get_workflow(nodes, name, notebook['uuid'], user, managed=managed) # TODO optionally save
+
+    return workflow_doc
+
+  def get_document_parameters(self, document):
+    notebook = Notebook(document=document)
+    parameters = find_dollar_braced_variables(notebook.get_str())
+
+    return [{u'value': u'%s=${%s}' % (p, p)} for p in parameters]
+
+  def _get_hive_node(self, node_id, user, is_document_node=False):
     api = get_oozie(user)
 
     credentials = [HiveDocumentAction.DEFAULT_CREDENTIALS] if api.security_enabled else []
 
-    notebook = Notebook(document=document)
-    parameters = find_dollar_braced_variables(notebook.get_str())
-    parameters = [{u'value': u'%s=${%s}' % (p, p)} for p in parameters]
-
     return {
-        u'name': u'doc-1',
-        u'actionParametersUI': [],
+        u'id': node_id,
+        u'name': u'hive-%s' % node_id[:4],
+        u"type": u"hive-document-widget", # if is_document_node else u"hive2-widget",
         u'properties': {
             u'files': [],
             u'job_xml': u'',
-            u'uuid': document.uuid,
-            u'parameters': parameters,
+            u'retry_interval': [],
+            u'retry_max': [],
+            u'job_properties': [],
+            u'arguments': [],
+            u'parameters': [],
+            u'sla': [
+                {u'key': u'enabled', u'value': False},
+                {u'key': u'nominal-time', u'value': u'${nominal_time}'},
+                {u'key': u'should-start', u'value': u''},
+                {u'key': u'should-end', u'value': u'${30 * MINUTES}'},
+                {u'key': u'max-duration', u'value': u''},
+                {u'key': u'alert-events', u'value': u''},
+                {u'key': u'alert-contact', u'value': u''},
+                {u'key': u'notification-msg', u'value': u''},
+                {u'key': u'upstream-apps', u'value': u''},
+            ],
+            u'archives': [],
+            u'prepares': [],
+            u'credentials': credentials,
+            u'password': u'',
+            u'jdbc_url': u'',
+        },
+        u'children': [
+            {u'to': u'33430f0f-ebfa-c3ec-f237-3e77efa03d0a'},
+            {u'error': u'17c9c895-5a16-7443-bb81-f34b30b21548'}
+        ],
+        u'actionParameters': [],
+    }
+
+  def get_hive_snippet_node(self, snippet, user):
+    node = self._get_hive_node(snippet['id'], user)
+
+    node['properties']['parameters'] = [{'value': '%(name)s=%(value)s' % v} for v in snippet['variables']]
+    node['properties']['statements'] = 'USE %s;\n\n%s' % (snippet['database'], snippet['statement_raw'])
+
+    return node
+
+  def get_hive_document_node(self, document, user):
+    node = self._get_hive_node(document.uuid, user, is_document_node=True)
+
+    notebook = Notebook(document=document)
+    node['properties']['parameters'] = [{'value': '%(name)s=%(value)s' % v} for v in notebook.get_data()['snippets'][0]['variables']]
+    node['properties']['uuid'] = document.uuid
+
+    return node
+
+  def _get_impala_node(self, node_id, user, is_document_node=False):
+    credentials = []
+
+    return {
+        u'id': node_id,
+        u'name': u'impala-%s' % node_id[:4],
+        u"type": u"impala-document-widget",
+        u'properties': {
+            u'files': [],
+            u'job_xml': u'',
+            u'retry_interval': [],
+            u'retry_max': [],
+            u'job_properties': [],
+            u'arguments': [],
+            u'parameters': [],
+            u'sla': [
+                {u'key': u'enabled', u'value': False},
+                {u'key': u'nominal-time', u'value': u'${nominal_time}'},
+                {u'key': u'should-start', u'value': u''},
+                {u'key': u'should-end', u'value': u'${30 * MINUTES}'},
+                {u'key': u'max-duration', u'value': u''},
+                {u'key': u'alert-events', u'value': u''},
+                {u'key': u'alert-contact', u'value': u''},
+                {u'key': u'notification-msg', u'value': u''},
+                {u'key': u'upstream-apps', u'value': u''},
+            ],
+            u'archives': [],
+            u'prepares': [],
+            u'credentials': credentials,
+            u'impalad_host': u'',
+            u'key_tab_path': u'',
+            u'user_principal': u''
+        },
+        u'children': [
+            {u'to': u'33430f0f-ebfa-c3ec-f237-3e77efa03d0a'},
+            {u'error': u'17c9c895-5a16-7443-bb81-f34b30b21548'}
+        ],
+        u'actionParameters': [],
+    }
+
+  def get_impala_snippet_node(self, snippet, user):
+    node = self._get_impala_node(snippet['id'], user)
+
+    node['properties']['parameters'] = [{'value': '%(name)s=%(value)s' % v} for v in snippet['variables']]
+    node['properties']['statements'] = 'USE %s;\n\n%s' % (snippet['database'], snippet['statement_raw'])
+
+    return node
+
+  def get_impala_document_node(self, document, user):
+    node = self._get_impala_node(document.uuid, user, is_document_node=True)
+
+    notebook = Notebook(document=document)
+    node['properties']['parameters'] = [{'value': '%(name)s=%(value)s' % v} for v in notebook.get_data()['snippets'][0]['variables']]
+    node['properties']['uuid'] = document.uuid
+
+    return node
+
+  def _get_spark_node(self, node_id, user, is_document_node=False):
+    credentials = []
+
+    return {
+        u'id': node_id,
+        u'name': u'spark2-%s' % node_id[:4],
+        u"type": u"spark2-document-widget", # if is_document_node else u"hive2-widget",
+        u'properties': {
+            u'files': [],
+            u'job_xml': u'',
             u'retry_interval': [],
             u'retry_max': [],
             u'job_properties': [],
@@ -2966,110 +3896,330 @@ class WorkflowBuilder():
                 {u'key': u'alert-contact', u'value': u''},
                 {u'key': u'notification-msg', u'value': u''},
                 {u'key': u'upstream-apps', u'value': u''},
-                ],
+            ],
             u'archives': [],
             u'prepares': [],
             u'credentials': credentials,
-            u'password': u'',
-            u'jdbc_url': u'',
-            },
-        u'actionParametersFetched': False,
-        u'id': u'0aec471d-2b7c-d93d-b22c-2110fd17ea2c',
-        u'type': u'hive-document-widget',
-        u'children': [{u'to': u'33430f0f-ebfa-c3ec-f237-3e77efa03d0a'},
-                      {u'error': u'17c9c895-5a16-7443-bb81-f34b30b21548'
-                      }],
+            u'spark_master': u'yarn',
+            u'mode': u'client',
+            u'app_name': u'BatchSpark2'
+        },
+        u'children': [
+            {u'to': u'33430f0f-ebfa-c3ec-f237-3e77efa03d0a'},
+            {u'error': u'17c9c895-5a16-7443-bb81-f34b30b21548'}
+        ],
         u'actionParameters': [],
     }
 
-  def get_java_document_node(self, document, name):
+  def get_spark_snippet_node(self, snippet):
     credentials = []
 
+    node_id = snippet.get('id', str(uuid.uuid4()))
+
+    node = self._get_java_node(node_id, credentials)
+    node['properties']['class'] = snippet['properties']['class']
+    node['properties']['jars'] = snippet['properties']['app_jar'] # Not used, submission add it to oozie.libpath instead
+    node['properties']['spark_opts'] = [{'value': f['path']} for f in snippet['properties']['files']]
+    node['properties']['spark_arguments'] = [{'value': f} for f in snippet['properties']['arguments']]
+
+    return node
+
+  def get_spark_document_node(self, document, user):
+    node = self._get_spark_node(document.uuid, user, is_document_node=True)
+
+    node['properties']['uuid'] = document.uuid
+
+    return node
+
+  def get_sqoop_document_node(self, document, user):
+    node = self._get_sqoop_node(document.uuid, is_document_node=True)
+
+    node['properties']['uuid'] = document.uuid
+
+    return node
+
+  def _get_sqoop_node(self, node_id, credentials=None, is_document_node=False):
+    if credentials is None:
+      credentials = []
+
     return {
-         "id":"0aec471d-2b7c-d93d-b22c-2110fd17ea2c",
-         "name":"doc-1",
-         "type":"java-document-widget",
-         "properties":{
-              u'uuid': document.uuid, # files, main_class, arguments comes from there
-              "job_xml":[],
-              "jar_path": "",
-              "java_opts":[],
-              "retry_max":[],
-              "retry_interval":[],
-              "job_properties":[],
-              "capture_output": False,
-              "prepares":[],
+        "id": node_id,
+        'name': 'sqoop-%s' % node_id[:4],
+        "type": "sqoop-document-widget",
+        "properties":{
+              "statement": "",
+              "arguments": [],
+              "retry_max": [],
+              "retry_interval": [],
+              "job_properties": [],
+              "prepares": [],
               "credentials": credentials,
-              "sla":[{"value":False, "key":"enabled"}, {"value":"${nominal_time}", "key":"nominal-time"}, {"value":"", "key":"should-start"}, {"value":"${30 * MINUTES}", "key":"should-end"}, {"value":"", "key":"max-duration"}, {"value":"", "key":"alert-events"}, {"value":"", "key":"alert-contact"}, {"value":"", "key":"notification-msg"}, {"value":"", "key":"upstream-apps"}],
-              "archives":[]
-          },
-          "children":[
-              {"to":"33430f0f-ebfa-c3ec-f237-3e77efa03d0a"},
-              {"error":"17c9c895-5a16-7443-bb81-f34b30b21548"}],
-          "actionParameters":[],
-          "actionParametersFetched": False
+              "sla": [{"value":False, "key":"enabled"}, {"value":"${nominal_time}", "key":"nominal-time"}, {"value":"", "key":"should-start"}, {"value":"${30 * MINUTES}", "key":"should-end"}, {"value":"", "key":"max-duration"}, {"value":"", "key":"alert-events"}, {"value":"", "key":"alert-contact"}, {"value":"", "key":"notification-msg"}, {"value":"", "key":"upstream-apps"}],
+              "archives": [],
+              "files": []
+        },
+        "children": [
+            {"to": "33430f0f-ebfa-c3ec-f237-3e77efa03d0a"},
+            {"error": "17c9c895-5a16-7443-bb81-f34b30b21548"}
+        ],
+        "actionParameters": [],
+        "actionParametersFetched": False
     }
 
+  def get_distcp_document_node(self, document, user):
+    node = self._get_distcp_node(document.uuid, is_document_node=True)
 
+    node['properties']['uuid'] = document.uuid
+    node['properties']['distcp_parameters'] = document.data_dict['snippets'][0]['properties'].get('distcp_parameters', [])
 
-  def get_workflow(self, node, name, doc_uuid, user, managed=False):
+    return node
+
+  def _get_distcp_node(self, node_id, credentials=None, is_document_node=False):
+    if credentials is None:
+      credentials = []
+
+    return {
+        "id": node_id,
+        'name': 'distcp-%s' % node_id[:4],
+        "type": "distcp-document-widget",
+        "properties":{
+              "source_path": "",
+              "destination_path": "",
+              "arguments": [],
+              "java_opts": [],
+              "retry_max": [],
+              "retry_interval": [],
+              "job_properties": [],
+              "prepares": [],
+              "distcp_parameters": [],
+              "credentials": credentials,
+              "sla": [{"value":False, "key":"enabled"}, {"value":"${nominal_time}", "key":"nominal-time"}, {"value":"", "key":"should-start"}, {"value":"${30 * MINUTES}", "key":"should-end"}, {"value":"", "key":"max-duration"}, {"value":"", "key":"alert-events"}, {"value":"", "key":"alert-contact"}, {"value":"", "key":"notification-msg"}, {"value":"", "key":"upstream-apps"}],
+              "archives": []
+        },
+        "children": [
+            {"to": "33430f0f-ebfa-c3ec-f237-3e77efa03d0a"},
+            {"error": "17c9c895-5a16-7443-bb81-f34b30b21548"}
+        ],
+        "actionParameters": [],
+        "actionParametersFetched": False
+    }
+
+  def get_shell_document_node(self, document, user):
+    node = self._get_shell_node(document.uuid)
+
+    node['properties']['uuid'] = document.uuid
+
+    return node
+
+  def get_shell_snippet_node(self, snippet):
+    node = self._get_shell_node(snippet['id'])
+
+    node['properties']['shell_command'] = snippet['properties'].get('shell_command')
+    node['properties']['arguments'] = snippet['properties'].get('arguments')
+    node['properties']['archives'] = snippet['properties'].get('archives')
+    node['properties']['files'] = snippet['properties'].get('files')
+    node['properties']['env_var'] = snippet['properties'].get('env_var')
+
+    return node
+
+  def _get_shell_node(self, node_id, credentials=None, is_snippet_node=False):
+    if credentials is None:
+      credentials = []
+
+    return {
+        "id": node_id,
+        'name': 'shell-%s' % node_id[:4],
+        "type": "shell-document-widget",
+        "properties":{
+              "command_path": "",
+              "env_var": [],
+              "arguments": [],
+              "java_opts": [],
+              "retry_max": [],
+              "retry_interval": [],
+              "job_properties": [],
+              "capture_output": False,
+              "prepares": [],
+              "credentials": credentials,
+              "sla": [{"value":False, "key":"enabled"}, {"value":"${nominal_time}", "key":"nominal-time"}, {"value":"", "key":"should-start"}, {"value":"${30 * MINUTES}", "key":"should-end"}, {"value":"", "key":"max-duration"}, {"value":"", "key":"alert-events"}, {"value":"", "key":"alert-contact"}, {"value":"", "key":"notification-msg"}, {"value":"", "key":"upstream-apps"}],
+              "archives": []
+        },
+        "children": [
+            {"to": "33430f0f-ebfa-c3ec-f237-3e77efa03d0a"},
+            {"error": "17c9c895-5a16-7443-bb81-f34b30b21548"}
+        ],
+        "actionParameters": [],
+        "actionParametersFetched": False
+    }
+
+  def get_mapreduce_document_node(self, document, user):
+    node = self._get_mapreduce_node(document.uuid, is_document_node=True)
+
+    node['properties']['uuid'] = document.uuid
+
+    return node
+
+  def _get_mapreduce_node(self, node_id, credentials=None, is_document_node=False):
+    if credentials is None:
+      credentials = []
+
+    return {
+        "id": node_id,
+        'name': 'mapreduce-%s' % node_id[:4],
+        "type": "mapreduce-document-widget",
+        "properties":{
+              "jar_path": "",
+              "arguments": [],
+              "java_opts": [],
+              "retry_max": [],
+              "retry_interval": [],
+              "job_properties": [],
+              "prepares": [],
+              "credentials": credentials,
+              "sla": [{"value":False, "key":"enabled"}, {"value":"${nominal_time}", "key":"nominal-time"}, {"value":"", "key":"should-start"}, {"value":"${30 * MINUTES}", "key":"should-end"}, {"value":"", "key":"max-duration"}, {"value":"", "key":"alert-events"}, {"value":"", "key":"alert-contact"}, {"value":"", "key":"notification-msg"}, {"value":"", "key":"upstream-apps"}],
+              "archives": []
+        },
+        "children": [
+            {"to": "33430f0f-ebfa-c3ec-f237-3e77efa03d0a"},
+            {"error": "17c9c895-5a16-7443-bb81-f34b30b21548"}
+        ],
+        "actionParameters": [],
+        "actionParametersFetched": False
+    }
+
+  def get_pig_document_node(self, document, user):
+    node = self._get_pig_node(document.uuid, is_document_node=True)
+
+    node['properties']['uuid'] = document.uuid
+
+    return node
+
+  def _get_pig_node(self, node_id, credentials=None, is_document_node=False):
+    if credentials is None:
+      credentials = []
+
+    return {
+        "id": node_id,
+        'name': 'pig-%s' % node_id[:4],
+        "type": "pig-document-widget",
+        "properties":{
+              "job_xml": [],
+              "jar_path": "",
+              "java_opts": [],
+              "retry_max": [],
+              "retry_interval": [],
+              "job_properties": [],
+              "prepares": [],
+              "credentials": credentials,
+              "sla": [{"value":False, "key":"enabled"}, {"value":"${nominal_time}", "key":"nominal-time"}, {"value":"", "key":"should-start"}, {"value":"${30 * MINUTES}", "key":"should-end"}, {"value":"", "key":"max-duration"}, {"value":"", "key":"alert-events"}, {"value":"", "key":"alert-contact"}, {"value":"", "key":"notification-msg"}, {"value":"", "key":"upstream-apps"}],
+              "archives": []
+        },
+        "children": [
+            {"to": "33430f0f-ebfa-c3ec-f237-3e77efa03d0a"},
+            {"error": "17c9c895-5a16-7443-bb81-f34b30b21548"}
+        ],
+        "actionParameters": [],
+        "actionParametersFetched": False
+    }
+
+  def _get_java_node(self, node_id, credentials=None, is_document_node=False):
+    if credentials is None:
+      credentials = []
+
+    return {
+        "id": node_id,
+        'name': 'java-%s' % node_id[:4],
+        "type": "java-document-widget" if is_document_node else "java-widget",
+        "properties":{
+              "job_xml": [],
+              "jar_path": "",
+              "java_opts": [],
+              "retry_max": [],
+              "retry_interval": [],
+              "job_properties": [],
+              "capture_output": False,
+              "prepares": [],
+              "credentials": credentials,
+              "sla": [{"value":False, "key":"enabled"}, {"value":"${nominal_time}", "key":"nominal-time"}, {"value":"", "key":"should-start"}, {"value":"${30 * MINUTES}", "key":"should-end"}, {"value":"", "key":"max-duration"}, {"value":"", "key":"alert-events"}, {"value":"", "key":"alert-contact"}, {"value":"", "key":"notification-msg"}, {"value":"", "key":"upstream-apps"}],
+              "archives": []
+        },
+        "children": [
+            {"to": "33430f0f-ebfa-c3ec-f237-3e77efa03d0a"},
+            {"error": "17c9c895-5a16-7443-bb81-f34b30b21548"}
+        ],
+        "actionParameters": [],
+        "actionParametersFetched": False
+    }
+
+  def get_java_snippet_node(self, snippet):
+    credentials = []
+
+    node_id = snippet.get('id', str(uuid.uuid4()))
+
+    node = self._get_java_node(node_id, credentials)
+    node['properties']['main_class'] = snippet['properties']['class']
+    node['properties']['app_jar'] = snippet['properties']['app_jar'] # Not used, submission add it to oozie.libpath instead
+    node['properties']['files'] = [{'value': f['path']} for f in snippet['properties']['files']]
+    node['properties']['arguments'] = [{'value': f} for f in snippet['properties']['arguments']]
+
+    return node
+
+  def get_java_document_node(self, document):
+    credentials = []
+
+    node = self._get_java_node(document.uuid, credentials, is_document_node=True)
+    node['uuid'] = document.uuid
+
+    return node
+
+  def get_workflow(self, nodes, name, doc_uuid, user, managed=False):
     parameters = []
 
-    data = json.dumps({'workflow': {
+    data = {
+      u'workflow': {
       u'name': name,
-      u'versions': [u'uri:oozie:workflow:0.4', u'uri:oozie:workflow:0.4.5'
-                    , u'uri:oozie:workflow:0.5'],
-      u'isDirty': False,
-      u'movedNode': None,
-      u'linkMapping': {
-          u'33430f0f-ebfa-c3ec-f237-3e77efa03d0a': [],
-          u'3f107997-04cc-8733-60a9-a4bb62cebffc': [u'0aec471d-2b7c-d93d-b22c-2110fd17ea2c'
-                  ],
-          u'0aec471d-2b7c-d93d-b22c-2110fd17ea2c': [u'33430f0f-ebfa-c3ec-f237-3e77efa03d0a'
-                  ],
-          u'17c9c895-5a16-7443-bb81-f34b30b21548': [],
-          },
-      u'nodeIds': [u'3f107997-04cc-8733-60a9-a4bb62cebffc',
-                   u'33430f0f-ebfa-c3ec-f237-3e77efa03d0a',
-                   u'17c9c895-5a16-7443-bb81-f34b30b21548',
-                   u'0aec471d-2b7c-d93d-b22c-2110fd17ea2c'],
-      u'id': 47,
       u'nodes': [{
           u'name': u'Start',
           u'properties': {},
           u'actionParametersFetched': False,
           u'id': u'3f107997-04cc-8733-60a9-a4bb62cebffc',
           u'type': u'start-widget',
-          u'children': [{u'to': u'0aec471d-2b7c-d93d-b22c-2110fd17ea2c'
-                        }],
+          u'children': [{u'to': u'33430f0f-ebfa-c3ec-f237-3e77efa03d0a'}],
           u'actionParameters': [],
-          }, {
+        }, {
           u'name': u'End',
-          u'properties': {},
+          u'properties': {
+              u'body': u'',
+              u'cc': u'',
+              u'to': u'',
+              u'enableMail': False,
+              u'message': u'Workflow ${wf:id()} finished',
+              u'subject': u'',
+              u'attachment': u''
+          },
           u'actionParametersFetched': False,
           u'id': u'33430f0f-ebfa-c3ec-f237-3e77efa03d0a',
           u'type': u'end-widget',
           u'children': [],
           u'actionParameters': [],
-          }, {
+        }, {
           u'name': u'Kill',
           u'properties': {
               u'body': u'',
               u'cc': u'',
               u'to': u'',
               u'enableMail': False,
-              u'message': u'Action failed, error message[${wf:errorMessage(wf:lastErrorNode())}]'
-                  ,
+              u'message': u'Action failed, error message[${wf:errorMessage(wf:lastErrorNode())}]',
               u'subject': u'',
-              },
+              u'attachment': u''
+          },
           u'actionParametersFetched': False,
           u'id': u'17c9c895-5a16-7443-bb81-f34b30b21548',
           u'type': u'kill-widget',
           u'children': [],
           u'actionParameters': [],
-          },
-            node
-          ],
+        }
+      ],
       u'properties': {
           u'job_xml': u'',
           u'description': u'',
@@ -3092,17 +4242,20 @@ class WorkflowBuilder():
           u'parameters': parameters,
           u'properties': [],
           },
-      u'nodeNamesMapping': {
-          u'33430f0f-ebfa-c3ec-f237-3e77efa03d0a': u'End',
-          u'3f107997-04cc-8733-60a9-a4bb62cebffc': u'Start',
-          u'0aec471d-2b7c-d93d-b22c-2110fd17ea2c': u'doc-1',
-          u'17c9c895-5a16-7443-bb81-f34b30b21548': u'Kill',
-          },
-      u'uuid': u'433922e5-e616-dfe0-1cba-7fe744c9305c',
+      u'uuid': str(uuid.uuid4()),
       }
-    })
+    }
 
-    workflow_doc = Document2.objects.create(name=name, type='oozie-workflow2', owner=user, data=data, is_managed=managed)
-    Document.objects.link(workflow_doc, owner=workflow_doc.owner, name=workflow_doc.name, description=workflow_doc.description, extra='workflow2')
+    _prev_node = data['workflow']['nodes'][0]
+
+    for node in nodes:
+      data['workflow']['nodes'].append(node)
+
+      _prev_node['children'][0]['to'] = node['id'] # We link nodes
+      _prev_node = node
+
+    workflow_doc = _save_workflow(data['workflow'], {}, user)
+    workflow_doc.is_managed = managed
+    workflow_doc.save()
 
     return workflow_doc

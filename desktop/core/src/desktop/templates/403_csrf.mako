@@ -18,11 +18,11 @@
 from django.utils.translation import ugettext as _
 from desktop.views import commonheader, commonfooter
 %>
-${ commonheader(_('403 - CSRF error'), "", user) | n,unicode }
+${ commonheader(_('403 - CSRF error'), "", user, request) | n,unicode }
 
 <link rel="stylesheet" href="${ static('desktop/css/httperrors.css') }">
 
-<div class="container-fluid">
+<div id="httperror" class="container-fluid">
   <div class="row-fluid">
     <div class="span12 center">
       <div class="error-code">403</div>

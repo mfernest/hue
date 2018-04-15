@@ -23,7 +23,7 @@
 <%namespace name="layout" file="../navigation-bar.mako" />
 <%namespace name="utils" file="../utils.inc.mako" />
 
-${ commonheader(_("Trashed Coordinators"), "oozie", user) | n,unicode }
+${ commonheader(_("Trashed Coordinators"), "oozie", user, request) | n,unicode }
 ${ layout.menubar(section='coordinators') }
 
 
@@ -57,7 +57,7 @@ ${ layout.menubar(section='coordinators') }
   <table id="coordinatorTable" class="table datatables">
     <thead>
       <tr>
-        <th width="1%"><div class="hueCheckbox selectAll fa" data-selectables="coordinatorCheck"></div></th>
+        <th width="1%"><div class="hue-checkbox selectAll fa" data-selectables="coordinatorCheck"></div></th>
         <th>${ _('Name') }</th>
         <th>${ _('Description') }</th>
         <th>${ _('Workflow') }</th>
@@ -71,7 +71,7 @@ ${ layout.menubar(section='coordinators') }
       %for coordinator in jobs:
         <tr>
           <td data-row-selector-exclude="true">
-            <div class="hueCheckbox coordinatorCheck fa" data-row-selector-exclude="true" data-coordinator-id="${ coordinator.id }"></div>
+            <div class="hue-checkbox coordinatorCheck fa" data-row-selector-exclude="true" data-coordinator-id="${ coordinator.id }"></div>
           </td>
           <td>${ coordinator.name }</td>
           <td>${ coordinator.description }</td>
@@ -98,8 +98,8 @@ ${ layout.menubar(section='coordinators') }
   <form id="purgeForm" action="${ url('oozie:delete_coordinator') }?skip_trash=true" method="POST">
     ${ csrf_token(request) | n,unicode }
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3 id="purgeMessage">${ _('Delete all coordinator(s)?') }</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 id="purgeMessage" class="modal-title">${ _('Delete all coordinator(s)?') }</h2>
     </div>
     <div class="modal-footer">
       <a href="#" class="btn" data-dismiss="modal">${ _('No') }</a>
@@ -116,8 +116,8 @@ ${ layout.menubar(section='coordinators') }
   <form id="purgeForm" action="${ url('oozie:delete_coordinator') }?skip_trash=true" method="POST">
     ${ csrf_token(request) | n,unicode }
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3 id="purgeMessage">${ _('Delete the selected coordinator(s)?') }</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 id="purgeMessage" class="modal-title">${ _('Delete the selected coordinator(s)?') }</h2>
     </div>
     <div class="modal-footer">
       <a href="#" class="btn" data-dismiss="modal">${ _('No') }</a>
@@ -134,8 +134,8 @@ ${ layout.menubar(section='coordinators') }
   <form id="restoreWfForm" action="${ url('oozie:restore_coordinator') }" method="POST">
     ${ csrf_token(request) | n,unicode }
     <div class="modal-header">
-      <a href="#" class="close" data-dismiss="modal">&times;</a>
-      <h3 id="restoreWfMessage">${ _('Restore the selected coordinator(s)?') }</h3>
+      <button type="button" class="close" data-dismiss="modal" aria-label="${ _('Close') }"><span aria-hidden="true">&times;</span></button>
+      <h2 id="restoreWfMessage" class="modal-title">${ _('Restore the selected coordinator(s)?') }</h2>
     </div>
     <div class="modal-footer">
       <a href="#" class="btn" data-dismiss="modal">${ _('No') }</a>
@@ -148,9 +148,8 @@ ${ layout.menubar(section='coordinators') }
 </div>
 
 <script src="${ static('desktop/ext/js/datatables-paging-0.1.js') }" type="text/javascript" charset="utf-8"></script>
-<script src="${ static('desktop/ext/js/knockout.min.js') }" type="text/javascript" charset="utf-8"></script>
 
-<script type="text/javascript" charset="utf-8">
+<script type="text/javascript">
   $(document).ready(function () {
     var viewModel = {
         availableJobs : ko.observableArray(${ json_jobs | n }),
@@ -184,8 +183,8 @@ ${ layout.menubar(section='coordinators') }
 
     function toggleActions() {
       $(".toolbarBtn").attr("disabled", "disabled");
-      var selector = $(".hueCheckbox[checked='checked']");
-      var can_write = $(".hueCheckbox[checked='checked'][data-coordinator-id]");
+      var selector = $(".hue-checkbox[checked='checked']");
+      var can_write = $(".hue-checkbox[checked='checked'][data-coordinator-id]");
       if (can_write.length >= 1 && can_write.length == selector.length) {
         $("#destroy-btn").removeAttr("disabled");
         $("#restore-btn").removeAttr("disabled");
@@ -194,7 +193,7 @@ ${ layout.menubar(section='coordinators') }
 
     $("#purge-btn").click(function (e) {
       viewModel.chosenJobs.removeAll();
-      $(".hueCheckbox").each(function( index ) {
+      $(".hue-checkbox").each(function( index ) {
         viewModel.chosenJobs.push($(this).data("coordinator-id"));
       });
       $("#purge-job").modal("show");
@@ -202,7 +201,7 @@ ${ layout.menubar(section='coordinators') }
 
     $("#destroy-btn").click(function (e) {
       viewModel.chosenJobs.removeAll();
-      $(".hueCheckbox[checked='checked']").each(function( index ) {
+      $(".hue-checkbox[checked='checked']").each(function( index ) {
         viewModel.chosenJobs.push($(this).data("coordinator-id"));
       });
       $("#destroy-job").modal("show");
@@ -210,7 +209,7 @@ ${ layout.menubar(section='coordinators') }
 
     $("#restore-btn").click(function (e) {
       viewModel.chosenJobs.removeAll();
-      $(".hueCheckbox[checked='checked']").each(function( index ) {
+      $(".hue-checkbox[checked='checked']").each(function( index ) {
         viewModel.chosenJobs.push($(this).data("coordinator-id"));
       });
       $("#restore-job").modal("show");

@@ -52,7 +52,8 @@ admin.autodiscover()
 
 # Some django-wide URLs
 dynamic_patterns = patterns('desktop.auth.views',
-  (r'^accounts/login/$', 'dt_login'),
+  (r'^hue/accounts/login/$', 'dt_login'),
+  (r'^accounts/login/$', 'dt_login_old'), # Deprecated
   (r'^accounts/logout/$', 'dt_logout', {'next_page': '/'}),
   (r'^profile$', 'profile'),
   (r'^login/oauth/?$', 'oauth_login'),
@@ -62,8 +63,9 @@ dynamic_patterns = patterns('desktop.auth.views',
 
 if USE_NEW_EDITOR.get():
   dynamic_patterns += patterns('desktop.views',
-    (r'^home$','home2'),
-    (r'^home2$','home')
+    (r'^home/?$','home2'),
+    (r'^home2$','home'),
+    (r'^home_embeddable$','home_embeddable'),
   )
 else:
   dynamic_patterns += patterns('desktop.views',
@@ -72,15 +74,17 @@ else:
   )
 
 dynamic_patterns += patterns('desktop.views',
-  (r'^logs$','log_view'),
-  (r'^desktop/dump_config$','dump_config'),
-  (r'^desktop/download_logs$','download_log_view'),
-  (r'^desktop/get_debug_level','get_debug_level'),
-  (r'^desktop/set_all_debug','set_all_debug'),
-  (r'^desktop/reset_all_debug','reset_all_debug'),
+  (r'^catalog/?$','catalog'),
+  (r'^logs$', 'log_view'),
+  (r'^desktop/log_analytics$', 'log_analytics'),
+  (r'^desktop/log_js_error$', 'log_js_error'),
+  (r'^desktop/dump_config$', 'dump_config'),
+  (r'^desktop/download_logs$', 'download_log_view'),
+  (r'^desktop/get_debug_level', 'get_debug_level'),
+  (r'^desktop/set_all_debug', 'set_all_debug'),
+  (r'^desktop/reset_all_debug', 'reset_all_debug'),
   (r'^bootstrap.js$', 'bootstrap'), # unused
 
-  (r'^desktop/prefs/(?P<key>\w+)?$', 'prefs'),
   (r'^desktop/status_bar/?$', 'status_bar'),
   (r'^desktop/debug/is_alive$','is_alive'),
   (r'^desktop/debug/is_idle$','is_idle'),
@@ -90,8 +94,27 @@ dynamic_patterns += patterns('desktop.views',
   (r'^desktop/debug/check_config_ajax$', 'check_config_ajax'),
   (r'^desktop/log_frontend_event$', 'log_frontend_event'),
 
+  # Mobile
+  (r'^assist_m', 'assist_m'),
+  # Hue 4
+  (r'^hue.*/$', 'hue'),
+  (r'^403$', 'path_forbidden'),
+  (r'^404$', 'not_found'),
+  (r'^500$', 'server_error'),
+
+  # KO components, change to doc?name=ko_editor or similar
+  (r'^ko_editor', 'ko_editor'),
+  (r'^ko_metastore', 'ko_metastore'),
+
   # Jasmine
   (r'^jasmine', 'jasmine'),
+
+  # JS that needs to be mako
+  (r'^desktop/globalJsConstants.js', 'global_js_constants'),
+
+  # Web workers
+  (r'^desktop/workers/aceSqlLocationWorker.js', 'ace_sql_location_worker'),
+  (r'^desktop/workers/aceSqlSyntaxWorker.js', 'ace_sql_syntax_worker'),
 
   # Unsupported browsers
   (r'^boohoo$','unsupported'),
@@ -121,10 +144,23 @@ dynamic_patterns += patterns('desktop.api2',
   (r'^desktop/api2/doc/mkdir/?$', 'create_directory'),
   (r'^desktop/api2/doc/update/?$', 'update_document'),
   (r'^desktop/api2/doc/delete/?$', 'delete_document'),
+  (r'^desktop/api2/doc/copy/?$', 'copy_document'),
+  (r'^desktop/api2/doc/restore/?$', 'restore_document'),
   (r'^desktop/api2/doc/share/?$', 'share_document'),
+
+
+  (r'^desktop/api2/get_config/?$', 'get_config'),
+  (r'^desktop/api2/user_preferences/(?P<key>\w+)?$', 'user_preferences'),
 
   (r'^desktop/api2/doc/export/?$', 'export_documents'),
   (r'^desktop/api2/doc/import/?$', 'import_documents'),
+
+  (r'^desktop/api/search/entities/?$', 'search_entities'),
+  (r'^desktop/api/search/entities_interactive/?$', 'search_entities_interactive'),
+)
+
+dynamic_patterns += patterns('notebook.views',
+  (r'^editor', 'editor'),
 )
 
 # Default Configurations
@@ -136,6 +172,12 @@ dynamic_patterns += patterns('desktop.configuration.api',
 
 dynamic_patterns += patterns('useradmin.views',
   (r'^desktop/api/users/autocomplete', 'list_for_autocomplete'),
+  (r'^desktop/api/users/?$', 'get_users_by_id'),
+)
+
+dynamic_patterns += patterns('desktop.lib.vcs.api',
+  (r'^desktop/api/vcs/contents/?$', 'contents'),
+  (r'^desktop/api/vcs/authorize/?$', 'authorize'),
 )
 
 # Metrics specific

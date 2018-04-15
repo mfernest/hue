@@ -21,7 +21,7 @@
 
 <%namespace name="comps" file="jobbrowser_components.mako" />
 
-${ commonheader(_('Task View: Job: %(jobId)s') % dict(jobId=job.jobId_short), "jobbrowser", user) | n,unicode }
+${ commonheader(_('Task View: Job: %(jobId)s') % dict(jobId=job.jobId_short), "jobbrowser", user, request) | n,unicode }
 ${ comps.menubar() }
 
 <%def name="selected(val, state)">
@@ -109,7 +109,7 @@ ${ comps.menubar() }
 
 <script src="${ static('desktop/ext/js/datatables-paging-0.1.js') }" type="text/javascript" charset="utf-8"></script>
 
-<script type="text/javascript" charset="utf-8">
+<script type="text/javascript">
     $(document).ready(function(){
         $("#all_tasks").dataTable({
             "sPaginationType":"bootstrap",

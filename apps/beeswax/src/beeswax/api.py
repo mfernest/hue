@@ -33,7 +33,7 @@ from desktop.lib.exceptions_renderable import PopupException
 from desktop.lib.i18n import force_unicode
 from desktop.lib.parameterization import substitute_variables
 from metastore import parser
-from notebook.models import escape_rows
+from notebook.models import escape_rows, MockedDjangoRequest, make_notebook
 
 import beeswax.models
 
@@ -43,10 +43,13 @@ from beeswax.conf import USE_GET_LOG_API
 from beeswax.forms import QueryForm
 from beeswax.models import Session, QueryHistory
 from beeswax.server import dbms
-from beeswax.server.dbms import expand_exception, get_query_server_config, QueryServerException, QueryServerTimeoutException
+from beeswax.server.dbms import expand_exception, get_query_server_config, QueryServerException, QueryServerTimeoutException,\
+  SubQueryTable
 from beeswax.views import authorized_get_design, authorized_get_query_history, make_parameterization_form,\
                           safe_get_design, save_design, massage_columns_for_json, _get_query_handle_and_state, \
-                          _parse_out_hadoop_jobs
+                          parse_out_jobs
+from metastore.conf import FORCE_HS2_METADATA
+from metastore.views import _get_db
 
 
 LOG = logging.getLogger(__name__)
@@ -87,18 +90,19 @@ def error_handler(view_fn):
 
 @error_handler
 def autocomplete(request, database=None, table=None, column=None, nested=None):
-  app_name = get_app_name(request)
-  query_server = get_query_server_config(app_name)
+  app_name = None if FORCE_HS2_METADATA.get() else get_app_name(request)
+
   do_as = request.user
   if (request.user.is_superuser or request.user.has_hue_permission(action="impersonate", app="security")) and 'doas' in request.GET:
     do_as = User.objects.get(username=request.GET.get('doas'))
-  db = dbms.get(do_as, query_server)
+
+  db = _get_db(user=do_as, source_type=app_name)
 
   response = _autocomplete(db, database, table, column, nested)
   return JsonResponse(response)
 
 
-def _autocomplete(db, database=None, table=None, column=None, nested=None):
+def _autocomplete(db, database=None, table=None, column=None, nested=None, query=None):
   response = {}
 
   try:
@@ -108,11 +112,33 @@ def _autocomplete(db, database=None, table=None, column=None, nested=None):
       tables_meta = db.get_tables_meta(database=database)
       response['tables_meta'] = tables_meta
     elif column is None:
-      t = db.get_table(database, table)
-      response['hdfs_link'] = t.hdfs_link
-      response['columns'] = [column.name for column in t.cols]
-      response['extended_columns'] = massage_columns_for_json(t.cols)
-      response['partition_keys'] = [{'name': part.name, 'type': part.type} for part in t.partition_keys]
+      if query is not None:
+        table = SubQueryTable(db, query)
+      else:
+        table = db.get_table(database, table)
+      response['hdfs_link'] = table.hdfs_link
+      response['comment'] = table.comment
+
+      cols_extended = massage_columns_for_json(table.cols)
+
+      if 'org.apache.kudu.mapreduce.KuduTableOutputFormat' in str(table.properties): # When queries from Impala directly
+        table.is_impala_only = True
+
+      if table.is_impala_only: # Expand Kudu columns information
+        query_server = get_query_server_config('impala')
+        db = dbms.get(db.client.user, query_server)
+
+        col_options = db.get_table_describe(database, table.name)
+        extra_col_options = dict([(col[0], dict(zip(col_options.cols(), col))) for col in col_options.rows()])
+
+        for col_props in cols_extended:
+          col_props.update(extra_col_options.get(col_props['name'], {}))
+
+      response['support_updates'] = table.is_impala_only
+      response['columns'] = [column.name for column in table.cols]
+      response['extended_columns'] = cols_extended
+      response['is_view'] = table.is_view
+      response['partition_keys'] = [{'name': part.name, 'type': part.type} for part in table.partition_keys]
     else:
       col = db.get_column(database, table, column)
       if col:
@@ -122,11 +148,9 @@ def _autocomplete(db, database=None, table=None, column=None, nested=None):
         response = parse_tree
         # If column or nested type is scalar/primitive, add sample of values
         if parser.is_scalar_type(parse_tree['type']):
-          table_obj = db.get_table(database, table)
-          sample = db.get_sample(database, table_obj, column, nested)
-          if sample:
-            sample = set([row[0] for row in sample.rows()])
-            response['sample'] = sorted(list(sample))
+          sample = _get_sample_data(db, database, table, column)
+          if 'rows' in sample:
+            response['sample'] = sample['rows']
       else:
         raise Exception('Could not find column `%s`.`%s`.`%s`' % (database, table, column))
   except (QueryServerTimeoutException, TTransportException), e:
@@ -216,7 +240,7 @@ def watch_query_refresh_json(request, id):
   except Exception, ex:
     log = str(ex)
 
-  jobs = _parse_out_hadoop_jobs(log)
+  jobs = parse_out_jobs(log)
   job_urls = massage_job_urls_for_json(jobs)
 
   result = {
@@ -632,20 +656,36 @@ def get_sample_data(request, database, table, column=None):
   return JsonResponse(response)
 
 
-def _get_sample_data(db, database, table, column):
+def _get_sample_data(db, database, table, column, async=False):
   table_obj = db.get_table(database, table)
-  sample_data = db.get_sample(database, table_obj, column)
+  if table_obj.is_impala_only and db.client.query_server['server_name'] != 'impala':
+    query_server = get_query_server_config('impala')
+    db = dbms.get(db.client.user, query_server)
+
+  sample_data = db.get_sample(database, table_obj, column, generate_sql_only=async)
   response = {'status': -1}
 
   if sample_data:
-    sample = escape_rows(sample_data.rows(), nulls_only=True)
-    if column:
-      sample = set([row[0] for row in sample])
-      sample = [[item] for item in sorted(list(sample))]
-
     response['status'] = 0
-    response['headers'] = sample_data.cols()
-    response['rows'] = sample
+    if async:
+      notebook = make_notebook(
+          name=_('Table sample for `%(database)s`.`%(table)s`.`%(column)s`') % {'database': database, 'table': table, 'column': column},
+          editor_type=db.server_name,
+          statement=sample_data,
+          status='ready-execute',
+          skip_historify=True,
+          is_task=False
+      )
+      response['result'] = notebook.execute(request=MockedDjangoRequest(user=db.client.user), batch=False)
+    else:
+      sample = escape_rows(sample_data.rows(), nulls_only=True)
+      if column:
+        sample = set([row[0] for row in sample])
+        sample = [[item] for item in sorted(list(sample))]
+
+      response['headers'] = sample_data.cols()
+      response['full_headers'] = sample_data.full_cols()
+      response['rows'] = sample
   else:
     response['message'] = _('Failed to get sample data.')
 
@@ -709,6 +749,11 @@ def analyze_table(request, database, table, columns=None):
   query_server = get_query_server_config(app_name)
   db = dbms.get(request.user, query_server)
 
+  table_obj = db.get_table(database, table)
+  if table_obj.is_impala_only and app_name != 'impala':
+    query_server = get_query_server_config('impala')
+    db = dbms.get(request.user, query_server)
+
   response = {'status': -1, 'message': '', 'redirect': ''}
 
   if request.method == "POST":
@@ -738,6 +783,7 @@ def get_table_stats(request, database, table, column=None):
   else:
     table = db.get_table(database, table)
     stats = table.stats
+    response['columns'] = [column.name for column in table.cols]
 
   response['stats'] = stats
   response['status'] = 0

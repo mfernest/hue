@@ -21,45 +21,97 @@ import json
 from django.utils.translation import ugettext as _
 
 from desktop.lib.django_util import JsonResponse, render
+from desktop.lib.exceptions_renderable import PopupException
+from desktop.models import get_cluster_config
 
-from indexer.controller2 import IndexController
-from indexer.management.commands import indexer_setup
+from indexer.solr_client import SolrClient
 from indexer.fields import FIELD_TYPES, Field
-from indexer.operations import OPERATORS
-from indexer.file_format import get_format_types
+from indexer.file_format import get_file_indexable_format_types
+from indexer.management.commands import indexer_setup
+from indexer.indexers.morphline_operations import OPERATORS
+
 
 LOG = logging.getLogger(__name__)
 
 
 def collections(request, is_redirect=False):
-  return render('collections.mako', request, {})
+  if not request.user.has_hue_permission(action="access", app='search'):
+    raise PopupException(_('Missing permission.'), error_code=403)
 
-
-def indexes(request):
-  searcher = IndexController(request.user)
-  indexes = searcher.get_indexes()
-
-  for index in indexes:
-    index['isSelected'] = False
-
-  return render('indexes.mako', request, {
-      'indexes_json': json.dumps(indexes)
+  return render('collections.mako', request, {
+    'is_embeddable': request.GET.get('is_embeddable', False),
   })
 
+
+def indexes(request, index=''):
+  if not request.user.has_hue_permission(action="access", app='search'):
+    raise PopupException(_('Missing permission.'), error_code=403)
+
+  return render('indexes.mako', request, {
+    'is_embeddable': request.GET.get('is_embeddable', False),
+    'index': index
+  })
+
+
 def indexer(request):
-  searcher = IndexController(request.user)
+  if not request.user.has_hue_permission(action="access", app='search'):
+    raise PopupException(_('Missing permission.'), error_code=403)
+
+  searcher = SolrClient(request.user)
   indexes = searcher.get_indexes()
 
   for index in indexes:
     index['isSelected'] = False
 
   return render('indexer.mako', request, {
+      'is_embeddable': request.GET.get('is_embeddable', False),
       'indexes_json': json.dumps(indexes),
       'fields_json' : json.dumps([field.name for field in FIELD_TYPES]),
       'operators_json' : json.dumps([operator.to_dict() for operator in OPERATORS]),
-      'file_types_json' : json.dumps([format_.format_info() for format_ in get_format_types()]),
+      'file_types_json' : json.dumps([format_.format_info() for format_ in get_file_indexable_format_types()]),
       'default_field_type' : json.dumps(Field().to_dict())
   })
+
+
+HIVE_PRIMITIVE_TYPES = \
+    ("string", "tinyint", "smallint", "int", "bigint", "boolean",
+      "float", "double", "decimal", "timestamp", "date", "char", "varchar")
+HIVE_TYPES = HIVE_PRIMITIVE_TYPES + ("array", "map", "struct")
+
+
+def importer(request):
+  prefill = {
+    'source_type': '',
+    'target_type': '',
+    'target_path': ''
+  }
+
+  return _importer(request, prefill)
+
+
+def importer_prefill(request, source_type, target_type, target_path=None):
+  prefill = {
+    'source_type': source_type,
+    'target_type': target_type,
+    'target_path': target_path or ''
+  }
+
+  return _importer(request, prefill)
+
+
+def _importer(request, prefill):
+  source_type = request.GET.get('sourceType') or get_cluster_config(request.user)['default_sql_interpreter']
+
+  return render('importer.mako', request, {
+      'is_embeddable': request.GET.get('is_embeddable', False),
+      'fields_json': json.dumps({'solr': [field.name for field in FIELD_TYPES], 'hive': HIVE_TYPES, 'hivePrimitive': HIVE_PRIMITIVE_TYPES}),
+      'operators_json': json.dumps([operator.to_dict() for operator in OPERATORS]),
+      'file_types_json': json.dumps([format_.format_info() for format_ in get_file_indexable_format_types()]),
+      'default_field_type': json.dumps(Field().to_dict()),
+      'prefill': json.dumps(prefill),
+      'source_type': source_type
+  })
+
 
 def install_examples(request, is_redirect=False):
   result = {'status': -1, 'message': ''}
@@ -68,7 +120,8 @@ def install_examples(request, is_redirect=False):
     result['message'] = _('A POST request is required.')
   else:
     try:
-      indexer_setup.Command().handle_noargs()
+      data = request.POST['data']
+      indexer_setup.Command().handle(data=data)
       result['status'] = 0
     except Exception, e:
       LOG.exception(e)

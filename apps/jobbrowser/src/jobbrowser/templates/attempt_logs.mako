@@ -19,7 +19,7 @@
 %>
 <%namespace name="comps" file="jobbrowser_components.mako" />
 
-${ commonheader(_('Task Attempt: %(attemptId)s') % dict(attemptId=attempt.attemptId_short), "jobbrowser", user) | n,unicode }
+${ commonheader(_('Task Attempt: %(attemptId)s') % dict(attemptId=attempt.attemptId_short), "jobbrowser", user, request) | n,unicode }
 ${ comps.menubar() }
 
 <div class="container-fluid">
@@ -28,12 +28,12 @@ ${ comps.menubar() }
       <div class="sidebar-nav" style="padding-top: 0">
         <ul class="nav nav-list">
           <li class="nav-header">${_('Attempt ID')}</li>
-          <li class="white truncate" title="${attempt.attemptId_short}">${attempt.attemptId_short}</li>
+          <li class="white truncate-texts" title="${attempt.attemptId_short}">${attempt.attemptId_short}</li>
           <li class="nav-header">${_('Task')}</li>
-          <li><a href="${url('jobbrowser.views.single_task', job=joblnk.jobId, taskid=taskid)}" class="truncate" title="${task.taskId_short}">${task.taskId_short}</a>
+          <li><a href="${url('jobbrowser.views.single_task', job=joblnk.jobId, taskid=taskid)}" class="truncate-text" title="${task.taskId_short}">${task.taskId_short}</a>
           </li>
           <li class="nav-header">${_('Job')}</li>
-          <li><a href="${url('jobbrowser.views.single_job', job=joblnk.jobId)}" class="truncate" title="${joblnk.jobId_short}">${joblnk.jobId_short}</a></li>
+          <li><a href="${url('jobbrowser.views.single_job', job=joblnk.jobId)}" class="truncate-text" title="${joblnk.jobId_short}">${joblnk.jobId_short}</a></li>
           <li class="nav-header">${_('Status')}</li>
           <li class="white">
               <%
@@ -124,7 +124,7 @@ ${ comps.menubar() }
 
 <script src="${ static('jobbrowser/js/utils.js') }" type="text/javascript" charset="utf-8"></script>
 
-<script type="text/javascript" charset="utf-8">
+<script type="text/javascript">
   $(document).ready(function () {
     enableResizeLogs();
 

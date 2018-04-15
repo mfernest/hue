@@ -14,18 +14,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-(function (factory) {
-  if(typeof require === "function") {
-    require(['knockout'], factory);
-  } else {
-    factory(ko);
-  }
-}(function (ko) {
+(function () {
 
   ko.HUE_CHARTS = {
     TYPES: {
+      COUNTER: "counter",
       LINECHART: "lines",
       BARCHART: "bars",
+      TIMELINECHART: "timeline",
+      TEXTSELECT: "textselect",
       POINTCHART: "points",
       PIECHART: "pie",
       MAP: "map",
@@ -39,6 +36,9 @@
       window.setTimeout(function(){
         var _options = valueAccessor();
         var _data = _options.transformer(_options.data);
+        _data = _data.filter(function (val) {
+          return val.value >= 0;
+        });
         $(element).css("marginLeft", "auto");
         $(element).css("marginRight", "auto");
         if (typeof _options.maxWidth != "undefined") {
@@ -70,7 +70,7 @@
                   return '<h3>' + hueUtils.htmlEncode(key) + '</h3><p>' + y + '</p>'
                 });
 
-            var _d3 = ($(element).find("svg").length > 0) ? d3.select($(element).find("svg")[0]) : d3.select($(element)[0]).append("svg");
+            var _d3 = ($(element).find("svg").length > 0) ? d3v3.select($(element).find("svg")[0]) : d3v3.select($(element)[0]).append("svg");
 
             _d3.datum(_data)
                 .transition().duration(150)
@@ -114,7 +114,7 @@
 
             return _chart;
           }, function () {
-            var _d3 = ($(element).find("svg").length > 0) ? d3.select($(element).find("svg")[0]) : d3.select($(element)[0]).append("svg");
+            var _d3 = ($(element).find("svg").length > 0) ? d3v3.select($(element).find("svg")[0]) : d3v3.select($(element)[0]).append("svg");
             _d3.selectAll(".nv-slice").on("click",
                 function (d, i) {
                   if (typeof _options.onClick != "undefined") {
@@ -129,9 +129,12 @@
     update: function (element, valueAccessor) {
       var _options = valueAccessor();
       var _data = _options.transformer(_options.data);
+      _data = _data.filter(function (val) {
+        return val.value >= 0;
+      });
       var _chart = $(element).data("chart");
       if (_chart) {
-        var _d3 = d3.select($(element).find("svg")[0]);
+        var _d3 = d3v3.select($(element).find("svg")[0]);
         _d3.datum(_data)
               .transition().duration(150)
               .each("end", _options.onComplete != null ? _options.onComplete : void(0))
@@ -156,12 +159,38 @@
 
   ko.bindingHandlers.barChart = {
     init: function (element, valueAccessor) {
-      window.setTimeout(function () {
-        barChartBuilder(element, valueAccessor(), false);
-      }, 0);
+      var _options = ko.unwrap(valueAccessor());
+      if (_options.type && _options.type() == "line"){
+        window.setTimeout(function(){
+          lineChartBuilder(element, valueAccessor(), false);
+        }, 0);
+        $(element).data("type", "line");
+      }
+      else {
+        window.setTimeout(function(){
+          barChartBuilder(element, valueAccessor(), false);
+        }, 0);
+        $(element).data("type", "bar");
+      }
     },
     update: function (element, valueAccessor) {
-      var _options = valueAccessor();
+      var _options = ko.unwrap(valueAccessor());
+      if (_options.type && _options.type() != $(element).data("type")){
+        if ($(element).find("svg").length > 0) {
+          $(element).find("svg").remove();
+        }
+        if (_options.type() == "line"){
+          window.setTimeout(function(){
+            lineChartBuilder(element, valueAccessor(), false);
+          }, 0);
+        }
+        else {
+          window.setTimeout(function(){
+            barChartBuilder(element, valueAccessor(), false);
+          }, 0);
+        }
+        $(element).data("type", _options.type());
+      }
       var _datum = _options.transformer(_options.datum);
       var _chart = $(element).data("chart");
 
@@ -180,13 +209,14 @@
           }
         }
 
-        if ((_isDiscrete && $(element).data('chart_type') !== 'discrete_bar') || (!_isDiscrete && $(element).data('chart_type') === 'discrete_bar')){
+        var _isPivot = _options.isPivot != null ? _options.isPivot : false;
+
+        if ((_isDiscrete && $(element).data('chart_type') !== 'discrete_bar') || (!_isDiscrete && $(element).data('chart_type') === 'discrete_bar') || (_isPivot && !$(element).data('chart_pivot')) || (!_isPivot && $(element).data('chart_pivot'))){
           ko.bindingHandlers.barChart.init(element, valueAccessor);
         }
         else {
-
           window.setTimeout(function () {
-          var _d3 = d3.select($(element).find("svg")[0]);
+          var _d3 = d3v3.select($(element).find("svg")[0]);
           _d3.datum(_datum)
             .transition().duration(150)
             .each("end", function () {
@@ -275,7 +305,20 @@
       var _chart = $(element).data("chart");
       if (_chart) {
         window.setTimeout(function () {
-          var _d3 = d3.select($(element).find("svg")[0]);
+          if (_chart.multibar) {
+            _chart.multibar.stacked(typeof _options.stacked != "undefined" ? _options.stacked : false);
+          }
+          var enableSelection = true;
+          if (typeof _options.enableSelection !== 'undefined') {
+            enableSelection = _options.enableSelection;
+          }
+          if (_datum.length > 0 && _datum[0].values.length > 10 && enableSelection) {
+            _chart.enableSelection();
+          }
+          else {
+            _chart.disableSelection();
+          }
+          var _d3 = d3v3.select($(element).find("svg")[0]);
           _d3.datum(_datum)
             .transition().duration(150)
             .each("end", function () {
@@ -286,7 +329,6 @@
           _d3.selectAll("g.nv-x.nv-axis g text").each(function (d) {
             insertLinebreaks(d, this);
           });
-          _d3.selectAll(".nv-brush").call(_chart.brush().clear());
           if (_chart.selectBars) {
             var _field = (typeof _options.field == "function") ? _options.field() : _options.field;
             $.each(_options.fqs(), function (cnt, item) {
@@ -310,6 +352,9 @@
           chartsNormalState();
         }, 0);
       }
+      else if (_datum.length > 0) {
+        ko.bindingHandlers.timelineChart.init(element, valueAccessor);
+      }
     }
   };
 
@@ -325,9 +370,9 @@
       var _chart = $(element).data("chart");
       if (_chart) {
         window.setTimeout(function () {
-          var _d3 = d3.select($(element).find("svg")[0]);
+          var _d3 = d3v3.select($(element).find("svg")[0]);
           if (_datum.length > 0 && _datum[0].values.length > 0 && typeof _datum[0].values[0].x.isValid === 'function'){
-            _chart.xAxis.tickFormat(function(d) { return d3.time.format("%Y-%m-%d %H:%M:%S")(new Date(d)); })
+            _chart.xAxis.tickFormat(function(d) { return d3v3.time.format("%Y-%m-%d %H:%M:%S")(new Date(d)); })
             _chart.onChartUpdate(function () {
               _d3.selectAll("g.nv-x.nv-axis g text").each(function (d){
                 insertLinebreaks(d, this);
@@ -350,185 +395,6 @@
     }
   };
 
-  ko.bindingHandlers.leafletMapChart = {
-    update: function (element, valueAccessor) {
-      var _options = valueAccessor();
-      var _data = _options.transformer(valueAccessor().datum);
-
-      function toggleVisibility() {
-        if (((_options.visible != null && _options.visible) || _options.visible == null || typeof _options == "undefined")) {
-          $(element).show();
-          $(element).siblings(".leaflet-nodata").remove();
-        }
-        else {
-          $(element).hide();
-          if ((_options.visible != null && _options.visible) && !_options.isLoading) {
-            $(element).siblings(".leaflet-nodata").remove();
-            $(element).before($("<div>").addClass("leaflet-nodata").css({ "textAlign": "center", "fontSize": "18px", "fontWeight": 700, "marginTop": "20px"}).text("No Data Available."));
-          }
-        }
-      }
-
-      if ($(element).data("mapData") == null || $(element).data("mapData") != ko.toJSON(_data) || _options.forceRedraw) {
-
-        $(element).data("mapData", ko.toJSON(_data));
-
-        var _hasAtLeastOneLat = false;
-        _data.forEach(function (item) {
-          if (item.lat != null && $.isNumeric(item.lat)) {
-            _hasAtLeastOneLat = true;
-          }
-        });
-        var _hasAtLeastOneLng = false;
-        _data.forEach(function (item) {
-          if (item.lng != null && $.isNumeric(item.lng)) {
-            _hasAtLeastOneLng = true;
-          }
-        });
-
-        if (_options.height != null) {
-          $(element).height(_options.height * 1);
-        }
-        else {
-          if ($(element).parents(".tab-pane").length > 0) {
-            $(element).height($(element).parents(".tab-pane").height() - 100);
-          }
-          else {
-            $(element).height(300);
-          }
-        }
-
-        toggleVisibility();
-
-        var _map = null;
-        if (element._map != null) {
-          _map = element._map;
-          _map.removeLayer(element._markerLayer);
-        }
-
-        var _clusterGroup = L.markerClusterGroup({
-          maxClusterRadius: 10,
-          polygonOptions: {
-            weight: 1.5
-          }
-        });
-
-        if (_hasAtLeastOneLat && _hasAtLeastOneLng) {
-          try {
-            if (_map == null) {
-              _map = L.map(element);
-              var tileLayerOptions = {
-                layer: 'http://{s}.tile.osm.org/{z}/{x}/{y}.png',
-                attribution: '&copy; <a href="http://osm.org/copyright">OpenStreetMap</a> contributors'
-              }
-              if (LeafletGlobals) {
-                tileLayerOptions = LeafletGlobals;
-              }
-              L.tileLayer(tileLayerOptions.layer, {
-                attribution: $(element).width() > 300 ? tileLayerOptions.attribution : ''
-              }).addTo(_map);
-
-              if (L.control.zoomBox) {
-                var _zoomBox = L.control.zoomBox({
-                  modal: true
-                });
-                _map.addControl(_zoomBox);
-              }
-
-              if (_options.showMoveCheckbox) {
-                var _command = L.control({
-                  position: $(element).width() > 300 ? "topright" : "bottomleft"
-                });
-
-                _command.onAdd = function (map) {
-                  var div = L.DomUtil.create("div", "leaflet-search-command leaflet-bar");
-                  div.innerHTML = '<label class="checkbox" style="font-size: 11px"><input id="command' + $(element).parents(".card-widget").attr("id") + '" type="checkbox"/> ' + (_options.moveCheckboxLabel ? _options.moveCheckboxLabel : 'Search as I move the map') + '</label>';
-                  return div;
-                };
-
-                _command.addTo(_map);
-
-                if (_options.onRegionChange == null) {
-                  _options.onRegionChange = function () {
-                  };
-                }
-
-                var _onRegionChange = function () {
-                };
-
-                $("#command" + $(element).parents(".card-widget").attr("id")).on("change", function () {
-                  if ($(this).is(":checked")) {
-                    if (_options.onRegionChange != null) {
-                      _onRegionChange = _options.onRegionChange;
-                    }
-                  }
-                  else {
-                    _onRegionChange = function () {
-                    };
-                  }
-                });
-
-                _map.on("boxzoomend", function (e) {
-                  _onRegionChange(e.boxZoomBounds);
-                });
-                _map.on("dragend", function () {
-                  _onRegionChange(_map.getBounds());
-                });
-                _map.on("zoomend", function () {
-                  _onRegionChange(_map.getBounds());
-                });
-              }
-
-            }
-            _data.forEach(function (item) {
-              if (item && item.lng != null && item.lat != null) {
-                var _addMarker = false;
-                try {
-                  var _latLngObj = L.latLng(item.lat, item.lng);
-                  _addMarker = true;
-                }
-                catch (e) {
-                  if (typeof console != "undefined") {
-                    console.error(e);
-                  }
-                }
-                if (_addMarker) {
-                  var _marker = L.marker([item.lat, item.lng]);
-                  if (item.label != null) {
-                    _marker.bindPopup($.isArray(item.label) ? item.label.join("") : item.label);
-                  }
-                  _clusterGroup.addLayer(_marker);
-                }
-              }
-            });
-
-            window.setTimeout(function(){
-              _map.addLayer(_clusterGroup);
-              if (! $("#command" + $(element).parents(".card-widget").attr("id")).is(":checked")) {
-                _map.fitBounds(_clusterGroup.getBounds());
-              }
-              if (_options.onComplete != null) {
-                _options.onComplete();
-              }
-            }, 0);
-
-          }
-          catch (err) {
-            $.jHueNotify.error(err.message);
-          }
-        }
-        element._map = _map;
-        element._markerLayer = _clusterGroup;
-        if (_options.onComplete != null) {
-          _options.onComplete();
-        }
-      }
-      else {
-        toggleVisibility();
-      }
-    }
-  };
-
   ko.bindingHandlers.mapChart = {
     render: function (element, valueAccessor) {
 
@@ -543,6 +409,9 @@
       if (typeof _options.maxWidth != "undefined") {
         var _max = _options.maxWidth * 1;
         $(element).width(Math.min($(element).parent().width(), _max));
+      }
+      else {
+        $(element).width($(element).parent().width() - 10);
       }
 
       $(element).height($(element).width() / 2.23);
@@ -646,10 +515,13 @@
 
         $(_data).each(function (cnt, item) {
           addToLegend(getHighestCategoryValue(cnt, item));
-          var _place = typeof item.label == "String" ? item.label.toUpperCase() : item.label;
+          var _place = typeof item.label == "string" ? item.label.toUpperCase() : item.label;
           if (_place != null) {
             if (_scope != "world" && _scope != "usa" && _scope != "europe" && _place.indexOf(".") == -1) {
               _place = HueGeo.getISOAlpha2(_scope) + "." + _place;
+            }
+            if ((_scope == "world" || _scope == "europe") && _place.length == 2) {
+              _place = HueGeo.getISOAlpha3(_place);
             }
             _mapdata[_place] = {
               fillKey: "fill_" + (_is2d ? getHighestCategoryValue(cnt, item).idx : (Math.ceil(item.value / _chunk) - 1)),
@@ -675,6 +547,9 @@
           if (_place != null) {
             if (_scope != "world" && _scope != "usa" && _scope != "europe" && _place.indexOf(".") == -1) {
               _place = HueGeo.getISOAlpha2(_scope) + "." + _place;
+            }
+            if ((_scope == "world" || _scope == "europe") && _place.length == 2) {
+              _place = HueGeo.getISOAlpha3(_place);
             }
             _mapdata[_place] = {
               fillKey: "selected",
@@ -772,6 +647,15 @@
       $(element).parents(_parentSelector).one("resize", function () {
         ko.bindingHandlers.mapChart.render(element, valueAccessor);
       });
+
+      var _resizeTimeout = -1;
+      nv.utils.windowResize(function () {
+        window.clearTimeout(_resizeTimeout);
+        _resizeTimeout = window.setTimeout(function () {
+          ko.bindingHandlers.mapChart.render(element, valueAccessor);
+        }, 200);
+      });
+
       chartsNormalState();
     },
     init: function (element, valueAccessor) {
@@ -812,17 +696,18 @@
           nv.addGraph(function () {
             var _chart = nv.models.scatterChart()
                 .transitionDuration(350)
-                .color(d3.scale.category10().range());
+                .color(d3v3.scale.category10().range())
+                .useVoronoi(false);
 
             _chart.tooltipContent(function (key, x, y, obj) {
               return '<h3>' + key + '</h3><div class="center">' + obj.point.size + '</div>';
             });
 
-            _chart.xAxis.tickFormat(d3.format('.02f'));
-            _chart.yAxis.tickFormat(d3.format('.02f'));
+            _chart.xAxis.tickFormat(d3v3.format('.02f'));
+            _chart.yAxis.tickFormat(d3v3.format('.02f'));
             _chart.scatter.onlyCircles(true);
 
-            var _d3 = ($(element).find("svg").length > 0) ? d3.select($(element).find("svg")[0]) : d3.select($(element)[0]).append("svg");
+            var _d3 = ($(element).find("svg").length > 0) ? d3v3.select($(element).find("svg")[0]) : d3v3.select($(element)[0]).append("svg");
             _d3.datum(_datum)
                 .transition().duration(150)
                 .each("end", options.onComplete != null ? options.onComplete : void(0))
@@ -848,7 +733,7 @@
   };
 
   var insertLinebreaks = function (d, ref) {
-    var _el = d3.select(ref);
+    var _el = d3v3.select(ref);
     var _mom = moment(d);
     if (_mom != null && _mom.isValid()) {
       var _words = _mom.format("HH:mm:ss YYYY-MM-DD").split(" ");
@@ -873,6 +758,8 @@
       $(element).find("svg").empty();
     }
 
+    var _hideSelection = options.hideSelection != null ? options.hideSelection : false;
+
     if ($(element).is(":visible")) {
       nv.addGraph(function () {
         var _chart = nv.models.lineWithBrushChart();
@@ -885,6 +772,9 @@
         if (_datum.length > 0 && _datum[0].values.length > 10 && enableSelection) {
           _chart.enableSelection();
         }
+        if (_hideSelection) {
+          _chart.hideSelection();
+        }
         if (options.showControls != null) {
           _chart.showControls(false);
         }
@@ -894,7 +784,7 @@
         });
         _chart.xAxis.showMaxMin(false);
         if (isTimeline){
-          _chart.xAxis.tickFormat(function(d) { return d3.time.format("%Y-%m-%d %H:%M:%S")(new Date(d)); })
+          _chart.xAxis.tickFormat(function(d) { return d3v3.time.format("%Y-%m-%d %H:%M:%S")(new Date(d)); })
           _chart.onChartUpdate(function () {
             _d3.selectAll("g.nv-x.nv-axis g text").each(function (d){
               insertLinebreaks(d, this);
@@ -903,9 +793,9 @@
         }
 
         _chart.yAxis
-            .tickFormat(d3.format(",0f"));
+            .tickFormat(d3v3.format(",0f"));
 
-        var _d3 = ($(element).find("svg").length > 0) ? d3.select($(element).find("svg")[0]) : d3.select($(element)[0]).append("svg");
+        var _d3 = ($(element).find("svg").length > 0) ? d3v3.select($(element).find("svg")[0]) : d3v3.select($(element)[0]).insert("svg", ":first-child");
         _d3.datum(_datum)
             .transition().duration(150)
             .each("end", function () {
@@ -933,7 +823,15 @@
 
         return _chart;
       }, function () {
-        var _d3 = ($(element).find("svg").length > 0) ? d3.select($(element).find("svg")[0]) : d3.select($(element)[0]).append("svg");
+        if ($(element).find("svg").length > 0) {
+          _d3 = d3v3.select($(element).find("svg")[0]);
+          if ($(element).find("svg").length < 2) {
+            addLegend(element);
+          }
+        } else {
+          _d3 = d3v3.select($(element)[0]).append("svg");
+          addLegend(element);
+        }
         _d3.selectAll(".nv-line").on("click",
             function (d, i) {
               if (typeof options.onClick != "undefined") {
@@ -945,6 +843,18 @@
     }
   }
 
+  function addLegend(element) {
+    d3v3.select($(element)[0])
+      .append("div")
+        .style("position", "absolute")
+        .style("overflow", "auto")
+        .style("top", "0px")
+        .style("right", "0px")
+        .style("width", "175px")
+        .style("height", "100%")
+      .append("svg");
+  }
+
   function barChartBuilder(element, options, isTimeline) {
     var _datum = options.transformer(options.datum);
     $(element).height(300);
@@ -953,142 +863,170 @@
     var _hideSelection = options.hideSelection != null ? options.hideSelection : false;
 
     if ($(element).find("svg").length > 0 && (_datum.length == 0 || _datum[0].values.length == 0)) {
-      $(element).find("svg").empty();
+      $(element).find("svg").remove();
     }
 
     if (_datum.length > 0 && _datum[0].values.length > 0 && isNaN(_datum[0].values[0].y)) {
       _datum = [];
-      $(element).find("svg").empty();
+      $(element).find("svg").remove();
     }
 
-    if ($(element).is(":visible")) {
-      nv.addGraph(function () {
-        var _chart;
-        if (isTimeline) {
-          if ($(element).find("svg").length > 0 && $(element).find(".nv-discreteBarWithAxes").length > 0) {
-            $(element).find("svg").empty();
+    nv.addGraph(function () {
+      var _chart;
+      if (isTimeline) {
+        if ($(element).find("svg").length > 0 && $(element).find(".nv-discreteBarWithAxes").length > 0) {
+          $(element).find("svg").empty();
+        }
+        _chart = nv.models.multiBarWithBrushChart();
+        if (_datum.length > 0) $(element).data('chart_type', 'multibar_brush');
+        var enableSelection = true;
+        if (typeof options.enableSelection !== 'undefined') {
+          enableSelection = options.enableSelection;
+        }
+        if (_datum.length > 0 && _datum[0].values.length > 10 && enableSelection) {
+          _chart.enableSelection();
+        }
+        else {
+          _chart.disableSelection();
+        }
+        if (_hideSelection) {
+          _chart.hideSelection();
+        }
+        _chart.onSelectRange(function (from, to) {
+          chartsUpdatingState();
+          options.onSelectRange(from, to);
+        });
+        _chart.staggerLabels(false);
+        _chart.xAxis.tickFormat(d3v3.time.format("%Y-%m-%d %H:%M:%S"));
+        _chart.multibar.hideable(true);
+        _chart.multibar.stacked(typeof options.stacked != "undefined" ? options.stacked : false);
+        _chart.onStateChange(options.onStateChange);
+        _chart.onChartUpdate(function () {
+          _d3.selectAll("g.nv-x.nv-axis g text").each(function (d) {
+            insertLinebreaks(d, this);
+          });
+        });
+      }
+      else {
+        var _isDiscrete = false;
+        for (var j = 0; j < _datum.length; j++) {
+          for (var i = 0; i < _datum[j].values.length; i++) {
+            if (isNaN(_datum[j].values[i].x * 1)) {
+              _isDiscrete = true;
+              break;
+            }
           }
+        }
+        if (_isDiscrete && !_isPivot) {
+          if ($(element).find("svg").length > 0 && $(element).find(".nv-multiBarWithLegend").length > 0) {
+            $(element).find("svg").remove();
+          }
+          if (_datum.length > 0) $(element).data('chart_type', 'discrete_bar');
+          $(element).data('chart_pivot', false);
+          _chart = nv.models.growingDiscreteBarChart()
+            .x(function (d) {
+              return d.x
+            })
+            .y(function (d) {
+              return d.y
+            })
+            .staggerLabels(true)
+            .tooltipContent(function (key, x, y) {
+              return '<h3>' + key + '</h3><p>' + y + ' on ' + hueUtils.htmlEncode(x) + '</p>'
+            });
+        }
+        else if (_isDiscrete && _isPivot) {
+          if ($(element).find("svg").length > 0 && $(element).find(".nv-discreteBarWithAxes").length > 0) {
+            $(element).find("svg").remove();
+          }
+          if (_datum.length > 0) $(element).data('chart_type', 'discrete_bar');
+          $(element).data('chart_pivot', true);
+          _chart = nv.models.growingMultiBarChart()
+            .x(function (d) {
+              return d.x
+            })
+            .y(function (d) {
+              return d.y
+            })
+            .tooltipContent(function (key, x, y) {
+              return '<h3>' + key + '</h3><p>' + y + ' on ' + hueUtils.htmlEncode(x) + '</p>'
+            });
+        }
+        else {
+          if ($(element).find("svg").length > 0 && $(element).find(".nv-discreteBarWithAxes").length > 0) {
+            $(element).find("svg").remove();
+          }
+          if (_datum.length > 0) $(element).data('chart_type', 'multibar_brush');
           _chart = nv.models.multiBarWithBrushChart();
-          $(element).data('chart_type', 'multibar_brush');
+          _chart.tooltipContent(function (key, x, y) {
+            return '<h3>' + hueUtils.htmlEncode(key) + '</h3><p>' + y + ' on ' + hueUtils.htmlEncode(x) + '</p>'
+          });
           if (_datum.length > 0 && _datum[0].values.length > 10) {
             _chart.enableSelection();
           }
+
+          if (_isPivot || _hideSelection) {
+            _chart.hideSelection();
+          }
+          else {
+            _chart.xAxis.showMaxMin(false).tickFormat(d3v3.format(",0f"));
+          }
+          _chart.staggerLabels(true);
+          _chart.multibar.hideable(true);
+          _chart.multibar.stacked(typeof options.stacked != "undefined" ? options.stacked : false);
+          _chart.onStateChange(options.onStateChange);
           _chart.onSelectRange(function (from, to) {
             chartsUpdatingState();
             options.onSelectRange(from, to);
           });
-          _chart.staggerLabels(true);
-          _chart.xAxis.tickFormat(d3.time.format("%Y-%m-%d %H:%M:%S"));
-          _chart.multibar.hideable(true);
-          _chart.multibar.stacked(typeof options.stacked != "undefined" ? options.stacked : false);
-          _chart.onStateChange(options.onStateChange);
-          _chart.onChartUpdate(function () {
-            _d3.selectAll("g.nv-x.nv-axis g text").each(function (d){
+        }
+      }
+      if ($(element).width() < 300 && typeof _chart.showLegend != "undefined") {
+        _chart.showLegend(false);
+      }
+      _chart.transitionDuration(0);
+
+      _chart.yAxis
+        .tickFormat(d3v3.format("s"));
+
+      $(element).data("chart", _chart);
+
+      var _d3 = ($(element).find("svg").length > 0) ? d3v3.select($(element).find("svg")[0]) : d3v3.select($(element)[0]).insert("svg",":first-child");
+      _d3.datum(_datum)
+        .transition().duration(150)
+        .each("end", function () {
+          if (options.onComplete != null) {
+            options.onComplete();
+          }
+          if (isTimeline) {
+            _d3.selectAll("g.nv-x.nv-axis g text").each(function (d) {
               insertLinebreaks(d, this);
             });
-          });
-        }
-        else {
-          var _isDiscrete = false;
-          for (var j = 0; j < _datum.length; j++) {
-            for (var i = 0; i < _datum[j].values.length; i++) {
-              if (isNaN(_datum[j].values[i].x * 1)) {
-                _isDiscrete = true;
-                break;
-              }
-            }
           }
-          if (_isDiscrete && !_isPivot) {
-            if ($(element).find("svg").length > 0 && $(element).find(".nv-multiBarWithLegend").length > 0) {
-              $(element).find("svg").empty();
+        }).call(_chart);
+
+      if (_chart.selectBars && options.fqs) {
+        var _field = (typeof options.field == "function") ? options.field() : options.field;
+        $.each(options.fqs(), function (cnt, item) {
+          if (item.id() == options.datum.widget_id) {
+            if (item.field() == _field) {
+              _chart.selectBars($.map(item.filter(), function (it) {
+                return it.value();
+              }));
             }
-            $(element).data('chart_type', 'discrete_bar');
-            _chart = nv.models.growingDiscreteBarChart()
-                .x(function (d) {
-                  return d.x
+            if (Array.isArray(item.field())) {
+              _chart.selectBars({
+                field: item.field(),
+                selected: $.map(item.filter(), function (it) {
+                  return {values: it.value()};
                 })
-                .y(function (d) {
-                  return d.y
-                })
-                .staggerLabels(true)
-                .tooltipContent(function (key, x, y) {
-                  return '<h3>' + key + '</h3><p>' + y + ' on ' + hueUtils.htmlEncode(x) + '</p>'
-                });
+              });
+            }
           }
-          else {
-            if ($(element).find("svg").length > 0 && $(element).find(".nv-discreteBarWithAxes").length > 0) {
-              $(element).find("svg").empty();
-            }
-            $(element).data('chart_type', 'multibar_brush');
-            _chart = nv.models.multiBarWithBrushChart();
-            _chart.tooltipContent(function (key, x, y) {
-              return '<h3>' + hueUtils.htmlEncode(key) + '</h3><p>' + y + ' on ' + hueUtils.htmlEncode(x) + '</p>'
-            });
-            if (_datum.length > 0 && _datum[0].values.length > 10) {
-              _chart.enableSelection();
-            }
+        });
+      }
 
-            if (_isPivot || _hideSelection) {
-              _chart.hideSelection();
-            }
-            else {
-              _chart.xAxis.showMaxMin(false).tickFormat(d3.format(",0f"));
-            }
-            _chart.staggerLabels(true);
-            _chart.multibar.hideable(true);
-            _chart.multibar.stacked(typeof options.stacked != "undefined" ? options.stacked : false);
-            _chart.onStateChange(options.onStateChange);
-            _chart.onSelectRange(function (from, to) {
-              chartsUpdatingState();
-              options.onSelectRange(from, to);
-            });
-          }
-        }
-        if ($(element).width() < 300 && typeof _chart.showLegend != "undefined") {
-          _chart.showLegend(false);
-        }
-        _chart.transitionDuration(0);
-
-        _chart.yAxis
-            .tickFormat(d3.format("s"));
-
-        $(element).data("chart", _chart);
-
-        var _d3 = ($(element).find("svg").length > 0) ? d3.select($(element).find("svg")[0]) : d3.select($(element)[0]).append("svg");
-        _d3.datum(_datum)
-            .transition().duration(150)
-            .each("end", function () {
-              if (options.onComplete != null) {
-                options.onComplete();
-              }
-              if (isTimeline) {
-                _d3.selectAll("g.nv-x.nv-axis g text").each(function (d){
-                  insertLinebreaks(d, this);
-                });
-              }
-            }).call(_chart);
-
-        if (_chart.selectBars) {
-          var _field = (typeof options.field == "function") ? options.field() : options.field;
-          $.each(options.fqs(), function (cnt, item) {
-            if (item.id() == options.datum.widget_id) {
-              if (item.field() == _field) {
-                _chart.selectBars($.map(item.filter(), function (it) {
-                  return it.value();
-                }));
-              }
-              if (Array.isArray(item.field())) {
-                _chart.selectBars({
-                  field: item.field(),
-                  selected: $.map(item.filter(), function (it) {
-                    return { values: it.value() };
-                  })
-                });
-              }
-            }
-          });
-        }
-
+      if (!options.skipWindowResize) {
         var _resizeTimeout = -1;
         nv.utils.windowResize(function () {
           window.clearTimeout(_resizeTimeout);
@@ -1096,28 +1034,37 @@
             _chart.update();
           }, 200);
         });
+      }
 
-        $(element).on("forceUpdate", function () {
-          _chart.update();
-        });
-
-        return _chart;
-      }, function () {
-        var _d3 = ($(element).find("svg").length > 0) ? d3.select($(element).find("svg")[0]) : d3.select($(element)[0]).append("svg");
-        _d3.selectAll(".nv-bar").on("click",
-            function (d, i) {
-              if (typeof options.onClick != "undefined") {
-                chartsUpdatingState();
-                options.onClick(d);
-              }
-            });
+      $(element).on("forceUpdate", function () {
+        _chart.update();
       });
-    }
+
+      return _chart;
+    }, function () {
+      var _d3;
+      if ($(element).find("svg").length > 0) {
+        _d3 = d3v3.select($(element).find("svg")[0]);
+        if ($(element).find("svg").length < 2) {
+          addLegend(element);
+        }
+      } else {
+        _d3 = d3v3.select($(element)[0]).append("svg");
+        addLegend(element);
+      }
+      _d3.selectAll(".nv-bar").on("click",
+        function (d, i) {
+          if (typeof options.onClick != "undefined") {
+            chartsUpdatingState();
+            options.onClick(d);
+          }
+        });
+    });
   }
 
   ko.bindingHandlers.partitionChart = {
     render: function (element, valueAccessor) {
-
+      chartsNormalState();
       var MIN_HEIGHT_FOR_TOOLTIP = 24;
 
       var _options = valueAccessor();
@@ -1125,14 +1072,14 @@
 
       var _w = $(element).width(),
           _h = 300,
-          _x = d3.scale.linear().range([0, _w]),
-          _y = d3.scale.linear().range([0, _h]);
+          _x = d3v3.scale.linear().range([0, _w]),
+          _y = d3v3.scale.linear().range([0, _h]);
 
       if ($(element).find("svg").length > 0) {
         $(element).find("svg").empty();
       }
 
-      var _tip = d3.tip()
+      var _tip = d3v3.tip()
           .attr("class", "d3-tip")
           .html(function (d) {
             if (d.depth == 0) {
@@ -1148,20 +1095,20 @@
           .offset([-12, 0])
 
 
-      var _svg = ($(element).find("svg.tip").length > 0) ? d3.select($(element).find("svg.tip")[0]) : d3.select($(element)[0]).append("svg");
+      var _svg = ($(element).find("svg.tip").length > 0) ? d3v3.select($(element).find("svg.tip")[0]) : d3v3.select($(element)[0]).append("svg");
       _svg.attr("class", "tip")
           .style("height", "0px")
       _svg.call(_tip);
 
 
-      var _vis = ($(element).find("svg").length > 0) ? d3.select($(element).find("svg")[0]) : d3.select($(element)[0]).append("svg");
+      var _vis = ($(element).find("svg").length > 0) ? d3v3.select($(element).find("svg")[0]) : d3v3.select($(element)[0]).append("svg");
       _vis.attr("class", "partitionChart")
           .style("width", _w + "px")
           .style("height", _h + "px")
           .attr("width", _w)
           .attr("height", _h);
 
-      var _partition = d3.layout.partition()
+      var _partition = d3v3.layout.partition()
           .value(function (d) {
             return d.size;
           });
@@ -1178,24 +1125,24 @@
             }
 
             if (this.__data__.parent == undefined) return;
-            d3.select(this).select("rect").classed("mouseover", true)
+            d3v3.select(this).select("rect").classed("mouseover", true)
           })
           .on("mouseout", function (d, i) {
             if (element.querySelectorAll("rect")[i].getBBox().height < MIN_HEIGHT_FOR_TOOLTIP || d.depth == 0) {
               _tip.attr("class", "d3-tip").show(d);
               _tip.hide();
             }
-            d3.select(this).select("rect").classed("mouseover", false)
+            d3v3.select(this).select("rect").classed("mouseover", false)
           });
 
       if (typeof _options.zoomable == "undefined" || _options.zoomable) {
         g.on("click", click)
-            .on("dblclick", function (d, i) {
-              if (typeof _options.onClick != "undefined" && d.depth > 0) {
-                chartsUpdatingState();
-                _options.onClick(d);
-              }
-            });
+          .on("dblclick", function (d, i) {
+            if (typeof _options.onClick != "undefined" && d.depth > 0) {
+              chartsUpdatingState();
+              _options.onClick(d);
+            }
+          });
       }
       else {
         g.on("click", function (d, i) {
@@ -1209,7 +1156,7 @@
       var _kx = _w / _data.dx,
           _ky = _h / 1;
 
-      var _colors = HueColors.scale(HueColors.DARK_BLUE, HueColors.BLUE, 5)
+      var _colors = [HueColors.cuiD3Scale('gray')[0]];
 
       g.append("svg:rect")
           .attr("width", _data.dy * _kx)
@@ -1220,15 +1167,15 @@
             return d.children ? "parent" : "child";
           })
           .attr("stroke", function (d) {
-            return HueColors.DARK_BLUE;
+            return HueColors.cuiD3Scale('gray')[3];
           })
           .attr("fill", function (d, i) {
             var _fill = _colors[d.depth] || _colors[_colors.length - 1];
             if (d.obj && _options.fqs) {
               $.each(_options.fqs(), function (cnt, item) {
                 $.each(item.filter(), function (icnt, filter) {
-                  if (filter.value() == d.obj.fq_values) {
-                    _fill = HueColors.ORANGE;
+                  if (JSON.stringify(filter.value()) == JSON.stringify(d.obj.fq_values)) {
+                    _fill = HueColors.cuiD3Scale('gray')[3];
                   }
                 });
               });
@@ -1251,7 +1198,7 @@
             }
           });
 
-      d3.select(window)
+      d3v3.select(window)
           .on("click", function () {
             click(_data);
           });
@@ -1266,7 +1213,8 @@
         _y.domain([d.x, d.x + d.dx]);
 
         var t = g.transition()
-            .duration(d3.event.altKey ? 7500 : 750)
+            .delay(250)
+            .duration(d3v3.event.altKey ? 7500 : 750)
             .attr("transform", function (d) {
               return "translate(" + _x(d.y) + "," + _y(d.x) + ")";
             });
@@ -1283,11 +1231,15 @@
               return d.dx * _ky > 12 ? 1 : 0;
             });
 
-        d3.event.stopPropagation();
+        d3v3.event.stopPropagation();
       }
 
       function transform(d) {
         return "translate(8," + d.dx * _ky / 2 + ")";
+      }
+
+      if (_options.onComplete) {
+        _options.onComplete();
       }
 
     },
@@ -1300,13 +1252,15 @@
   };
 
   function chartsUpdatingState() {
-    $(document).find("svg").css("opacity", "0.5");
+    $('.nvd3').parents('svg').css('opacity', '0.5');
   }
+
   window.chartsUpdatingState = chartsUpdatingState;
 
   function chartsNormalState() {
-    $(document).find("svg").css("opacity", "1");
+    $('.nvd3').parents('svg').css('opacity', '1');
   }
+
   window.chartsNormalState = chartsNormalState;
 
   var tipBuilder = function () {
@@ -1334,7 +1288,7 @@
       var content = html.apply(this, args),
           poffset = offset.apply(this, args),
           dir = direction.apply(this, args),
-          nodel = d3.select(node), i = 0,
+          nodel = d3v3.select(node), i = 0,
           coords
 
       nodel.html(content)
@@ -1354,7 +1308,7 @@
     //
     // Returns a tip
     tip.hide = function () {
-      nodel = d3.select(node)
+      nodel = d3v3.select(node)
       nodel.style({ opacity: 0, "pointer-events": "none" })
       return tip
     }
@@ -1367,10 +1321,10 @@
     // Returns tip or attribute value
     tip.attr = function (n, v) {
       if (arguments.length < 2 && typeof n === "string") {
-        return d3.select(node).attr(n)
+        return d3v3.select(node).attr(n)
       } else {
         var args = Array.prototype.slice.call(arguments)
-        d3.selection.prototype.attr.apply(d3.select(node), args)
+        d3v3.selection.prototype.attr.apply(d3v3.select(node), args)
       }
 
       return tip
@@ -1384,10 +1338,10 @@
     // Returns tip or style property value
     tip.style = function (n, v) {
       if (arguments.length < 2 && typeof n === "string") {
-        return d3.select(node).style(n)
+        return d3v3.select(node).style(n)
       } else {
         var args = Array.prototype.slice.call(arguments)
-        d3.selection.prototype.style.apply(d3.select(node), args)
+        d3v3.selection.prototype.style.apply(d3v3.select(node), args)
       }
 
       return tip
@@ -1401,7 +1355,7 @@
     // Returns tip or direction
     tip.direction = function (v) {
       if (!arguments.length) return direction
-      direction = v == null ? v : d3.functor(v)
+      direction = v == null ? v : d3v3.functor(v)
 
       return tip
     }
@@ -1413,7 +1367,7 @@
     // Returns offset or
     tip.offset = function (v) {
       if (!arguments.length) return offset
-      offset = v == null ? v : d3.functor(v)
+      offset = v == null ? v : d3v3.functor(v)
 
       return tip
     }
@@ -1425,7 +1379,7 @@
     // Returns html value or tip
     tip.html = function (v) {
       if (!arguments.length) return html
-      html = v == null ? v : d3.functor(v)
+      html = v == null ? v : d3v3.functor(v)
 
       return tip
     }
@@ -1442,7 +1396,7 @@
       return " "
     }
 
-    var direction_callbacks = d3.map({
+    var direction_callbacks = d3v3.map({
           n: direction_n,
           s: direction_s,
           e: direction_e,
@@ -1520,9 +1474,12 @@
     }
 
     function initNode() {
-      var node = d3.select(document.createElement("div"))
+      var node = d3v3.select(document.createElement("div"))
       node.style({
         position: "absolute",
+        background: HueColors.cuiD3Scale()[0],
+        padding: "4px",
+        color: HueColors.WHITE,
         opacity: 0,
         pointerEvents: "none",
         boxSizing: "border-box"
@@ -1555,7 +1512,7 @@
     //
     // Returns an Object {n, s, e, w, nw, sw, ne, se}
     function getScreenBBox() {
-      var targetel = target || d3.event.target,
+      var targetel = target || d3v3.event.target,
           bbox = {},
           matrix = targetel.getScreenCTM(),
           tbbox = targetel.getBBox(),
@@ -1592,8 +1549,8 @@
     return tip
   };
 
-  if (typeof d3 !== 'undefined') {
-    d3.tip = tipBuilder;
+  if (typeof d3v3 !== 'undefined') {
+    d3v3.tip = tipBuilder;
   }
 
-}));
+})();
